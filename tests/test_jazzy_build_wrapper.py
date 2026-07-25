@@ -22,24 +22,25 @@ def _environment(tmp_path: Path, distro: str) -> tuple[dict[str, str], Path]:
     return env, calls
 
 
-def test_build_wrapper_rejects_non_humble_without_calling_colcon(tmp_path):
-    env, calls = _environment(tmp_path, "jazzy")
+def test_build_wrapper_rejects_non_jazzy_without_calling_colcon(tmp_path):
+    env, calls = _environment(tmp_path, "humble")
     result = subprocess.run(
         [str(SCRIPT)], env=env, text=True, capture_output=True
     )
 
     assert result.returncode == 2
-    assert "ROS 2 Humble" in result.stderr
+    assert "ROS 2 Jazzy" in result.stderr
     assert not calls.exists()
 
 
 def test_build_wrapper_uses_branch_local_products(tmp_path):
-    env, calls = _environment(tmp_path, "humble")
+    env, calls = _environment(tmp_path, "jazzy")
     subprocess.run([str(SCRIPT)], env=env, check=True)
     arguments = calls.read_text().splitlines()
     workspace = ROOT / "ros_ws"
 
-    assert arguments[:2] == ["build", "--base-paths"]
+    assert arguments[:3] == ["--log-base", str(workspace / "log"), "build"]
+    assert arguments[3] == "--base-paths"
     assert str(workspace / "src") in arguments
     assert str(workspace / "build") in arguments
     assert str(workspace / "install") in arguments

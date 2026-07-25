@@ -54,6 +54,38 @@ ros:
         load_profile(profile)
 
 
+def test_profile_resolves_hdgp_manifest_from_workspace_ancestor(tmp_path):
+    workspace = tmp_path / "workspace"
+    profile_dir = workspace / "robot_control/.worktrees/jazzy/src/robot_control/profiles"
+    manifest = workspace / "hdgp/assets/robot/example/manifest.yaml"
+    profile_dir.mkdir(parents=True)
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("control_joint_order: [j1]\n")
+
+    import hashlib
+
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    profile = profile_dir / "profile.yaml"
+    profile.write_text(
+        f"""
+name: worktree
+components: [openarm]
+asset:
+  id: example
+  manifest: ../../../../hdgp/assets/robot/example/manifest.yaml
+  manifest_sha256: {digest}
+joints:
+  - {{canonical: j1, source: j1, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+groups:
+  arm: {{joints: [j1]}}
+ros:
+  jazzy: {{command_topic: /cmd, state_topic: /state, controller: c, command_rate_hz: 100}}
+"""
+    )
+
+    assert load_profile(profile).manifest_path == manifest
+
+
 def test_profile_rejects_unknown_or_duplicate_group_coverage(tmp_path):
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text("control_joint_order: [j1, j2]\n")

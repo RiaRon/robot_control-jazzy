@@ -1,7 +1,7 @@
 name: delto_m_ros2
 repository: https://github.com/tesollodelto/delto_m_ros2.git
-branch: humble
-commit: a68335919ee490d5293581574acc7aff12fe969d
+branch: jazzy-dev
+commit: 3926c2eab8d011046f64874d6252213b2cf18f48
 imported_at: 2026-07-25
 license: BSD-3-Clause
 excluded:

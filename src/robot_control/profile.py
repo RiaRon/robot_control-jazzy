@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -61,13 +62,36 @@ def _mapping(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
+def _resolve_manifest(profile_path: Path, value: str) -> Path:
+    configured = Path(value)
+    if configured.is_absolute():
+        return configured
+
+    direct = (profile_path.parent / configured).resolve()
+    if direct.is_file():
+        return direct
+
+    parts = configured.parts
+    if "hdgp" not in parts:
+        return direct
+    hdgp_relative = Path(*parts[parts.index("hdgp") + 1 :])
+
+    explicit_root = os.environ.get("HDGP_ROOT")
+    if explicit_root:
+        return (Path(explicit_root).expanduser() / hdgp_relative).resolve()
+
+    for ancestor in profile_path.parents:
+        candidate = ancestor / "hdgp" / hdgp_relative
+        if candidate.is_file():
+            return candidate.resolve()
+    return direct
+
+
 def load_profile(path: str | Path) -> RobotProfile:
     path = Path(path).resolve()
     raw = _mapping(yaml.safe_load(path.read_text()), "profile")
     asset = _mapping(raw.get("asset"), "asset")
-    manifest = Path(str(asset["manifest"]))
-    if not manifest.is_absolute():
-        manifest = (path.parent / manifest).resolve()
+    manifest = _resolve_manifest(path, str(asset["manifest"]))
     if not manifest.is_file():
         raise ProfileError(f"asset manifest not found: {manifest}")
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()

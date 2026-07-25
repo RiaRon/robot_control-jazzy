@@ -38,9 +38,9 @@ namespace openarm_hardware {
  * following the pattern from full_arm.cpp example. Much simpler than
  * the original implementation.
  */
-class OpenArmHW : public hardware_interface::SystemInterface {
+class OpenArm_v10HW : public hardware_interface::SystemInterface {
  public:
-  OpenArmHW();
+  OpenArm_v10HW();
 
   TEMPLATES__ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_init(
@@ -100,24 +100,22 @@ class OpenArmHW : public hardware_interface::SystemInterface {
   const uint32_t DEFAULT_GRIPPER_SEND_CAN_ID = 0x08;
   const uint32_t DEFAULT_GRIPPER_RECV_CAN_ID = 0x18;
 
-  // Gains
-  std::vector<double> kp_ = {70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0};
-  std::vector<double> kd_ = {2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5};
+  // Default gains
+  const std::vector<double> DEFAULT_KP = {20.0, 20.0, 20.0, 20.0,
+                                          5.0,  5.0,  5.0,  0.5};
+  const std::vector<double> DEFAULT_KD = {2.75, 2.5, 0.7, 0.4,
+                                          0.7,  0.6, 0.5, 0.1};
 
   const double GRIPPER_JOINT_0_POSITION = 0.044;
   const double GRIPPER_JOINT_1_POSITION = 0.0;
   const double GRIPPER_MOTOR_0_RADIANS = 0.0;
   const double GRIPPER_MOTOR_1_RADIANS = -1.0472;
-  const double GRIPPER_KP = 5.0;
-  const double GRIPPER_KD = 0.1;
-
-  double gripper_kp_ = GRIPPER_KP;
-  double gripper_kd_ = GRIPPER_KD;
+  const double GRIPPER_DEFAULT_KP = 5.0;
+  const double GRIPPER_DEFAULT_KD = 0.1;
 
   // Configuration
   std::string can_interface_;
   std::string arm_prefix_;
-  std::string ee_type_;
   bool hand_;
   bool can_fd_;
 
@@ -134,16 +132,6 @@ class OpenArmHW : public hardware_interface::SystemInterface {
   std::vector<double> pos_states_;
   std::vector<double> vel_states_;
   std::vector<double> tau_states_;
-
-  static constexpr std::array<double, ARM_DOF> ZERO_POSITION = {
-      0.0,  // joint1
-      0.0,  // joint2
-      0.0,  // joint3
-      0.0,  // joint4
-      0.0,  // joint5
-      0.0,  // joint6
-      0.0,  // joint7
-  };
 
   // Helper methods
   void return_to_zero();

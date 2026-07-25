@@ -4,9 +4,9 @@ This directory owns canonical lower-level robot contracts and the Real2Sim
 artifact pipeline. `sim2real` remains responsible for policy execution and
 task orchestration; `hdgp` remains responsible for robot assets and RL.
 
-This Git branch targets Ubuntu 22.04 and ROS 2 Humble only. It contains
-validated OpenArm and Tesollo Humble driver snapshots directly under
-`ros_ws/src`. Jazzy is maintained on a separate long-lived branch; do not
+This Git branch targets Ubuntu 24.04 and ROS 2 Jazzy only. It contains
+validated OpenArm and Tesollo Jazzy driver snapshots directly under
+`ros_ws/src`. Humble is maintained on a separate long-lived branch; do not
 merge the two distribution branches wholesale.
 
 The first complete profile is `openarm_tesollo`. RH56F1 and the simple gripper
@@ -23,13 +23,13 @@ robotctl r2s collect --dry-run
 Install ROS dependencies and build the imported drivers with:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 rosdep install --from-paths ros_ws/src --ignore-src -r -y
 ./ros_ws/build.sh
 source ros_ws/install/setup.bash
 ```
 
-The wrapper rejects non-Humble environments and keeps all generated products
+The wrapper rejects non-Jazzy environments and keeps all generated products
 inside `ros_ws/{build,install,log}`.
 
 No command is published unless `--execute` is explicit. A ROS adapter must

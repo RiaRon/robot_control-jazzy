@@ -1,7 +1,7 @@
 name: openarm_ros2
 repository: https://github.com/enactic/openarm_ros2.git
-branch: main
-commit: 4e837e1d0dae692ff67b560b69d8d281d7a8d4ed
+branch: jazzy
+commit: 8087bbc2b37c0b2b2652c0134a9b2b369c57567e
 imported_at: 2026-07-25
 license: Apache-2.0
 excluded:

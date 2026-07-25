@@ -21,8 +21,10 @@ def test_metadata_pins_validated_commits():
     description = yaml.safe_load(
         (ROOT / "vendor_metadata/openarm_description/UPSTREAM.yaml").read_text()
     )
-    assert openarm["commit"] == "4e837e1d0dae692ff67b560b69d8d281d7a8d4ed"
-    assert tesollo["commit"] == "a68335919ee490d5293581574acc7aff12fe969d"
+    assert openarm["branch"] == "jazzy"
+    assert openarm["commit"] == "8087bbc2b37c0b2b2652c0134a9b2b369c57567e"
+    assert tesollo["branch"] == "jazzy-dev"
+    assert tesollo["commit"] == "3926c2eab8d011046f64874d6252213b2cf18f48"
     assert openarm_can["commit"] == "c32ecd31da267967f0c913c2118c843177d88b91"
     assert description["commit"] == "c8696ebfd64ea08ee0a212a9bae21055b6f381bc"
     assert description["source_subpath"] == "src/openarm_description"

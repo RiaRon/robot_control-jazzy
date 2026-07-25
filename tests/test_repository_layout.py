@@ -4,9 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-def test_branch_declares_humble_only():
-    assert (ROOT / ".rosdistro").read_text().strip() == "humble"
-    assert not (ROOT / "ros_ws/jazzy").exists()
+def test_branch_declares_jazzy_only():
+    assert (ROOT / ".rosdistro").read_text().strip() == "jazzy"
+    assert not (ROOT / "ros_ws/humble").exists()
 
 
 def test_generated_products_are_ignored():
