@@ -13,6 +13,10 @@
 - Source branch is the long-lived `humble` branch.
 - OpenArm source revision is `4e837e1d0dae692ff67b560b69d8d281d7a8d4ed`.
 - Tesollo source revision is `a68335919ee490d5293581574acc7aff12fe969d`.
+- OpenArm CAN source revision is `c32ecd31da267967f0c913c2118c843177d88b91`.
+- OpenArm description comes from clean repository
+  `teleopration_openarm_tesollo@c8696ebfd64ea08ee0a212a9bae21055b6f381bc`
+  at subpath `src/openarm_description`.
 - Preserve upstream license files and copyright headers.
 - Do not modify or delete the source repositories under `../repo`.
 - Do not issue real-hardware commands.
@@ -84,6 +88,8 @@ git commit -m "chore: establish Humble branch layout"
 **Files:**
 - Create: `vendor_metadata/openarm/UPSTREAM.yaml`
 - Create: `vendor_metadata/tesollo/UPSTREAM.yaml`
+- Create: `vendor_metadata/openarm_can/UPSTREAM.yaml`
+- Create: `vendor_metadata/openarm_description/UPSTREAM.yaml`
 - Create: `tools/verify_vendor_snapshot.py`
 - Create: `tests/test_vendor_snapshot.py`
 
@@ -153,6 +159,8 @@ git commit -m "feat: add vendor snapshot provenance verification"
 **Files:**
 - Create: `ros_ws/src/openarm_ros2/**`
 - Create: `ros_ws/src/delto_m_ros2/**`
+- Create: `ros_ws/src/openarm_can/**`
+- Create: `ros_ws/src/openarm_description/**`
 
 **Interfaces:**
 - Consumes: provenance exclusion patterns from Task 2

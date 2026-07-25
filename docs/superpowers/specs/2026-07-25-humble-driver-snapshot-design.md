@@ -12,6 +12,11 @@ references. Jazzy will be maintained later on a separate long-lived branch.
   at `4e837e1d0dae692ff67b560b69d8d281d7a8d4ed`
 - Tesollo: `https://github.com/tesollodelto/delto_m_ros2.git`
   Humble branch at `a68335919ee490d5293581574acc7aff12fe969d`
+- OpenArm CAN: `https://github.com/enactic/openarm_can.git`
+  at `c32ecd31da267967f0c913c2118c843177d88b91`
+- OpenArm description: `teleopration_openarm_tesollo` workspace repository
+  at `c8696ebfd64ea08ee0a212a9bae21055b6f381bc`, source subpath
+  `src/openarm_description`
 
 The imported trees exclude source-repository Git metadata, upstream CI
 configuration, caches, and build products. Source licenses and copyright
@@ -36,6 +41,8 @@ robot_control/
 ├── ros_ws/
 │   ├── src/
 │   │   ├── openarm_ros2/
+│   │   ├── openarm_can/
+│   │   ├── openarm_description/
 │   │   └── delto_m_ros2/
 │   ├── build.sh
 │   └── README.md
@@ -43,6 +50,8 @@ robot_control/
 ├── tests/
 └── vendor_metadata/
     ├── openarm/UPSTREAM.md
+    ├── openarm_can/UPSTREAM.md
+    ├── openarm_description/UPSTREAM.md
     └── tesollo/UPSTREAM.md
 ```
 

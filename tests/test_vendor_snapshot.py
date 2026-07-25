@@ -15,8 +15,17 @@ def test_metadata_pins_validated_commits():
     tesollo = yaml.safe_load(
         (ROOT / "vendor_metadata/tesollo/UPSTREAM.yaml").read_text()
     )
+    openarm_can = yaml.safe_load(
+        (ROOT / "vendor_metadata/openarm_can/UPSTREAM.yaml").read_text()
+    )
+    description = yaml.safe_load(
+        (ROOT / "vendor_metadata/openarm_description/UPSTREAM.yaml").read_text()
+    )
     assert openarm["commit"] == "4e837e1d0dae692ff67b560b69d8d281d7a8d4ed"
     assert tesollo["commit"] == "a68335919ee490d5293581574acc7aff12fe969d"
+    assert openarm_can["commit"] == "c32ecd31da267967f0c913c2118c843177d88b91"
+    assert description["commit"] == "c8696ebfd64ea08ee0a212a9bae21055b6f381bc"
+    assert description["source_subpath"] == "src/openarm_description"
 
 
 def test_snapshot_verifier_detects_changed_file(tmp_path):

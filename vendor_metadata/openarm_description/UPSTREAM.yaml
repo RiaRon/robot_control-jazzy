@@ -1,0 +1,18 @@
+name: openarm_description
+repository: https://github.com/divingyoon/teleopration_openarm_tesollo.git
+branch: main
+commit: c8696ebfd64ea08ee0a212a9bae21055b6f381bc
+source_subpath: src/openarm_description
+imported_at: 2026-07-25
+license: Apache-2.0
+excluded:
+  - .git/**
+  - .github/**
+  - build/**
+  - install/**
+  - log/**
+  - __pycache__/**
+  - .pytest_cache/**
+  - "*.pyc"
+  - "*.pyo"
+local_modifications: []

@@ -1,0 +1,17 @@
+name: openarm_can
+repository: https://github.com/enactic/openarm_can.git
+branch: main
+commit: c32ecd31da267967f0c913c2118c843177d88b91
+imported_at: 2026-07-25
+license: Apache-2.0
+excluded:
+  - .git/**
+  - .github/**
+  - build/**
+  - install/**
+  - log/**
+  - __pycache__/**
+  - .pytest_cache/**
+  - "*.pyc"
+  - "*.pyo"
+local_modifications: []

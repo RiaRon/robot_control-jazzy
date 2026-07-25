@@ -1,0 +1,58 @@
+# Tesollo DG5F right hand inertial properties.
+# Total mass is the sum of all 28 links in dg5f_right.urdf (1.685 kg).
+# CoM is the mass-weighted centroid of all link CoMs relative to the mount frame.
+# Inertia is approximated as a rectangular solid (~100mm x 80mm x 150mm).
+
+hand:
+  origin:
+    x: -0.0015
+    y:  0.0007
+    z:  0.0270
+    roll: 0
+    pitch: 0
+    yaw: 0
+  mass: 1.685
+  inertia:
+    xx: 0.00406
+    yy: 0.00456
+    zz: 0.00230
+    xy: 0.0
+    xz: 0.0
+    yz: 0.0
+
+# The two prismatic finger links below exist in the URDF structure but have
+# no physical counterpart on the Tesollo hand.  Give them near-zero mass so
+# they do not affect dynamics while still satisfying the URDF parser.
+left_finger:
+  origin:
+    x: 0.0064528
+    y: 0.017020
+    z: 0.0219685
+    roll: 0
+    pitch: 0
+    yaw: 0
+  mass: 0.001
+  inertia:
+    xx: 1.0e-07
+    yy: 1.0e-07
+    zz: 1.0e-07
+    xy: 0.0
+    xz: 0.0
+    yz: 0.0
+
+right_finger:
+  origin:
+    x: 0.0064528
+    y: -0.017020
+    z: 0.0219685
+    roll: 0
+    pitch: 0
+    yaw: 0
+  mass: 0.001
+  inertia:
+    xx: 1.0e-07
+    yy: 1.0e-07
+    zz: 1.0e-07
+    xy: 0.0
+    xz: 0.0
+    yz: 0.0
