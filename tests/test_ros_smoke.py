@@ -1,7 +1,10 @@
 import math
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -37,6 +40,7 @@ SMOKE_SCRIPTS = (
     ROOT / "ros_ws/smoke_dg5f_fake.sh",
     ROOT / "ros_ws/smoke_dg5f_gazebo.sh",
 )
+SMOKE_HARNESS = ROOT / "ros_ws/smoke_harness.sh"
 
 
 def test_wait_for_returns_after_predicate_succeeds():
@@ -179,3 +183,112 @@ def test_smoke_script_rejects_non_jazzy_before_starting_ros(script):
 
     assert result.returncode == 2
     assert "ROS 2 Jazzy" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("sent_signal", "expected_returncode"),
+    [
+        (signal.SIGINT, 130),
+        (signal.SIGTERM, 143),
+        (signal.SIGHUP, 129),
+    ],
+)
+def test_signal_promptly_terminates_validator_and_launch_process_groups(
+    tmp_path,
+    sent_signal,
+    expected_returncode,
+):
+    workspace = tmp_path / "ros_ws"
+    workspace.mkdir()
+    (workspace / "install").mkdir()
+    (workspace / "install/setup.bash").write_text("")
+    shutil.copy2(ROOT / "ros_ws/smoke_openarm_fake.sh", workspace)
+    shutil.copy2(SMOKE_HARNESS, workspace)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    process_script = (
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'kind="${1:-unknown}"\n'
+        'pid_file_var="${kind^^}_PID_FILE"\n'
+        'stopped_file_var="${kind^^}_STOPPED_FILE"\n'
+        'pid_file="${!pid_file_var}"\n'
+        'stopped_file="${!stopped_file_var}"\n'
+        'printf "%s\\n" "$$" > "$pid_file"\n'
+        'trap \'printf "stopped\\n" > "$stopped_file"; exit 0\' TERM INT HUP\n'
+        "while true; do sleep 0.1; done\n"
+    )
+    fake_process = fake_bin / "fake-process"
+    fake_process.write_text(process_script)
+    fake_process.chmod(0o755)
+
+    fake_ros2 = fake_bin / "ros2"
+    fake_ros2.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec {fake_process} launch\n"
+    )
+    fake_ros2.chmod(0o755)
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec {fake_process} validator\n"
+    )
+    fake_python.chmod(0o755)
+
+    launch_pid_file = tmp_path / "launch.pid"
+    validator_pid_file = tmp_path / "validator.pid"
+    launch_stopped = tmp_path / "launch.stopped"
+    validator_stopped = tmp_path / "validator.stopped"
+    environment = dict(
+        os.environ,
+        ROS_DISTRO="jazzy",
+        PATH=f"{fake_bin}:{os.environ['PATH']}",
+        LAUNCH_PID_FILE=str(launch_pid_file),
+        VALIDATOR_PID_FILE=str(validator_pid_file),
+        LAUNCH_STOPPED_FILE=str(launch_stopped),
+        VALIDATOR_STOPPED_FILE=str(validator_stopped),
+    )
+    process = subprocess.Popen(
+        ["bash", str(workspace / "smoke_openarm_fake.sh")],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def wait_until(predicate, timeout_s=2.0):
+        deadline = time.monotonic() + timeout_s
+        while not predicate():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("synthetic smoke process did not reach state")
+            time.sleep(0.01)
+
+    child_pids = []
+    try:
+        wait_until(lambda: launch_pid_file.exists() and validator_pid_file.exists())
+        child_pids = [
+            int(launch_pid_file.read_text()),
+            int(validator_pid_file.read_text()),
+        ]
+
+        signaled_at = time.monotonic()
+        process.send_signal(sent_signal)
+        returncode = process.wait(timeout=2)
+        elapsed = time.monotonic() - signaled_at
+
+        wait_until(lambda: launch_stopped.exists() and validator_stopped.exists())
+        assert returncode == expected_returncode
+        assert elapsed < 2
+        for child_pid in child_pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(child_pid, 0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        for child_pid in child_pids:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
