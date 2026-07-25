@@ -115,3 +115,32 @@ def test_all_dg5f_launches_forward_use_fake_hardware_to_xacro():
         assert '"use_fake_hardware",\n            default_value="false"' in text
         assert 'LaunchConfiguration("use_fake_hardware")' in text
         assert '"use_fake_hardware:="' in text
+
+
+def test_all_dg5f_launches_isolate_fake_control_from_gazebo():
+    """Fails if fake mode can start Gazebo or omit its standalone control node."""
+    for launch_file in LAUNCH_FILES:
+        text = launch_file.read_text()
+        assert "OnProcessStart" in text
+        assert "condition=IfCondition(use_fake_hardware)" in text
+        assert text.count("condition=UnlessCondition(use_fake_hardware)") >= 2
+        assert "target_action=control_node" in text
+        assert '"--controller-manager-timeout", "30"' in text
+
+
+def test_all_dg5f_launches_make_gui_false_headless():
+    """Fails if the gui argument stops selecting Gazebo server-only mode."""
+    for launch_file in LAUNCH_FILES:
+        text = launch_file.read_text()
+        assert "PythonExpression" in text
+        assert '" -s -r empty.sdf -v 0"' in text
+        assert '" -r empty.sdf -v 0"' in text
+
+
+def test_all_dg5f_launches_register_handlers_before_target_actions():
+    """Fails if a fast target process can emit before its handler is registered."""
+    for launch_file in LAUNCH_FILES:
+        nodes = launch_file.read_text().split("    nodes = [", 1)[1]
+        first_handler = nodes.index("RegisterEventHandler(")
+        assert first_handler < nodes.index("\n        control_node,")
+        assert first_handler < nodes.index("\n        gz_spawn_entity,")

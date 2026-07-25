@@ -29,10 +29,16 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, ExecuteProcess
-from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
+from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit, OnProcessStart
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration
+from launch.substitutions import (
+    Command,
+    FindExecutable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
@@ -46,7 +52,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "gui",
             default_value="true",
-            description="Start RViz2 automatically with this launch file.",
+            description="Start the Gazebo graphical client.",
         )
     )
     declared_arguments.append(
@@ -75,15 +81,19 @@ def generate_launch_description():
     else:
         os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
 
-    # Gazebo
+    gazebo_arguments = PythonExpression(
+        [
+            '" -r empty.sdf -v 0" if "',
+            gui,
+            '" == "true" else " -s -r empty.sdf -v 0"',
+        ]
+    )
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]
         ),
-        # launch_arguments={"gz_args": " -r  empty.sdf"}.items(),
-        launch_arguments={
-            "gz_args": " -r empty.sdf -v 0"
-        }.items(),
+        launch_arguments={"gz_args": gazebo_arguments}.items(),
+        condition=UnlessCondition(use_fake_hardware),
     )
 
     gazebo_gui_setting = ExecuteProcess(
@@ -128,6 +138,7 @@ def generate_launch_description():
         #     ("~/robot_description", "/robot_description"),
         # ],
         output="screen",
+        condition=IfCondition(use_fake_hardware),
     )
 
     # Robot State Publisher
@@ -158,47 +169,79 @@ def generate_launch_description():
             "-y", "0.0",
             "-z", "0.0",
         ],
+        condition=UnlessCondition(use_fake_hardware),
     )
 
-    # Delay start of robot controllers after spawn
-    joint_state_broadcaster_spawner = Node(
+    fake_joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout", "30",
+        ],
         output="screen",
     )
 
-    joint_trajectory_controller_spawner = Node(
+    fake_joint_trajectory_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_trajectory_controller",
-                   '--param-file',
-                   robot_controllers,
-                   ],
+        arguments=[
+            "joint_trajectory_controller",
+            "--param-file", robot_controllers,
+            "--controller-manager-timeout", "30",
+        ],
+    )
+
+    gazebo_joint_state_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout", "30",
+        ],
+        output="screen",
+    )
+
+    gazebo_joint_trajectory_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_trajectory_controller",
+            "--param-file", robot_controllers,
+            "--controller-manager-timeout", "30",
+        ],
     )
 
     nodes = [
-        gz_spawn_entity,
-
-        node_robot_state_other_publisher,
-        gazebo,
-        # gazebo_gui_setting,
+        RegisterEventHandler(
+            event_handler=OnProcessStart(
+                target_action=control_node,
+                on_start=[fake_joint_state_broadcaster_spawner],
+            )
+        ),
+        RegisterEventHandler(
+            event_handler=OnProcessExit(
+                target_action=fake_joint_state_broadcaster_spawner,
+                on_exit=[fake_joint_trajectory_controller_spawner],
+            )
+        ),
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=gz_spawn_entity,
-                on_exit=[joint_state_broadcaster_spawner],
+                on_exit=[gazebo_joint_state_broadcaster_spawner],
             )
         ),
         RegisterEventHandler(
             event_handler=OnProcessExit(
-                target_action=joint_state_broadcaster_spawner,
-                on_exit=[joint_trajectory_controller_spawner],
+                target_action=gazebo_joint_state_broadcaster_spawner,
+                on_exit=[gazebo_joint_trajectory_controller_spawner],
             )
         ),
+        node_robot_state_other_publisher,
         node_robot_state_publisher,
-        # control_node,
-
-
+        control_node,
+        gazebo,
+        gz_spawn_entity,
     ]
 
     return LaunchDescription(declared_arguments + nodes)
