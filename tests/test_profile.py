@@ -1,0 +1,81 @@
+from pathlib import Path
+
+import pytest
+
+from robot_control.profile import ProfileError, load_profile
+
+
+PROFILE = Path(__file__).parents[1] / "src/robot_control/profiles/openarm_tesollo.yaml"
+
+
+def test_openarm_tesollo_profile_has_complete_canonical_contract():
+    profile = load_profile(PROFILE)
+
+    assert profile.name == "openarm_tesollo"
+    assert profile.ros["humble"].command_rate_hz == 100
+    assert profile.ros["jazzy"].command_rate_hz == 100
+    assert len(profile.joints) == 35
+    assert set(profile.groups) == {
+        "openarm_right_arm",
+        "openarm_left_arm",
+        "openarm_left_gripper",
+        "tesollo_abduction",
+        "tesollo_curl",
+        "tesollo_pip",
+        "tesollo_dip",
+    }
+    assert set().union(*(set(group.joints) for group in profile.groups.values())) == set(
+        profile.joint_names
+    )
+
+
+def test_profile_rejects_manifest_hash_mismatch(tmp_path):
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("control_joint_order: [r_aj_1]\n")
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        """
+name: bad
+components: [openarm]
+asset:
+  id: asset
+  manifest: manifest.yaml
+  manifest_sha256: deadbeef
+joints:
+  - {canonical: r_aj_1, source: joint1, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}
+groups:
+  arm: {joints: [r_aj_1]}
+ros:
+  humble: {command_topic: /cmd, state_topic: /state, controller: c, command_rate_hz: 100}
+"""
+    )
+
+    with pytest.raises(ProfileError, match="manifest hash mismatch"):
+        load_profile(profile)
+
+
+def test_profile_rejects_unknown_or_duplicate_group_coverage(tmp_path):
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("control_joint_order: [j1, j2]\n")
+    import hashlib
+
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        f"""
+name: bad
+components: [openarm]
+asset: {{id: asset, manifest: manifest.yaml, manifest_sha256: {digest}}}
+joints:
+  - {{canonical: j1, source: a, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+  - {{canonical: j2, source: b, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+groups:
+  one: {{joints: [j1, j2]}}
+  two: {{joints: [j2]}}
+ros:
+  jazzy: {{command_topic: /cmd, state_topic: /state, controller: c, command_rate_hz: 100}}
+"""
+    )
+
+    with pytest.raises(ProfileError, match="exactly one actuator group"):
+        load_profile(profile)

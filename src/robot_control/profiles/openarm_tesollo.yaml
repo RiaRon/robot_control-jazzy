@@ -1,0 +1,68 @@
+name: openarm_tesollo
+components: [openarm, tesollo]
+asset:
+  id: openarm_tesollo_sensor_rl
+  manifest: ../../../../hdgp/assets/robot/openarm_tesollo_sensor_rl/openarm_tesollo_sensor_rl_manifest.yaml
+  manifest_sha256: b89a946e12a0efeb21bfed0b95dbfcf923e6a97f5b06462b08e42acd1bc34c46
+ros:
+  humble:
+    command_topic: /robot_control/openarm_tesollo/command
+    state_topic: /robot_control/openarm_tesollo/state
+    controller: openarm_tesollo_canonical_controller
+    command_rate_hz: 100
+  jazzy:
+    command_topic: /robot_control/openarm_tesollo/command
+    state_topic: /robot_control/openarm_tesollo/state
+    controller: openarm_tesollo_canonical_controller
+    command_rate_hz: 100
+groups:
+  openarm_right_arm:
+    joints: [r_aj_1, r_aj_2, r_aj_3, r_aj_4, r_aj_5, r_aj_6, r_aj_7]
+  openarm_left_arm:
+    joints: [l_aj_1, l_aj_2, l_aj_3, l_aj_4, l_aj_5, l_aj_6, l_aj_7]
+  openarm_left_gripper:
+    joints: [l_hj_gripper_1]
+  tesollo_abduction:
+    joints: [r_hj_thumb_1, r_hj_index_1, r_hj_middle_1, r_hj_ring_1, r_hj_pinky_1]
+  tesollo_curl:
+    joints: [r_hj_thumb_2, r_hj_index_2, r_hj_middle_2, r_hj_ring_2, r_hj_pinky_2]
+  tesollo_pip:
+    joints: [r_hj_thumb_3, r_hj_index_3, r_hj_middle_3, r_hj_ring_3, r_hj_pinky_3]
+  tesollo_dip:
+    joints: [r_hj_thumb_4, r_hj_index_4, r_hj_middle_4, r_hj_ring_4, r_hj_pinky_4]
+joints:
+  - {canonical: r_aj_1, source: openarm_right_joint1, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
+  - {canonical: r_aj_2, source: openarm_right_joint2, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
+  - {canonical: r_aj_3, source: openarm_right_joint3, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
+  - {canonical: r_aj_4, source: openarm_right_joint4, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
+  - {canonical: r_aj_5, source: openarm_right_joint5, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
+  - {canonical: r_aj_6, source: openarm_right_joint6, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 20}
+  - {canonical: r_aj_7, source: openarm_right_joint7, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
+  - {canonical: l_aj_1, source: openarm_left_joint1, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
+  - {canonical: l_aj_2, source: openarm_left_joint2, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
+  - {canonical: l_aj_3, source: openarm_left_joint3, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
+  - {canonical: l_aj_4, source: openarm_left_joint4, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
+  - {canonical: l_aj_5, source: openarm_left_joint5, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
+  - {canonical: l_aj_6, source: openarm_left_joint6, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 20}
+  - {canonical: l_aj_7, source: openarm_left_joint7, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
+  - {canonical: l_hj_gripper_1, source: openarm_left_finger_joint1, sign: 1, unit: rad, lower: 0.0, upper: 0.04, velocity: 0.2, effort: 20}
+  - {canonical: r_hj_thumb_1, source: rj_dg_1_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_thumb_2, source: rj_dg_1_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_thumb_3, source: rj_dg_1_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_thumb_4, source: rj_dg_1_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_index_1, source: rj_dg_2_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_index_2, source: rj_dg_2_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_index_3, source: rj_dg_2_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_index_4, source: rj_dg_2_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_middle_1, source: rj_dg_3_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_middle_2, source: rj_dg_3_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_middle_3, source: rj_dg_3_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_middle_4, source: rj_dg_3_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_ring_1, source: rj_dg_4_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_ring_2, source: rj_dg_4_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_ring_3, source: rj_dg_4_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_ring_4, source: rj_dg_4_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_pinky_1, source: rj_dg_5_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_pinky_2, source: rj_dg_5_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_pinky_3, source: rj_dg_5_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  - {canonical: r_hj_pinky_4, source: rj_dg_5_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}

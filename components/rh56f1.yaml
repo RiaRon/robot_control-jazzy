@@ -1,0 +1,5 @@
+name: rh56f1
+status: static_contract_only
+command: {interface: position, unit: rad}
+state: {position: rad, velocity: rad/s, effort: N*m}
+safety: {watchdog_sec: 0.25, error_action: hold_last_safe_pose, estop: required}
