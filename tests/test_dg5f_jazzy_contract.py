@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -98,6 +99,22 @@ def test_dg5f_package_declares_single_gz_ros2_control_dependency():
     assert package_dependencies.count("gz_ros2_control") == 1
 
 
+def test_dg5f_package_declares_description_runtime_dependency():
+    """Fails if the xacro's local description package leaves the build graph."""
+    package = ET.parse(DG5F / "package.xml").getroot()
+    package_dependencies = [dependency.text for dependency in package.findall("depend")]
+
+    assert package_dependencies.count("dg_description") == 1
+
+
+def test_dg5f_package_declares_trajectory_build_dependency():
+    """Fails if a CMake-required message package leaves the build graph."""
+    package = ET.parse(DG5F / "package.xml").getroot()
+    package_dependencies = [dependency.text for dependency in package.findall("depend")]
+
+    assert package_dependencies.count("trajectory_msgs") == 1
+
+
 def test_dg5f_sources_exclude_legacy_ignition_identifiers():
     """Fails if DG5F simulation sources return to an unsupported Ignition API."""
     sources = [DG5F / "package.xml", *XACROS, *LAUNCH_FILES]
@@ -144,3 +161,23 @@ def test_all_dg5f_launches_register_handlers_before_target_actions():
         first_handler = nodes.index("RegisterEventHandler(")
         assert first_handler < nodes.index("\n        control_node,")
         assert first_handler < nodes.index("\n        gz_spawn_entity,")
+
+
+def test_all_dg5f_launches_start_one_robot_state_publisher():
+    """Fails if a launch publishes duplicate state for the same description."""
+    for launch_file in LAUNCH_FILES:
+        tree = ast.parse(launch_file.read_text())
+        publishers = [
+            call
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "Node"
+            and any(
+                keyword.arg == "package"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == "robot_state_publisher"
+                for keyword in call.keywords
+            )
+        ]
+        assert len(publishers) == 1

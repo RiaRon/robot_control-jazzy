@@ -1,5 +1,5 @@
 diff --git a/dg5f_gz/launch/dg5f_both_gz.launch.py b/dg5f_gz/launch/dg5f_both_gz.launch.py
-index 5628057..798f1ab 100644
+index 56280579405903421060c36480fc3a2fc5d36a45..6072eda35c782fefb617fff4374543d1f28fb0af 100644
 --- a/dg5f_gz/launch/dg5f_both_gz.launch.py
 +++ b/dg5f_gz/launch/dg5f_both_gz.launch.py
 @@ -32,2 +32,2 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Regi
@@ -56,24 +56,39 @@ index 5628057..798f1ab 100644
 +            " ",
 +            "use_fake_hardware:=",
 +            use_fake_hardware,
-@@ -119,0 +141 @@ def generate_launch_description():
+@@ -95,2 +115,0 @@ def generate_launch_description():
+-    robot_description_content2 = robot_description_content1
+-
+@@ -99,2 +117,0 @@ def generate_launch_description():
+-    robot_description2 = {
+-        "robot_description": ParameterValue(robot_description_content2)}
+@@ -119,0 +137 @@ def generate_launch_description():
 +        condition=IfCondition(use_fake_hardware),
-@@ -149,0 +172 @@ def generate_launch_description():
+@@ -129,8 +146,0 @@ def generate_launch_description():
+-    node_robot_state_other_publisher = Node(
+-        package="robot_state_publisher",
+-        executable="robot_state_publisher",
+-        output="screen",
+-        parameters=[robot_description2],
+-        remappings=[("/robot_description", "/robot_description_other")],
+-    )
+-
+@@ -149,0 +160 @@ def generate_launch_description():
 +        condition=UnlessCondition(use_fake_hardware),
-@@ -152,2 +175 @@ def generate_launch_description():
+@@ -152,2 +163 @@ def generate_launch_description():
 -    # Delay start of robot controllers after spawn
 -    joint_state_broadcaster_spawner = Node(
 +    fake_joint_state_broadcaster_spawner = Node(
-@@ -156 +178,4 @@ def generate_launch_description():
+@@ -156 +166,4 @@ def generate_launch_description():
 -        arguments=["joint_state_broadcaster"],
 +        arguments=[
 +            "joint_state_broadcaster",
 +            "--controller-manager-timeout", "30",
 +        ],
-@@ -160 +185 @@ def generate_launch_description():
+@@ -160 +173 @@ def generate_launch_description():
 -    joint_trajectory_controller_spawner = Node(
 +    fake_joint_trajectory_controller_spawner = Node(
-@@ -163,4 +188,5 @@ def generate_launch_description():
+@@ -163,4 +176,5 @@ def generate_launch_description():
 -        arguments=["joint_trajectory_controller",
 -                   '--param-file',
 -                   robot_controllers,
@@ -83,7 +98,7 @@ index 5628057..798f1ab 100644
 +            "--param-file", robot_controllers,
 +            "--controller-manager-timeout", "30",
 +        ],
-@@ -169,2 +195,9 @@ def generate_launch_description():
+@@ -169,2 +183,9 @@ def generate_launch_description():
 -    nodes = [
 -        gz_spawn_entity,
 +    gazebo_joint_state_broadcaster_spawner = Node(
@@ -95,7 +110,7 @@ index 5628057..798f1ab 100644
 +        ],
 +        output="screen",
 +    )
-@@ -172,3 +205,23 @@ def generate_launch_description():
+@@ -172,3 +193,23 @@ def generate_launch_description():
 -        node_robot_state_other_publisher,
 -        gazebo,
 -        # gazebo_gui_setting,
@@ -122,28 +137,26 @@ index 5628057..798f1ab 100644
 +                on_exit=[fake_joint_trajectory_controller_spawner],
 +            )
 +        ),
-@@ -178 +231 @@ def generate_launch_description():
+@@ -178 +219 @@ def generate_launch_description():
 -                on_exit=[joint_state_broadcaster_spawner],
 +                on_exit=[gazebo_joint_state_broadcaster_spawner],
-@@ -183,2 +236,2 @@ def generate_launch_description():
+@@ -183,2 +224,2 @@ def generate_launch_description():
 -                target_action=joint_state_broadcaster_spawner,
 -                on_exit=[joint_trajectory_controller_spawner],
 +                target_action=gazebo_joint_state_broadcaster_spawner,
 +                on_exit=[gazebo_joint_trajectory_controller_spawner],
-@@ -186,0 +240 @@ def generate_launch_description():
-+        node_robot_state_other_publisher,
-@@ -188,3 +242,3 @@ def generate_launch_description():
+@@ -188,3 +229,3 @@ def generate_launch_description():
 -        # control_node,
 -
 -
 +        control_node,
 +        gazebo,
 +        gz_spawn_entity,
-@@ -193 +247 @@ def generate_launch_description():
+@@ -193 +234 @@ def generate_launch_description():
 -    return LaunchDescription(nodes)
 +    return LaunchDescription(declared_arguments + nodes)
 diff --git a/dg5f_gz/launch/dg5f_left_gz.launch.py b/dg5f_gz/launch/dg5f_left_gz.launch.py
-index c9b8346..6612cb1 100644
+index c9b834618161bf533ad72b54bd0064ee99eb0ecf..193352a41aad8a821c585189fcb11329a8bdb2de 100644
 --- a/dg5f_gz/launch/dg5f_left_gz.launch.py
 +++ b/dg5f_gz/launch/dg5f_left_gz.launch.py
 @@ -32,2 +32,2 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Regi
@@ -196,44 +209,38 @@ index c9b8346..6612cb1 100644
 -        }.items(),
 +        launch_arguments={"gz_args": gazebo_arguments}.items(),
 +        condition=UnlessCondition(use_fake_hardware),
-@@ -84,0 +103,3 @@ def generate_launch_description():
-+            " ",
+@@ -85,5 +102,0 @@ def generate_launch_description():
+-        ]
+-    )
+-    robot_description_content2 = Command(
+-        [
+-            PathJoinSubstitution([FindExecutable(name="xacro")]),
+@@ -91,3 +104,2 @@ def generate_launch_description():
+-            PathJoinSubstitution(
+-                [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
+-            ),
 +            "use_fake_hardware:=",
 +            use_fake_hardware,
-@@ -93,0 +115,3 @@ def generate_launch_description():
-+            " ",
-+            "use_fake_hardware:=",
-+            use_fake_hardware,
-@@ -117,0 +142 @@ def generate_launch_description():
+@@ -96 +107,0 @@ def generate_launch_description():
+-
+@@ -98 +108,0 @@ def generate_launch_description():
+-    robot_description2 = {"robot_description": robot_description_content2}
+@@ -117,0 +128 @@ def generate_launch_description():
 +        condition=IfCondition(use_fake_hardware),
-@@ -147,0 +173 @@ def generate_launch_description():
+@@ -127,8 +137,0 @@ def generate_launch_description():
+-    node_robot_state_other_publisher = Node(
+-        package="robot_state_publisher",
+-        executable="robot_state_publisher",
+-        output="screen",
+-        parameters=[robot_description2],
+-        remappings=[("/robot_description", "/robot_description_other")],
+-    )
+-
+@@ -147,0 +151,21 @@ def generate_launch_description():
 +        condition=UnlessCondition(use_fake_hardware),
-@@ -150,2 +176 @@ def generate_launch_description():
--    # Delay start of robot controllers after spawn
--    joint_state_broadcaster_spawner = Node(
-+    fake_joint_state_broadcaster_spawner = Node(
-@@ -154 +179,4 @@ def generate_launch_description():
--        arguments=["joint_state_broadcaster"],
-+        arguments=[
-+            "joint_state_broadcaster",
-+            "--controller-manager-timeout", "30",
-+        ],
-@@ -158 +186 @@ def generate_launch_description():
--    joint_trajectory_controller_spawner = Node(
-+    fake_joint_trajectory_controller_spawner = Node(
-@@ -161,4 +189,25 @@ def generate_launch_description():
--        arguments=["joint_trajectory_controller",
--                   '--param-file',
--                   robot_controllers,
--                   ],
-+        arguments=[
-+            "joint_trajectory_controller",
-+            "--param-file", robot_controllers,
-+            "--controller-manager-timeout", "30",
-+        ],
 +    )
 +
-+    gazebo_joint_state_broadcaster_spawner = Node(
++    fake_joint_state_broadcaster_spawner = Node(
 +        package="controller_manager",
 +        executable="spawner",
 +        arguments=[
@@ -243,7 +250,7 @@ index c9b8346..6612cb1 100644
 +        output="screen",
 +    )
 +
-+    gazebo_joint_trajectory_controller_spawner = Node(
++    fake_joint_trajectory_controller_spawner = Node(
 +        package="controller_manager",
 +        executable="spawner",
 +        arguments=[
@@ -251,7 +258,30 @@ index c9b8346..6612cb1 100644
 +            "--param-file", robot_controllers,
 +            "--controller-manager-timeout", "30",
 +        ],
-@@ -178 +227,12 @@ def generate_launch_description():
+@@ -150,2 +174 @@ def generate_launch_description():
+-    # Delay start of robot controllers after spawn
+-    joint_state_broadcaster_spawner = Node(
++    gazebo_joint_state_broadcaster_spawner = Node(
+@@ -154 +177,4 @@ def generate_launch_description():
+-        arguments=["joint_state_broadcaster"],
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
+@@ -158 +184 @@ def generate_launch_description():
+-    joint_trajectory_controller_spawner = Node(
++    gazebo_joint_trajectory_controller_spawner = Node(
+@@ -161,4 +187,5 @@ def generate_launch_description():
+-        arguments=["joint_trajectory_controller",
+-                   '--param-file',
+-                   robot_controllers,
+-                   ],
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
+@@ -178 +205,12 @@ def generate_launch_description():
 -        gazebo,
 +        RegisterEventHandler(
 +            event_handler=OnProcessStart(
@@ -265,27 +295,26 @@ index c9b8346..6612cb1 100644
 +                on_exit=[fake_joint_trajectory_controller_spawner],
 +            )
 +        ),
-@@ -182 +242 @@ def generate_launch_description():
+@@ -182 +220 @@ def generate_launch_description():
 -                on_exit=[joint_state_broadcaster_spawner],
 +                on_exit=[gazebo_joint_state_broadcaster_spawner],
-@@ -187,2 +247,2 @@ def generate_launch_description():
+@@ -187,2 +225,2 @@ def generate_launch_description():
 -                target_action=joint_state_broadcaster_spawner,
 -                on_exit=[joint_trajectory_controller_spawner],
 +                target_action=gazebo_joint_state_broadcaster_spawner,
 +                on_exit=[gazebo_joint_trajectory_controller_spawner],
-@@ -191,0 +252,3 @@ def generate_launch_description():
-+        node_robot_state_other_publisher,
+@@ -191,0 +230,2 @@ def generate_launch_description():
 +        control_node,
 +        gazebo,
-@@ -193,3 +255,0 @@ def generate_launch_description():
+@@ -193,3 +232,0 @@ def generate_launch_description():
 -        # control_node,
 -        node_robot_state_other_publisher
 -
-@@ -198 +258 @@ def generate_launch_description():
+@@ -198 +235 @@ def generate_launch_description():
 -    return LaunchDescription(nodes)
 +    return LaunchDescription(declared_arguments + nodes)
 diff --git a/dg5f_gz/launch/dg5f_right_gz.launch.py b/dg5f_gz/launch/dg5f_right_gz.launch.py
-index b20f72d..344e058 100644
+index b20f72d453fc2d780ac2b0332cb252d5e73fbe0d..07b96058ed4d47bd0361d3cf65516a731998788d 100644
 --- a/dg5f_gz/launch/dg5f_right_gz.launch.py
 +++ b/dg5f_gz/launch/dg5f_right_gz.launch.py
 @@ -32,2 +32,2 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Regi
@@ -338,32 +367,69 @@ index b20f72d..344e058 100644
 -        }.items(),
 +        launch_arguments={"gz_args": gazebo_arguments}.items(),
 +        condition=UnlessCondition(use_fake_hardware),
-@@ -84,0 +103,3 @@ def generate_launch_description():
-+            " ",
+@@ -85,5 +102,0 @@ def generate_launch_description():
+-        ]
+-    )
+-    robot_description_content2 = Command(
+-        [
+-            PathJoinSubstitution([FindExecutable(name="xacro")]),
+@@ -91,3 +104,2 @@ def generate_launch_description():
+-            PathJoinSubstitution(
+-                [FindPackageShare("dg5f_gz"), "urdf", "dg5f_right_gz.xacro"]
+-            ),
 +            "use_fake_hardware:=",
 +            use_fake_hardware,
-@@ -93,0 +115,3 @@ def generate_launch_description():
-+            " ",
-+            "use_fake_hardware:=",
-+            use_fake_hardware,
-@@ -117,0 +142 @@ def generate_launch_description():
+@@ -96 +107,0 @@ def generate_launch_description():
+-
+@@ -98 +108,0 @@ def generate_launch_description():
+-    robot_description2 = {"robot_description": robot_description_content2}
+@@ -117,0 +128 @@ def generate_launch_description():
 +        condition=IfCondition(use_fake_hardware),
-@@ -148,0 +174 @@ def generate_launch_description():
+@@ -128,8 +138,0 @@ def generate_launch_description():
+-    node_robot_state_other_publisher = Node(
+-        package="robot_state_publisher",
+-        executable="robot_state_publisher",
+-        output="screen",
+-        parameters=[robot_description2],
+-        remappings=[("/robot_description", "/robot_description_other")],
+-    )
+-
+@@ -148,0 +152,11 @@ def generate_launch_description():
 +        condition=UnlessCondition(use_fake_hardware),
-@@ -151,2 +177 @@ def generate_launch_description():
--    # Delay start of robot controllers after spawn
--    joint_state_broadcaster_spawner = Node(
++    )
++
 +    fake_joint_state_broadcaster_spawner = Node(
-@@ -155 +180,4 @@ def generate_launch_description():
--        arguments=["joint_state_broadcaster"],
++        package="controller_manager",
++        executable="spawner",
 +        arguments=[
 +            "joint_state_broadcaster",
 +            "--controller-manager-timeout", "30",
 +        ],
-@@ -159 +187 @@ def generate_launch_description():
--    joint_trajectory_controller_spawner = Node(
++        output="screen",
+@@ -151,2 +165 @@ def generate_launch_description():
+-    # Delay start of robot controllers after spawn
+-    joint_state_broadcaster_spawner = Node(
 +    fake_joint_trajectory_controller_spawner = Node(
-@@ -162,4 +190,5 @@ def generate_launch_description():
+@@ -155 +168,14 @@ def generate_launch_description():
+-        arguments=["joint_state_broadcaster"],
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
++    )
++
++    gazebo_joint_state_broadcaster_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
+@@ -159 +185 @@ def generate_launch_description():
+-    joint_trajectory_controller_spawner = Node(
++    gazebo_joint_trajectory_controller_spawner = Node(
+@@ -162,4 +188,5 @@ def generate_launch_description():
 -        arguments=["joint_trajectory_controller",
 -                   '--param-file',
 -                   robot_controllers,
@@ -373,32 +439,11 @@ index b20f72d..344e058 100644
 +            "--param-file", robot_controllers,
 +            "--controller-manager-timeout", "30",
 +        ],
-@@ -168,3 +197,9 @@ def generate_launch_description():
--    nodes = [
+@@ -169,4 +196,12 @@ def generate_launch_description():
 -        node_robot_state_publisher,
 -        node_robot_state_other_publisher,
-+    gazebo_joint_state_broadcaster_spawner = Node(
-+        package="controller_manager",
-+        executable="spawner",
-+        arguments=[
-+            "joint_state_broadcaster",
-+            "--controller-manager-timeout", "30",
-+        ],
-+        output="screen",
-+    )
-@@ -172 +207,23 @@ def generate_launch_description():
+-
 -        gazebo,
-+    gazebo_joint_trajectory_controller_spawner = Node(
-+        package="controller_manager",
-+        executable="spawner",
-+        arguments=[
-+            "joint_trajectory_controller",
-+            "--param-file", robot_controllers,
-+            "--controller-manager-timeout", "30",
-+        ],
-+    )
-+
-+    nodes = [
 +        RegisterEventHandler(
 +            event_handler=OnProcessStart(
 +                target_action=control_node,
@@ -411,34 +456,35 @@ index b20f72d..344e058 100644
 +                on_exit=[fake_joint_trajectory_controller_spawner],
 +            )
 +        ),
-@@ -176 +233 @@ def generate_launch_description():
+@@ -176 +211 @@ def generate_launch_description():
 -                on_exit=[joint_state_broadcaster_spawner],
 +                on_exit=[gazebo_joint_state_broadcaster_spawner],
-@@ -181,2 +238,2 @@ def generate_launch_description():
+@@ -181,2 +216,2 @@ def generate_launch_description():
 -                target_action=joint_state_broadcaster_spawner,
 -                on_exit=[joint_trajectory_controller_spawner],
 +                target_action=gazebo_joint_state_broadcaster_spawner,
 +                on_exit=[gazebo_joint_trajectory_controller_spawner],
-@@ -184,0 +242,4 @@ def generate_launch_description():
+@@ -184,0 +220,3 @@ def generate_launch_description():
 +        node_robot_state_publisher,
-+        node_robot_state_other_publisher,
 +        control_node,
 +        gazebo,
-@@ -186 +246,0 @@ def generate_launch_description():
+@@ -186 +223,0 @@ def generate_launch_description():
 -        # control_node,
-@@ -190 +250 @@ def generate_launch_description():
+@@ -190 +227 @@ def generate_launch_description():
 -    return LaunchDescription(nodes)
 +    return LaunchDescription(declared_arguments + nodes)
 diff --git a/dg5f_gz/package.xml b/dg5f_gz/package.xml
-index 1ed045f..065b4e5 100644
+index 1ed045f4e241df7d825fadb7d342c170dc52801c..29b0364f4e41ff9bebbd6a54f0e901f6129bd1c6 100644
 --- a/dg5f_gz/package.xml
 +++ b/dg5f_gz/package.xml
-@@ -14 +14,2 @@
+@@ -14 +14,4 @@
 -  <depend>ign_ros2_control</depend>
++  <depend>trajectory_msgs</depend>
++  <depend>dg_description</depend>
 +  <depend>gz_ros2_control</depend>
 +  <depend>hardware_interface</depend>
 diff --git a/dg5f_gz/urdf/dg5f_both_gz.xacro b/dg5f_gz/urdf/dg5f_both_gz.xacro
-index 9c23416..045a653 100644
+index 9c23416fc86d4ef20dc6ce36157eec6823546017..045a6533a1f1b3c7e67f0fb9d7c3233cb4d89f69 100644
 --- a/dg5f_gz/urdf/dg5f_both_gz.xacro
 +++ b/dg5f_gz/urdf/dg5f_both_gz.xacro
 @@ -6,0 +7 @@
@@ -457,7 +503,7 @@ index 9c23416..045a653 100644
 +        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
 +            filename="libgz_ros2_control-system.so">
 diff --git a/dg5f_gz/urdf/dg5f_left_gz.xacro b/dg5f_gz/urdf/dg5f_left_gz.xacro
-index 88b600d..c543ed9 100644
+index 88b600d3b4680591b03cb1c6e689a3feb461aa35..c543ed96a629e5496b027e463e45f384656fb948 100644
 --- a/dg5f_gz/urdf/dg5f_left_gz.xacro
 +++ b/dg5f_gz/urdf/dg5f_left_gz.xacro
 @@ -5,0 +6 @@
@@ -476,7 +522,7 @@ index 88b600d..c543ed9 100644
 +        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
 +            filename="libgz_ros2_control-system.so">
 diff --git a/dg5f_gz/urdf/dg5f_right_gz.xacro b/dg5f_gz/urdf/dg5f_right_gz.xacro
-index ea2042f..3afd513 100644
+index ea2042fc0fe12079a881da43314676fa2db445f8..3afd513cd5a527f24f231e0d71226484f2e739d4 100644
 --- a/dg5f_gz/urdf/dg5f_right_gz.xacro
 +++ b/dg5f_gz/urdf/dg5f_right_gz.xacro
 @@ -5,0 +6 @@

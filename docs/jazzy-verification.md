@@ -19,18 +19,68 @@ All four imported trees pass `tools/verify_vendor_snapshot.py` against their
 pinned source trees. `colcon list --base-paths ros_ws/src` discovers 18
 branch-local packages.
 
+The final static repair added declared OpenArm and Tesollo manifest patches
+and exact `post_patch_sha256` inventories. The verifier reconstructs each
+patched tree from a clean archive, checks that the inventory paths exactly
+match the patch-induced changes, validates every digest, and then retains the
+whole-tree comparison.
+
+The four pinned verification commands are:
+
+```bash
+set -euo pipefail
+VERIFY_TMP="$(mktemp -d /tmp/robot-control-jazzy-vendor.XXXXXX)"
+mkdir -p "$VERIFY_TMP"/{openarm,tesollo,openarm_can,description}
+
+git -C /home/user/rl_ws/repo/openarm/openarm_ros2 \
+  archive 8087bbc2b37c0b2b2652c0134a9b2b369c57567e |
+  tar -xf - -C "$VERIFY_TMP/openarm"
+git -C /home/user/rl_ws/repo/tesollo/delto_m_ros2 \
+  archive 3926c2eab8d011046f64874d6252213b2cf18f48 |
+  tar -xf - -C "$VERIFY_TMP/tesollo"
+git -C /home/user/rl_ws/repo/openarm/openarm_can \
+  archive c32ecd31da267967f0c913c2118c843177d88b91 |
+  tar -xf - -C "$VERIFY_TMP/openarm_can"
+git -C /home/user/rl_ws/teleopration_openarm_tesollo \
+  archive c8696ebfd64ea08ee0a212a9bae21055b6f381bc \
+  src/openarm_description |
+  tar -xf - -C "$VERIFY_TMP/description"
+
+PYTHONPATH=src:. python3 tools/verify_vendor_snapshot.py \
+  --metadata vendor_metadata/openarm/UPSTREAM.yaml \
+  --source "$VERIFY_TMP/openarm" \
+  --snapshot ros_ws/src/openarm_ros2
+PYTHONPATH=src:. python3 tools/verify_vendor_snapshot.py \
+  --metadata vendor_metadata/tesollo/UPSTREAM.yaml \
+  --source "$VERIFY_TMP/tesollo" \
+  --snapshot ros_ws/src/delto_m_ros2
+PYTHONPATH=src:. python3 tools/verify_vendor_snapshot.py \
+  --metadata vendor_metadata/openarm_can/UPSTREAM.yaml \
+  --source "$VERIFY_TMP/openarm_can" \
+  --snapshot ros_ws/src/openarm_can
+PYTHONPATH=src:. python3 tools/verify_vendor_snapshot.py \
+  --metadata vendor_metadata/openarm_description/UPSTREAM.yaml \
+  --source "$VERIFY_TMP/description/src/openarm_description" \
+  --snapshot ros_ws/src/openarm_description
+```
+
+The final static run produced four `snapshot verified` results.
+
 ## Verification run
 
 The commands below were run on 2026-07-25 (Asia/Seoul) on Ubuntu 24.04.4 LTS
 with `/opt/ros/jazzy/setup.bash` sourced. A blocked prerequisite is not counted
 as a pass, and the runtime checks were not attempted after the dependency and
-build failures.
+build failures. The final review fixed the package-graph defects statically;
+it did not rerun or reclassify the blocked runtime work.
 
 | Check | Status | Exit status | Evidence |
 | --- | --- | ---: | --- |
+| Snapshot provenance and inventories | **PASS** | 0 | Four fresh pinned archives each produced `snapshot verified`; OpenArm has one inventoried changed file and Tesollo has seven. |
+| Declared local package closure | **PASS** | 0 | The four supported roots resolve to 11 local packages. `openarm_can` precedes `openarm_hardware`; `dg_description` precedes `dg5f_gz`; `dg3f_m_gz` and `dg4f_gz` remain outside the closure. |
 | Dependency helper | **BLOCKED** | 1 | `sudo` rejected elevation because `/etc/sudo.conf` is owned by UID 65534 and the container has `no new privileges`; no password was requested or bypassed. |
-| Supported rosdep graph | **FAIL** | 1 | 16 required Jazzy apt dependencies are absent. No unresolved `ign_ros2_control` key appeared. |
-| Supported build | **FAIL** | 1 | Four supported roots expanded to nine packages: 0 finished, 1 failed, 4 aborted, and 4 were not processed. `openarm_hardware` could not find `hardware_interfaceConfig.cmake`. |
+| Recorded supported rosdep graph | **FAIL** | 1 | The pre-repair run found 16 absent Jazzy apt dependencies. No unresolved `ign_ros2_control` key appeared. It was not promoted after static manifest repair. |
+| Recorded supported build | **FAIL** | 1 | The pre-repair graph incorrectly expanded to nine packages: 0 finished, 1 failed, 4 aborted, and 4 were not processed. The graph now resolves statically to 11, but no build rerun was possible without the blocked dependencies. |
 | OpenArm fake smoke | **BLOCKED** | not run | Prerequisites were not green. Expected controllers: `joint_trajectory_controller=active` and `joint_state_broadcaster=active`; expected command/state joint counts: 7/8; observed states/counts: none. |
 | DG5F fake smoke | **BLOCKED** | not run | Prerequisites were not green. Expected controllers: `joint_trajectory_controller=active` and `joint_state_broadcaster=active`; expected command/state joint counts: 20/20; observed states/counts: none. |
 | DG5F Gazebo smoke | **BLOCKED** | not run | Prerequisites were not green. Expected controllers: `joint_trajectory_controller=active` and `joint_state_broadcaster=active`; expected command/state joint counts: 20/20; observed states/counts: none. |
@@ -74,8 +124,8 @@ rosdep check --from-paths \
   --ignore-src
 ```
 
-Result: **FAIL**, exit status 1. Rosdep reported these 16 missing apt
-dependencies:
+Recorded result before the final manifest repair: **FAIL**, exit status 1.
+Rosdep reported these 16 missing apt dependencies:
 
 ```text
 ros-jazzy-gz-ros2-control
@@ -107,9 +157,9 @@ source /opt/ros/jazzy/setup.bash
 ./ros_ws/build.sh
 ```
 
-Result: **FAIL**, exit status 1. The four roots in
-`ros_ws/supported-packages.txt` expanded to a nine-package build graph.
-Colcon reported:
+Recorded result before the final manifest repair: **FAIL**, exit status 1.
+The four roots in `ros_ws/supported-packages.txt` expanded to an incomplete
+nine-package build graph. Colcon reported:
 
 ```text
 Summary: 0 packages finished
@@ -129,6 +179,36 @@ with any of the following names:
 
 This is consistent with the missing `ros-jazzy-hardware-interface` dependency
 reported by rosdep.
+
+The final static manifest repair makes the declared closure:
+
+```text
+openarm_bringup
+openarm_description
+openarm_can
+openarm_hardware
+openarm
+openarm_bimanual_moveit_config
+delto_tcp_comm
+delto_hardware
+dg5f_driver
+dg_description
+dg5f_gz
+```
+
+`openarm_can` and `dg_description` are now selected and ordered by their
+consumers' `package.xml` dependencies rather than by appending unordered build
+roots. `dg5f_gz` also declares its CMake-required `trajectory_msgs`
+dependency. This repair is covered by:
+
+```bash
+PYTHONPATH=src:. pytest -q \
+  tests/test_jazzy_build_wrapper.py \
+  tests/test_dg5f_jazzy_contract.py
+```
+
+No `colcon build` rerun was attempted because dependency installation remains
+blocked. The runtime build status therefore remains **FAIL**, not PASS.
 
 ### Runtime smoke checks
 

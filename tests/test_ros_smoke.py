@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+import tools.ros_smoke as ros_smoke
 from tools.ros_smoke import smoke_plan, validate_joint_state, wait_for
 
 
@@ -161,6 +162,22 @@ def test_validate_joint_state_rejects_invalid_tolerance(tolerance):
             [0.05] * 20,
             tolerance=tolerance,
         )
+
+
+def test_joint_state_capture_discards_cached_state_before_publication():
+    capture = ros_smoke.JointStateCapture()
+    capture.record(("joint",), (0.05,))
+    state_seen_during_publish = []
+
+    capture.publish_requiring_fresh_state(
+        lambda _message: state_seen_during_publish.append(capture.latest),
+        object(),
+    )
+
+    assert state_seen_during_publish == [None]
+    assert capture.latest is None
+    capture.record(("joint",), (0.05,))
+    assert capture.latest == (("joint",), (0.05,))
 
 
 @pytest.mark.parametrize("robot", ["openarm", "dg5f"])

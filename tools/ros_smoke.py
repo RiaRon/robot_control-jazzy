@@ -80,6 +80,28 @@ class SmokePlan:
     state_broadcaster_name: str = "joint_state_broadcaster"
 
 
+@dataclass
+class JointStateCapture:
+    """Keep only state received since the most recent command publication."""
+
+    latest: tuple[Sequence[str], Sequence[float]] | None = None
+
+    def record(
+        self,
+        names: Sequence[str],
+        positions: Sequence[float],
+    ) -> None:
+        self.latest = (tuple(names), tuple(positions))
+
+    def publish_requiring_fresh_state(
+        self,
+        publish: Callable[[object], None],
+        message: object,
+    ) -> None:
+        self.latest = None
+        publish(message)
+
+
 _DG5F_JOINTS = tuple(
     f"rj_dg_{finger}_{joint}"
     for finger in range(1, 6)
@@ -121,11 +143,10 @@ def _run_ros_smoke(
 
     rclpy.init()
     node = rclpy.create_node("robot_control_smoke_validator")
-    latest_state: tuple[Sequence[str], Sequence[float]] | None = None
+    joint_states = JointStateCapture()
 
     def record_state(message: JointState) -> None:
-        nonlocal latest_state
-        latest_state = (tuple(message.name), tuple(message.position))
+        joint_states.record(message.name, message.position)
 
     node.create_subscription(
         JointState,
@@ -190,13 +211,17 @@ def _run_ros_smoke(
         point.positions = list(plan.command_targets.values())
         point.time_from_start = Duration(sec=2)
         trajectory.points = [point]
-        publisher.publish(trajectory)
+        joint_states.publish_requiring_fresh_state(
+            publisher.publish,
+            trajectory,
+        )
 
         last_validation_error: ValueError | None = None
 
         def target_state_reached() -> bool:
             nonlocal last_validation_error
             rclpy.spin_once(node, timeout_sec=0.05)
+            latest_state = joint_states.latest
             if latest_state is None:
                 return False
             try:

@@ -14,4 +14,7 @@ excluded:
   - .pytest_cache/**
   - "*.pyc"
   - "*.pyo"
-local_modifications: []
+patches:
+  - patches/0001-declare-openarm-can-dependency.patch
+post_patch_sha256:
+  openarm_hardware/package.xml: fb0744f6fe2787b3604ded1d23d7cdbcd26126533a1340ae11e9a990d93effc4

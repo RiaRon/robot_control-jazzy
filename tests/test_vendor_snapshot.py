@@ -1,11 +1,16 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.verify_vendor_snapshot import verify_snapshot
 
 
 ROOT = Path(__file__).parents[1]
+AFTER_SHA256 = "7b9a72466d3960eb2aacccfc848939453490db0678bd4725def3f789b891c919"
+UNCHANGED_SHA256 = (
+    "1cd263f1102656dd6b6cf1d626d1a96f9eba0406af3cb2a52560d473d4801052"
+)
 
 
 def test_metadata_pins_validated_commits():
@@ -45,6 +50,30 @@ def test_snapshot_verifier_detects_changed_file(tmp_path):
     ]
 
 
+def test_snapshot_verifier_rejects_missing_source_directory(tmp_path):
+    source = tmp_path / "missing-source"
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        f"source directory missing: {source}"
+    ]
+
+
+def test_snapshot_verifier_rejects_missing_snapshot_directory(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "missing-snapshot"
+    source.mkdir()
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        f"snapshot directory missing: {snapshot}"
+    ]
+
+
 def test_snapshot_verifier_reports_missing_and_unexpected_in_sorted_order(tmp_path):
     source = tmp_path / "source"
     snapshot = tmp_path / "snapshot"
@@ -78,13 +107,141 @@ def test_snapshot_verifier_applies_declared_patches(tmp_path):
         "+after\n"
     )
     metadata = tmp_path / "UPSTREAM.yaml"
-    metadata.write_text("excluded: []\npatches:\n  - patches/0001-change.patch\n")
+    metadata.write_text(
+        "excluded: []\n"
+        "patches:\n"
+        "  - patches/0001-change.patch\n"
+        "post_patch_sha256:\n"
+        f"  example.txt: {AFTER_SHA256}\n"
+    )
 
     assert verify_snapshot(metadata, source, snapshot) == []
 
     (snapshot / "example.txt").write_text("undeclared edit\n")
     assert verify_snapshot(metadata, source, snapshot) == [
         "content mismatch: example.txt"
+    ]
+
+
+def test_snapshot_verifier_requires_every_post_patch_hash(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    patches = tmp_path / "patches"
+    source.mkdir()
+    snapshot.mkdir()
+    patches.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (snapshot / "example.txt").write_text("after\n")
+    (patches / "0001-change.patch").write_text(
+        "--- a/example.txt\n"
+        "+++ b/example.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\npatches:\n  - patches/0001-change.patch\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "post-patch inventory missing: example.txt"
+    ]
+
+
+def test_snapshot_verifier_rejects_stale_post_patch_inventory_entry(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    patches = tmp_path / "patches"
+    source.mkdir()
+    snapshot.mkdir()
+    patches.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (source / "unchanged.txt").write_text("unchanged\n")
+    (snapshot / "example.txt").write_text("after\n")
+    (snapshot / "unchanged.txt").write_text("unchanged\n")
+    (patches / "0001-change.patch").write_text(
+        "--- a/example.txt\n"
+        "+++ b/example.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text(
+        "excluded: []\n"
+        "patches:\n"
+        "  - patches/0001-change.patch\n"
+        "post_patch_sha256:\n"
+        f"  example.txt: {AFTER_SHA256}\n"
+        f"  unchanged.txt: {UNCHANGED_SHA256}\n"
+    )
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "post-patch inventory stale: unchanged.txt"
+    ]
+
+
+def test_snapshot_verifier_rejects_mismatched_post_patch_hash(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    patches = tmp_path / "patches"
+    source.mkdir()
+    snapshot.mkdir()
+    patches.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (snapshot / "example.txt").write_text("after\n")
+    (patches / "0001-change.patch").write_text(
+        "--- a/example.txt\n"
+        "+++ b/example.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text(
+        "excluded: []\n"
+        "patches:\n"
+        "  - patches/0001-change.patch\n"
+        "post_patch_sha256:\n"
+        f"  example.txt: {UNCHANGED_SHA256}\n"
+    )
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "post-patch hash mismatch: example.txt"
+    ]
+
+
+def test_snapshot_verifier_rejects_invalid_post_patch_inventory_schema(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    source.mkdir()
+    snapshot.mkdir()
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\npost_patch_sha256: []\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "post-patch inventory invalid: expected a path-to-sha256 mapping"
+    ]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "- not-a-mapping\n",
+        "[]\n",
+        "0\n",
+        "false\n",
+    ],
+)
+def test_snapshot_verifier_rejects_non_mapping_metadata(tmp_path, document):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    source.mkdir()
+    snapshot.mkdir()
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text(document)
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "metadata invalid: expected a mapping"
     ]
 
 

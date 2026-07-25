@@ -105,21 +105,7 @@ def generate_launch_description():
             use_fake_hardware,
         ]
     )
-    robot_description_content2 = Command(
-        [
-            PathJoinSubstitution([FindExecutable(name="xacro")]),
-            " ",
-            PathJoinSubstitution(
-                [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
-            ),
-            " ",
-            "use_fake_hardware:=",
-            use_fake_hardware,
-        ]
-    )
-
     robot_description1 = {"robot_description": robot_description_content1}
-    robot_description2 = {"robot_description": robot_description_content2}
 
     robot_controllers = PathJoinSubstitution(
         [
@@ -149,14 +135,6 @@ def generate_launch_description():
         output="screen",
         parameters=[robot_description1],
     )
-    node_robot_state_other_publisher = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        output="screen",
-        parameters=[robot_description2],
-        remappings=[("/robot_description", "/robot_description_other")],
-    )
-
     gz_spawn_entity = Node(
         package="ros_gz_sim",
         executable="create",
@@ -249,7 +227,6 @@ def generate_launch_description():
             )
         ),
         node_robot_state_publisher,
-        node_robot_state_other_publisher,
         control_node,
         gazebo,
         gz_spawn_entity,

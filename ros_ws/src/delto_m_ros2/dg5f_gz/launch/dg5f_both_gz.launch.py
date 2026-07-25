@@ -113,12 +113,8 @@ def generate_launch_description():
             use_fake_hardware,
         ]
     )
-    robot_description_content2 = robot_description_content1
-
     robot_description1 = {
         "robot_description": ParameterValue(robot_description_content1)}
-    robot_description2 = {
-        "robot_description": ParameterValue(robot_description_content2)}
 
     robot_controllers = PathJoinSubstitution(
         [
@@ -148,14 +144,6 @@ def generate_launch_description():
         output="screen",
         parameters=[robot_description1],
     )
-    node_robot_state_other_publisher = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        output="screen",
-        parameters=[robot_description2],
-        remappings=[("/robot_description", "/robot_description_other")],
-    )
-
     gz_spawn_entity = Node(
         package="ros_gz_sim",
         executable="create",
@@ -237,7 +225,6 @@ def generate_launch_description():
                 on_exit=[gazebo_joint_trajectory_controller_spawner],
             )
         ),
-        node_robot_state_other_publisher,
         node_robot_state_publisher,
         control_node,
         gazebo,

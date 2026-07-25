@@ -23,19 +23,25 @@ commands during this work.
 
 The complete Tesollo upstream tree remains pinned to
 `tesollodelto/delto_m_ros2@3926c2eab8d011046f64874d6252213b2cf18f48`.
-Jazzy compatibility changes are project-owned patches, not undocumented edits.
+The OpenArm ROS 2 tree remains pinned to
+`enactic/openarm_ros2@8087bbc2b37c0b2b2652c0134a9b2b369c57567e`.
+Jazzy compatibility and manifest corrections are project-owned patches, not
+undocumented edits.
 
-`vendor_metadata/tesollo/UPSTREAM.yaml` records:
+The OpenArm and Tesollo `UPSTREAM.yaml` records each contain:
 
 - the upstream repository, branch, and commit;
 - the ordered patch files applied to that commit;
-- the post-patch SHA-256 for every locally changed file.
+- a `post_patch_sha256` mapping from every locally changed relative path to
+  its materialized post-patch SHA-256.
 
 The snapshot verifier reconstructs the expected tree by applying the declared
 patches to a clean pinned source tree, then compares every included file. It
 must fail for an undeclared edit, a missing patch, a patch application failure,
-or a post-patch hash mismatch. This preserves rollback and auditability while
-allowing the checked-in `ros_ws/src` tree to build directly.
+a missing or stale inventory entry, or a post-patch hash mismatch. The
+inventory keys must exactly match the paths changed by the patches. This
+preserves rollback and auditability while allowing the checked-in
+`ros_ws/src` tree to build directly.
 
 ## DG5F Jazzy Migration
 
@@ -91,8 +97,10 @@ Static tests verify:
 - all right-hand DG5F canonical joints exist exactly once in the xacro and
   controller configuration;
 - plugin names and package dependencies match the Jazzy contract;
-- the build wrapper selects the supported package set;
-- patched snapshot provenance is fail-closed.
+- the supported roots resolve the actual local `package.xml` dependency
+  closure in dependency order while DG3F-M and DG4F Gazebo stay excluded;
+- patched snapshot provenance and its exact post-patch inventory are
+  fail-closed.
 
 Runtime tests are split into two commands:
 
