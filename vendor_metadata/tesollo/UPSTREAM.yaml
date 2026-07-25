@@ -1,0 +1,17 @@
+name: delto_m_ros2
+repository: https://github.com/tesollodelto/delto_m_ros2.git
+branch: humble
+commit: a68335919ee490d5293581574acc7aff12fe969d
+imported_at: 2026-07-25
+license: BSD-3-Clause
+excluded:
+  - .git/**
+  - .github/**
+  - build/**
+  - install/**
+  - log/**
+  - __pycache__/**
+  - .pytest_cache/**
+  - "*.pyc"
+  - "*.pyo"
+local_modifications: []
