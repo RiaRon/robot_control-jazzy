@@ -20,6 +20,7 @@ LEGACY_IDENTIFIERS = (
     "libign_ros2_control",
     "IGN_GAZEBO_RESOURCE_PATH",
 )
+XACRO_NAMESPACE = {"xacro": "http://www.ros.org/wiki/xacro"}
 
 
 def _right_joint_names() -> set[str]:
@@ -36,6 +37,25 @@ def _ros2_control_joint_names(xacro: Path) -> list[str]:
     return [joint.attrib["name"] for joint in root.findall(".//ros2_control/joint")]
 
 
+def _assert_xacro_hardware_selection(xacro: Path) -> ET.Element:
+    root = ET.parse(xacro).getroot()
+    argument = root.find("xacro:arg", XACRO_NAMESPACE)
+    assert argument is not None
+    assert argument.attrib == {"name": "use_fake_hardware", "default": "false"}
+
+    hardware = root.find(".//ros2_control/hardware")
+    assert hardware is not None
+    fake_hardware = hardware.find("xacro:if", XACRO_NAMESPACE)
+    gazebo_hardware = hardware.find("xacro:unless", XACRO_NAMESPACE)
+    assert fake_hardware is not None
+    assert fake_hardware.attrib == {"value": "$(arg use_fake_hardware)"}
+    assert fake_hardware.findtext("plugin") == "mock_components/GenericSystem"
+    assert gazebo_hardware is not None
+    assert gazebo_hardware.attrib == {"value": "$(arg use_fake_hardware)"}
+    assert gazebo_hardware.findtext("plugin") == "gz_ros2_control/GazeboSimSystem"
+    return root
+
+
 def test_right_dg5f_joint_contract_matches_xacros_and_controller():
     """Fails if a canonical right DG5F joint loses simulation coverage."""
     expected_right_joints = _right_joint_names()
@@ -46,7 +66,11 @@ def test_right_dg5f_joint_contract_matches_xacros_and_controller():
     assert len(right_xacro_joints) == len(expected_right_joints)
 
     both_xacro_joints = _ros2_control_joint_names(XACROS[2])
-    assert all(both_xacro_joints.count(joint) == 1 for joint in expected_right_joints)
+    both_right_joints = [
+        joint for joint in both_xacro_joints if joint.startswith("rj_dg_")
+    ]
+    assert set(both_right_joints) == expected_right_joints
+    assert len(both_right_joints) == len(expected_right_joints)
 
     controller = yaml.safe_load(
         (DG5F / "config/dg5f_right_gz_controller.yaml").read_text()
@@ -61,10 +85,7 @@ def test_right_dg5f_joint_contract_matches_xacros_and_controller():
 def test_all_dg5f_xacros_select_fake_or_gazebo_jazzy_plugins():
     """Fails if either safe fake hardware or Jazzy Gazebo control is removed."""
     for xacro in XACROS:
-        root = ET.parse(xacro).getroot()
-        plugins = {element.text.strip() for element in root.findall(".//plugin")}
-        assert "mock_components/GenericSystem" in plugins
-        assert "gz_ros2_control/GazeboSimSystem" in plugins
+        root = _assert_xacro_hardware_selection(xacro)
         assert "gz_ros2_control::GazeboSimROS2ControlPlugin" in {
             element.attrib["name"] for element in root.findall(".//gazebo/plugin")
         }
