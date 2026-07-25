@@ -9,6 +9,7 @@ ros_ws/build/
 ros_ws/install/
 ros_ws/log/
 ros_ws/src/.snapshot-tmp/
+/log/
 
 artifacts/
 bags/
