@@ -3,6 +3,7 @@
 <robot name="delto_5f" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
     <xacro:include filename="$(find dg_description)/urdf/dg5f_left.xacro" />
+    <xacro:arg name="use_fake_hardware" default="false" />
   
     <link name="world" />
 
@@ -15,7 +16,12 @@
 
     <ros2_control name="GazeboSimSystem" type="system">
         <hardware>
-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
+            <xacro:if value="$(arg use_fake_hardware)">
+                <plugin>mock_components/GenericSystem</plugin>
+            </xacro:if>
+            <xacro:unless value="$(arg use_fake_hardware)">
+                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+            </xacro:unless>
         </hardware>
 
         <!-- Finger 1 joints -->
@@ -297,8 +303,8 @@
             <erp>0.0</erp>
         </constraints>
 
-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
-            filename="libign_ros2_control-system.so">
+        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
+            filename="libgz_ros2_control-system.so">
             <robot_param_node>robot_state_publisher</robot_param_node>
             <robot_param>robot_description</robot_param>
             <parameters>$(find dg5f_gz)/config/dg5f_left_gz_controller.yaml</parameters>

@@ -49,9 +49,17 @@ def generate_launch_description():
             description="Start RViz2 automatically with this launch file.",
         )
     )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "use_fake_hardware",
+            default_value="false",
+            description="Use mock ros2_control hardware instead of Gazebo Sim.",
+        )
+    )
 
     # Initialize Arguments
     gui = LaunchConfiguration("gui")
+    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
 
     # Get package paths
     pkg_delto_description = FindPackageShare(
@@ -62,10 +70,10 @@ def generate_launch_description():
     world_path = os.path.join(sdf_path, "config", "world.sdf")
     gz_gui_path = os.path.join(sdf_path, "config", "gui.config")
     # Set Gazebo model path
-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
+    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
+        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
     else:
-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
+        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
 
     # Gazebo
     gazebo = IncludeLaunchDescription(
@@ -90,6 +98,9 @@ def generate_launch_description():
             PathJoinSubstitution(
                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_both_gz.xacro"]
             ),
+            " ",
+            "use_fake_hardware:=",
+            use_fake_hardware,
         ]
     )
     robot_description_content2 = robot_description_content1
@@ -190,4 +201,4 @@ def generate_launch_description():
 
     ]
 
-    return LaunchDescription(nodes)
+    return LaunchDescription(declared_arguments + nodes)

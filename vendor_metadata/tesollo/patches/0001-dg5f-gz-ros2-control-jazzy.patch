@@ -1,0 +1,300 @@
+diff --git a/dg5f_gz/launch/dg5f_both_gz.launch.py b/dg5f_gz/launch/dg5f_both_gz.launch.py
+index 5628057..fdac7a3 100644
+--- a/dg5f_gz/launch/dg5f_both_gz.launch.py
++++ b/dg5f_gz/launch/dg5f_both_gz.launch.py
+@@ -49,9 +49,17 @@ def generate_launch_description():
+             description="Start RViz2 automatically with this launch file.",
+         )
+     )
++    declared_arguments.append(
++        DeclareLaunchArgument(
++            "use_fake_hardware",
++            default_value="false",
++            description="Use mock ros2_control hardware instead of Gazebo Sim.",
++        )
++    )
+ 
+     # Initialize Arguments
+     gui = LaunchConfiguration("gui")
++    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+ 
+     # Get package paths
+     pkg_delto_description = FindPackageShare(
+@@ -62,10 +70,10 @@ def generate_launch_description():
+     world_path = os.path.join(sdf_path, "config", "world.sdf")
+     gz_gui_path = os.path.join(sdf_path, "config", "gui.config")
+     # Set Gazebo model path
+-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
++    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
++        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
+     else:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
++        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
+ 
+     # Gazebo
+     gazebo = IncludeLaunchDescription(
+@@ -90,6 +98,9 @@ def generate_launch_description():
+             PathJoinSubstitution(
+                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_both_gz.xacro"]
+             ),
++            " ",
++            "use_fake_hardware:=",
++            use_fake_hardware,
+         ]
+     )
+     robot_description_content2 = robot_description_content1
+@@ -190,4 +201,4 @@ def generate_launch_description():
+ 
+     ]
+ 
+-    return LaunchDescription(nodes)
++    return LaunchDescription(declared_arguments + nodes)
+diff --git a/dg5f_gz/launch/dg5f_left_gz.launch.py b/dg5f_gz/launch/dg5f_left_gz.launch.py
+index c9b8346..1e7ad9e 100644
+--- a/dg5f_gz/launch/dg5f_left_gz.launch.py
++++ b/dg5f_gz/launch/dg5f_left_gz.launch.py
+@@ -48,9 +48,17 @@ def generate_launch_description():
+             description="Start RViz2 automatically with this launch file.",
+         )
+     )
++    declared_arguments.append(
++        DeclareLaunchArgument(
++            "use_fake_hardware",
++            default_value="false",
++            description="Use mock ros2_control hardware instead of Gazebo Sim.",
++        )
++    )
+ 
+     # Initialize Arguments
+     gui = LaunchConfiguration("gui")
++    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+ 
+     # Get package paths
+     pkg_delto_description = FindPackageShare(
+@@ -58,10 +66,10 @@ def generate_launch_description():
+     model_path = os.path.join(pkg_delto_description, "meshes")
+ 
+     # Set Gazebo model path
+-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
++    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
++        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
+     else:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
++        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
+ 
+     # Gazebo
+     gazebo = IncludeLaunchDescription(
+@@ -82,6 +90,9 @@ def generate_launch_description():
+             PathJoinSubstitution(
+                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
+             ),
++            " ",
++            "use_fake_hardware:=",
++            use_fake_hardware,
+         ]
+     )
+     robot_description_content2 = Command(
+@@ -91,6 +102,9 @@ def generate_launch_description():
+             PathJoinSubstitution(
+                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
+             ),
++            " ",
++            "use_fake_hardware:=",
++            use_fake_hardware,
+         ]
+     )
+ 
+@@ -195,4 +209,4 @@ def generate_launch_description():
+ 
+     ]
+ 
+-    return LaunchDescription(nodes)
++    return LaunchDescription(declared_arguments + nodes)
+diff --git a/dg5f_gz/launch/dg5f_right_gz.launch.py b/dg5f_gz/launch/dg5f_right_gz.launch.py
+index b20f72d..b914137 100644
+--- a/dg5f_gz/launch/dg5f_right_gz.launch.py
++++ b/dg5f_gz/launch/dg5f_right_gz.launch.py
+@@ -48,9 +48,17 @@ def generate_launch_description():
+             description="Start RViz2 automatically with this launch file.",
+         )
+     )
++    declared_arguments.append(
++        DeclareLaunchArgument(
++            "use_fake_hardware",
++            default_value="false",
++            description="Use mock ros2_control hardware instead of Gazebo Sim.",
++        )
++    )
+ 
+     # Initialize Arguments
+     gui = LaunchConfiguration("gui")
++    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+ 
+     # Get package paths
+     pkg_delto_description = FindPackageShare(
+@@ -58,10 +66,10 @@ def generate_launch_description():
+     model_path = os.path.join(pkg_delto_description, "meshes")
+ 
+     # Set Gazebo model path
+-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
++    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
++        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
+     else:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
++        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
+ 
+     # Gazebo
+     gazebo = IncludeLaunchDescription(
+@@ -82,6 +90,9 @@ def generate_launch_description():
+             PathJoinSubstitution(
+                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_right_gz.xacro"]
+             ),
++            " ",
++            "use_fake_hardware:=",
++            use_fake_hardware,
+         ]
+     )
+     robot_description_content2 = Command(
+@@ -91,6 +102,9 @@ def generate_launch_description():
+             PathJoinSubstitution(
+                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_right_gz.xacro"]
+             ),
++            " ",
++            "use_fake_hardware:=",
++            use_fake_hardware,
+         ]
+     )
+ 
+@@ -187,4 +201,4 @@ def generate_launch_description():
+         
+     ]
+ 
+-    return LaunchDescription(nodes)
++    return LaunchDescription(declared_arguments + nodes)
+diff --git a/dg5f_gz/package.xml b/dg5f_gz/package.xml
+index 1ed045f..2c68bd2 100644
+--- a/dg5f_gz/package.xml
++++ b/dg5f_gz/package.xml
+@@ -11,7 +11,7 @@
+ 
+   <depend>rclcpp</depend>
+   <depend>std_msgs</depend>
+-  <depend>ign_ros2_control</depend>
++  <depend>gz_ros2_control</depend>
+   <depend>ros_gz</depend>
+   <depend>ros2_control</depend>
+   <depend>ros2_controllers</depend>
+diff --git a/dg5f_gz/urdf/dg5f_both_gz.xacro b/dg5f_gz/urdf/dg5f_both_gz.xacro
+index 9c23416..045a653 100644
+--- a/dg5f_gz/urdf/dg5f_both_gz.xacro
++++ b/dg5f_gz/urdf/dg5f_both_gz.xacro
+@@ -4,6 +4,7 @@
+ 
+     <xacro:include filename="$(find dg_description)/urdf/dg5f_right.xacro" />
+     <xacro:include filename="$(find dg_description)/urdf/dg5f_left.xacro" />
++    <xacro:arg name="use_fake_hardware" default="false" />
+ 
+     <link name="world" />
+     <joint name="world_to_left_fixed" type="fixed">
+@@ -20,7 +21,12 @@
+ 
+     <ros2_control name="GazeboSimSystem" type="system">
+         <hardware>
+-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
++            <xacro:if value="$(arg use_fake_hardware)">
++                <plugin>mock_components/GenericSystem</plugin>
++            </xacro:if>
++            <xacro:unless value="$(arg use_fake_hardware)">
++                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
++            </xacro:unless>
+         </hardware>
+ 
+         <joint name="lj_dg_1_1">
+@@ -518,8 +524,8 @@
+             <erp>0.0</erp>
+         </constraints>
+ 
+-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
+-            filename="libign_ros2_control-system.so">
++        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
++            filename="libgz_ros2_control-system.so">
+             <robot_param_node>robot_state_publisher</robot_param_node>
+             <robot_param>robot_description</robot_param>
+             <parameters>$(find dg5f_gz)/config/dg5f_both_gz_controller.yaml</parameters>
+diff --git a/dg5f_gz/urdf/dg5f_left_gz.xacro b/dg5f_gz/urdf/dg5f_left_gz.xacro
+index 88b600d..c543ed9 100644
+--- a/dg5f_gz/urdf/dg5f_left_gz.xacro
++++ b/dg5f_gz/urdf/dg5f_left_gz.xacro
+@@ -3,6 +3,7 @@
+ <robot name="delto_5f" xmlns:xacro="http://www.ros.org/wiki/xacro">
+ 
+     <xacro:include filename="$(find dg_description)/urdf/dg5f_left.xacro" />
++    <xacro:arg name="use_fake_hardware" default="false" />
+   
+     <link name="world" />
+ 
+@@ -15,7 +16,12 @@
+ 
+     <ros2_control name="GazeboSimSystem" type="system">
+         <hardware>
+-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
++            <xacro:if value="$(arg use_fake_hardware)">
++                <plugin>mock_components/GenericSystem</plugin>
++            </xacro:if>
++            <xacro:unless value="$(arg use_fake_hardware)">
++                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
++            </xacro:unless>
+         </hardware>
+ 
+         <!-- Finger 1 joints -->
+@@ -297,8 +303,8 @@
+             <erp>0.0</erp>
+         </constraints>
+ 
+-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
+-            filename="libign_ros2_control-system.so">
++        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
++            filename="libgz_ros2_control-system.so">
+             <robot_param_node>robot_state_publisher</robot_param_node>
+             <robot_param>robot_description</robot_param>
+             <parameters>$(find dg5f_gz)/config/dg5f_left_gz_controller.yaml</parameters>
+diff --git a/dg5f_gz/urdf/dg5f_right_gz.xacro b/dg5f_gz/urdf/dg5f_right_gz.xacro
+index ea2042f..3afd513 100644
+--- a/dg5f_gz/urdf/dg5f_right_gz.xacro
++++ b/dg5f_gz/urdf/dg5f_right_gz.xacro
+@@ -3,6 +3,7 @@
+ <robot name="delto_5f" xmlns:xacro="http://www.ros.org/wiki/xacro">
+ 
+     <xacro:include filename="$(find dg_description)/urdf/dg5f_right.xacro" />
++    <xacro:arg name="use_fake_hardware" default="false" />
+     <link name="world" />
+ 
+     <joint name="world_to_base_fixed" type="fixed">
+@@ -14,7 +15,12 @@
+ 
+     <ros2_control name="GazeboSimSystem" type="system">
+         <hardware>
+-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
++            <xacro:if value="$(arg use_fake_hardware)">
++                <plugin>mock_components/GenericSystem</plugin>
++            </xacro:if>
++            <xacro:unless value="$(arg use_fake_hardware)">
++                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
++            </xacro:unless>
+         </hardware>
+ 
+         <!-- Finger 1 joints -->
+@@ -296,8 +302,8 @@
+             <erp>0.0</erp>
+         </constraints>
+ 
+-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
+-            filename="libign_ros2_control-system.so">
++        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
++            filename="libgz_ros2_control-system.so">
+             <robot_param_node>robot_state_publisher</robot_param_node>
+             <robot_param>robot_description</robot_param>
+             <parameters>$(find dg5f_gz)/config/dg5f_right_gz_controller.yaml</parameters>

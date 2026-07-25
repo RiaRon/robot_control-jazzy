@@ -59,3 +59,70 @@ def test_snapshot_verifier_reports_missing_and_unexpected_in_sorted_order(tmp_pa
         "missing: b.txt",
         "unexpected: a.txt",
     ]
+
+
+def test_snapshot_verifier_applies_declared_patches(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    patches = tmp_path / "patches"
+    source.mkdir()
+    snapshot.mkdir()
+    patches.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (snapshot / "example.txt").write_text("after\n")
+    (patches / "0001-change.patch").write_text(
+        "--- a/example.txt\n"
+        "+++ b/example.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\npatches:\n  - patches/0001-change.patch\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == []
+
+    (snapshot / "example.txt").write_text("undeclared edit\n")
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "content mismatch: example.txt"
+    ]
+
+
+def test_snapshot_verifier_rejects_missing_patch(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    source.mkdir()
+    snapshot.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (snapshot / "example.txt").write_text("before\n")
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\npatches:\n  - patches/0001-change.patch\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "patch failed: patches/0001-change.patch"
+    ]
+
+
+def test_snapshot_verifier_rejects_absolute_patch_path(tmp_path):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    patches = tmp_path / "patches"
+    source.mkdir()
+    snapshot.mkdir()
+    patches.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (snapshot / "example.txt").write_text("after\n")
+    patch = patches / "0001-change.patch"
+    patch.write_text(
+        "--- a/example.txt\n"
+        "+++ b/example.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text(f"excluded: []\npatches:\n  - {patch}\n")
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        f"patch failed: {patch}"
+    ]

@@ -15,3 +15,5 @@ excluded:
   - "*.pyc"
   - "*.pyo"
 local_modifications: []
+patches:
+  - patches/0001-dg5f-gz-ros2-control-jazzy.patch
