@@ -74,7 +74,7 @@ def materialize_expected_tree(
                 capture_output=True,
                 check=True,
             )
-        except subprocess.CalledProcessError:
+        except (OSError, subprocess.CalledProcessError):
             raise _PatchApplicationError(relative_path)
 
 

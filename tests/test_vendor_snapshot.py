@@ -126,3 +126,34 @@ def test_snapshot_verifier_rejects_absolute_patch_path(tmp_path):
     assert verify_snapshot(metadata, source, snapshot) == [
         f"patch failed: {patch}"
     ]
+
+
+def test_snapshot_verifier_rejects_unavailable_patch_command(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    snapshot = tmp_path / "snapshot"
+    patches = tmp_path / "patches"
+    source.mkdir()
+    snapshot.mkdir()
+    patches.mkdir()
+    (source / "example.txt").write_text("before\n")
+    (snapshot / "example.txt").write_text("after\n")
+    (patches / "0001-change.patch").write_text(
+        "--- a/example.txt\n"
+        "+++ b/example.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    metadata = tmp_path / "UPSTREAM.yaml"
+    metadata.write_text("excluded: []\npatches:\n  - patches/0001-change.patch\n")
+
+    def unavailable_patch_command(*args, **kwargs):
+        raise OSError("patch command unavailable")
+
+    monkeypatch.setattr(
+        "tools.verify_vendor_snapshot.subprocess.run", unavailable_patch_command
+    )
+
+    assert verify_snapshot(metadata, source, snapshot) == [
+        "patch failed: patches/0001-change.patch"
+    ]
