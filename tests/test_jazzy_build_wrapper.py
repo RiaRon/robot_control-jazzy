@@ -45,3 +45,12 @@ def test_build_wrapper_uses_branch_local_products(tmp_path):
     assert str(workspace / "build") in arguments
     assert str(workspace / "install") in arguments
     assert str(workspace / "log") in arguments
+    packages_up_to = arguments.index("--packages-up-to")
+    assert arguments[packages_up_to + 1 :] == [
+        "openarm",
+        "openarm_bimanual_moveit_config",
+        "dg5f_driver",
+        "dg5f_gz",
+    ]
+    assert "dg3f_m_gz" not in arguments
+    assert "dg4f_gz" not in arguments

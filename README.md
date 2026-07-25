@@ -20,17 +20,20 @@ robotctl r2s preflight
 robotctl r2s collect --dry-run
 ```
 
-Install ROS dependencies and build the imported drivers with:
+Install the Jazzy dependencies and build the supported OpenArm/DG5F graph with:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-rosdep install --from-paths ros_ws/src --ignore-src -r -y
+./ros_ws/install_dependencies_jazzy.sh
 ./ros_ws/build.sh
 source ros_ws/install/setup.bash
 ```
 
-The wrapper rejects non-Jazzy environments and keeps all generated products
-inside `ros_ws/{build,install,log}`.
+`install_dependencies_jazzy.sh` deliberately prompts through `sudo`; run it
+only when you are ready to grant the operator-controlled package changes. The
+build wrapper rejects non-Jazzy environments, builds only the supported
+OpenArm/DG5F leaves, and keeps all generated products inside
+`ros_ws/{build,install,log}`.
 
 No command is published unless `--execute` is explicit. A ROS adapter must
 also be installed for execution; the core CLI deliberately fails without one.
