@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import math
 from pathlib import Path
+import subprocess
 import sys
 
 import numpy as np
@@ -318,6 +319,25 @@ def test_action_results_are_judged_by_their_own_fields():
 
 
 def test_core_package_imports_without_rclpy():
-    """The core CLI must fail cleanly without ROS, not crash on import."""
-    assert "rclpy" not in sys.modules or sys.modules["rclpy"] is None
-    assert Path(sys.modules["robot_control.ros_adapter"].__file__).name == "ros_adapter.py"
+    """The core CLI must fail cleanly without ROS, not crash on import.
+
+    Checked in a subprocess rather than by inspecting this process's
+    sys.modules: on a machine with Jazzy sourced, any earlier test that builds
+    a real adapter imports rclpy for the whole session, and an in-process check
+    would then report a failure that says nothing about the import contract.
+    """
+    probe = (
+        "import sys\n"
+        "sys.modules['rclpy'] = None\n"  # importable name, unusable module
+        "import robot_control.cli, robot_control.ros_adapter as adapter\n"
+        "print(adapter.__file__)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parents[1],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()).name == "ros_adapter.py"

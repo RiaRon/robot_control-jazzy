@@ -72,22 +72,78 @@ robotctl pose joints --group openarm_right_arm --named home --execute
 
 ## Running against the real robot
 
-Everything above runs on fake hardware. To drive the physical arms:
+Everything above runs on fake hardware. Driving the physical arms takes two
+steps the fake path does not need: the CAN buses have to be configured and
+brought up first, and the bringup has to be told which buses to open.
+
+### 1. Bring the CAN buses up
+
+`ip link show` names the buses in enumeration order, not by arm. Confirm which
+adapter is which before configuring anything:
 
 ```bash
-# --real opens the named CAN buses and the physical arms will move:
-./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1
+ip -br link show type can
 ```
 
-Both buses must be named; the wrapper refuses to guess. Before the first real
-run:
+A leader–follower rig enumerates four buses. On this one the **follower** arms
+are `can2` (right) and `can3` (left); the leader takes `can0` and `can1`.
+Substitute the names your own `ip link` output reports.
 
-1. Bring the buses up (`ip link show can0` should report `state UP`).
-2. Keep the E-stop within reach and the workspace clear.
-3. Check the pose with a dry run first. Every `pose` command prints exactly
+The interfaces must be configured in **CAN FD** mode at **1 Mbit/s arbitration
+and 5 Mbit/s data**. `openarm_description` renders its `ros2_control` block with
+`can_fd:=true` and `demo.launch.py` does not expose an argument to change it, so
+a bus brought up in CAN 2.0 mode links but never exchanges a frame with the
+motors:
+
+```bash
+# Repeat for each bus this run will open. Configuring requires the link down.
+for iface in can2 can3; do
+  sudo ip link set "$iface" down
+  sudo ip link set "$iface" type can bitrate 1000000 dbitrate 5000000 fd on
+  sudo ip link set "$iface" up
+done
+```
+
+Verify before launching anything — `state UP` and `fd on` must both appear:
+
+```bash
+ip -details link show can2 | grep -E "state|fd on"
+```
+
+The vendored `ros_ws/src/openarm_can/setup/openarm-can-configure-socketcan-4-arms`
+does the same thing for all four buses at once, but it aborts unless `can0`
+through `can3` all exist, and it needs `-fd` passed explicitly:
+
+```bash
+./ros_ws/src/openarm_can/setup/openarm-can-configure-socketcan-4-arms -fd
+```
+
+### 2. Launch against those buses
+
+```bash
+source /opt/ros/jazzy/setup.bash
+# --real opens the named CAN buses and the physical arms will move:
+./ros_ws/pose_bringup.sh --real --right-can can2 --left-can can3
+```
+
+Both buses must be named; the wrapper refuses to guess, and the names are
+positional to the arm, not to the number. Getting them the wrong way round
+mirrors the robot: the left arm answers commands addressed to the right.
+
+The pose commands themselves are identical to the fake-hardware ones — same
+groups, same options, same gate. Nothing in `robotctl` changes between fake and
+real hardware; only what is on the other end of the controller does.
+
+### Before the first real run
+
+1. Keep the E-stop within reach and the workspace clear.
+2. Read the pose before commanding one. `robotctl pose show` tells you where
+   the arm actually is; `--named home` sends every joint to zero, which from an
+   unknown pose can be a large move.
+3. Check the plan with a dry run first. Every `pose` command prints exactly
    what it would send before you add `--execute`.
-4. Start from `--named home`, and prefer small `--relative` steps over absolute
-   `--xyz` targets until you trust the frame.
+4. Prefer small `--relative` steps over absolute `--xyz` targets until you
+   trust the frame.
 
 The profile's velocity limits apply to real hardware exactly as they do to fake
 hardware, and `--duration` sets how long a move is allowed to take: a short
@@ -274,10 +330,12 @@ anything that did try to open a bus fails loudly instead of finding a real one.
 
 ```bash
 # --real drives the physical robot; both buses must be named explicitly:
-robotctl pose rviz --real --right-can can0 --left-can can1
+robotctl pose rviz --real --right-can can2 --left-can can3
 ```
 
-`--real` without both interfaces is refused rather than guessed.
+`--real` without both interfaces is refused rather than guessed. The buses must
+already be up in CAN FD mode; see [Running against the real
+robot](#running-against-the-real-robot).
 
 **Exit codes:** `0` the launch exited cleanly; `2` bringup wrapper missing,
 non-Jazzy environment, unbuilt workspace, or `--real` without both buses;
@@ -485,6 +543,25 @@ The bracket around the first character stops the pattern from matching the
 **`error: source a ROS 2 Jazzy environment`**
 `ROS_DISTRO` is not `jazzy`. This branch is Jazzy-only; Humble lives on a
 separate long-lived branch.
+
+**A `--real` bringup starts but no joint states ever arrive**
+The buses are configured but not talking. Check, in this order:
+
+```bash
+ip -details link show can2 | grep -E "state|fd on"   # state UP and fd on
+candump can2                                         # frames while the arm is powered
+```
+
+`state STOPPED` means the link was never brought up. `state UP` with no frames
+in `candump` means either the arm is unpowered, the bus is the wrong one, or it
+was configured in CAN 2.0 mode while the description asks for CAN FD. `state
+BUS-OFF` means a bitrate mismatch or missing termination — reconfigure at
+1 Mbit/s / 5 Mbit/s FD rather than restarting the launch.
+
+**The wrong arm moves**
+`--right-can` and `--left-can` were swapped. The names are positional to the
+arm, and nothing downstream can detect the mistake: each bus reports plausible
+joint values either way.
 
 **RViz reports `Fail: ABORTED: No motion plan found` or the Plan button does
 nothing**
