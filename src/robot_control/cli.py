@@ -37,6 +37,7 @@ from .identification import (
     combine,
     design_pose_set,
     fit_second_order,
+    fit_second_order_runs,
     fit_static_gravity,
     score_holdout,
     split_repetitions,
@@ -226,6 +227,12 @@ def _parser() -> argparse.ArgumentParser:
                 type=Path,
                 help="robot description to compute the modelled torque along the "
                 "track; required with --static",
+            )
+            item.add_argument(
+                "--manifest",
+                type=Path,
+                help="run manifest from r2s collect --repetitions 3; fits across "
+                "the runs it names, instead of one --track",
             )
         if stage == "normalize":
             item.add_argument("--input", type=Path)
@@ -1118,7 +1125,18 @@ def _fit(args, profile) -> int:
     """
     from .kinematics import KinematicsError, chain_from_urdf
 
-    track = read_hdf5(args.track)
+    provenance: dict = {}
+    if args.manifest is not None:
+        try:
+            tracks, provenance = _fit_tracks_from_manifest(args, profile)
+        except (FitError, TrackError, ValueError, OSError, KeyError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+    else:
+        tracks = [read_hdf5(args.track)]
+    # Every run shares the excitation and the joints, so one stands in for all
+    # of them wherever only the shape or the names matter.
+    track = tracks[0]
     gravity = None
     static = None
     group = None
@@ -1159,16 +1177,23 @@ def _fit(args, profile) -> int:
             return UNUSABLE
         # Corrected by the alpha the static fit measured, so the column is the
         # load the arm actually carries rather than the one the URDF describes.
-        gravity = static.torque_scale * np.array(
-            [chain.gravity_torque(sample) for sample in track.measured]
-        )
+        gravity = [
+            static.torque_scale
+            * np.array([chain.gravity_torque(sample) for sample in run.measured])
+            for run in tracks
+        ]
 
     try:
-        estimate = fit_second_order(
-            track.timestamps_ns * 1e-9,
-            track.command,
-            track.measured,
-            gravity_torque=gravity,
+        estimate = fit_second_order_runs(
+            [
+                (
+                    run.timestamps_ns * 1e-9,
+                    run.command,
+                    run.measured,
+                    None if gravity is None else gravity[index],
+                )
+                for index, run in enumerate(tracks)
+            ]
         )
     except FitError as error:
         print(f"error: {error}")
@@ -1182,6 +1207,7 @@ def _fit(args, profile) -> int:
         "friction": estimate.friction.tolist(),
         "residual_rmse": estimate.residual_rmse.tolist(),
         "track_sha256": track_sha256(track),
+        **provenance,
     }
 
     if static is not None:
@@ -1267,16 +1293,7 @@ def _score_manifest(args, profile) -> tuple[dict, dict]:
             "--manifest names the run to score against, so it needs --fit: the "
             "model being scored"
         )
-    manifest = json.loads(Path(args.manifest).read_text())
-    asset = manifest.get("asset") or {}
-    if (
-        manifest.get("profile") != profile.name
-        or asset.get("id") != profile.asset_id
-        or asset.get("manifest_sha256") != profile.manifest_sha256
-    ):
-        raise ValueError(
-            "the run manifest was recorded against another profile or asset"
-        )
+    manifest = _read_manifest(args.manifest, profile)
     group = _group(profile, manifest["group"])
     names = [entry["path"] for entry in manifest["runs"]]
     holdout = [names[index] for index in manifest["holdout_runs"]]
@@ -1329,6 +1346,44 @@ def _score_manifest(args, profile) -> tuple[dict, dict]:
         "fit_runs": [names[index] for index in manifest["fit_runs"]],
         "holdout_runs": holdout,
         "baseline_rmse_rad": scored.baseline_rmse_rad,
+    }
+
+
+def _read_manifest(path: Path, profile) -> dict:
+    manifest = json.loads(Path(path).read_text())
+    asset = manifest.get("asset") or {}
+    if (
+        manifest.get("profile") != profile.name
+        or asset.get("id") != profile.asset_id
+        or asset.get("manifest_sha256") != profile.manifest_sha256
+    ):
+        raise ValueError(
+            f"the run manifest names profile {manifest.get('profile')!r} and "
+            f"asset {asset.get('id')!r}, which are not this profile and asset"
+        )
+    return manifest
+
+
+def _fit_tracks_from_manifest(args, profile) -> tuple[list, dict]:
+    """Normalize the runs the manifest names for fitting, and cite them."""
+    manifest = _read_manifest(args.manifest, profile)
+    group = _group(profile, manifest["group"])
+    names = [entry["path"] for entry in manifest["runs"]]
+    fit_names = [names[index] for index in manifest["fit_runs"]]
+    holdout_names = [names[index] for index in manifest["holdout_runs"]]
+    overlap = sorted(set(fit_names) & set(holdout_names))
+    if overlap:
+        raise ValueError(
+            f"the manifest fits on {overlap}, which it also holds out. "
+            "Validating against a run the model was fitted on validates nothing."
+        )
+    root = Path(args.manifest).parent
+    rate = profile.ros["jazzy"].command_rate_hz
+    tracks = [_load_recording(root / name, profile, rate) for name in fit_names]
+    return tracks, {
+        "group": group.name,
+        "fit_runs": fit_names,
+        "holdout_runs": holdout_names,
     }
 
 
@@ -1645,6 +1700,18 @@ def _bundle(args, profile) -> int:
         except CalibrationError as error:
             print(f"error: {path}: {error}")
             return UNUSABLE
+        if "fit_runs" in fit:
+            # Carried from the fit rather than asked for again: the fit is what
+            # knows which runs it actually used.
+            source = dict(payload.get("source") or {})
+            source.update(
+                {
+                    "track_sha256": fit["track_sha256"],
+                    "fit_runs": fit["fit_runs"],
+                    "holdout_runs": fit.get("holdout_runs", []),
+                }
+            )
+            payload["source"] = source
 
     try:
         written = write_bundle(args.output, payload, profile)
@@ -1837,8 +1904,14 @@ def main(argv: list[str] | None = None) -> int:
             return UNUSABLE
         print(f"normalize: {args.output} sha256={track_sha256(track)}")
     elif args.stage == "fit":
-        if not args.track or not args.output:
-            raise SystemExit("--track and --output are required")
+        if not args.output:
+            raise SystemExit("--output is required")
+        if not args.track and not args.manifest:
+            print(
+                "error: fit needs --track, one normalized HDF5 track, or "
+                "--manifest, which fits across the runs it names"
+            )
+            return UNUSABLE
         if args.population <= 0:
             raise SystemExit("--population must be positive")
         return _fit(args, profile)

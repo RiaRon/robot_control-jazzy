@@ -576,6 +576,14 @@ def fit_second_order(
     Omitting it keeps the older three-parameter fit, which is right for a track
     with no standing load in it — a horizontal joint, or synthetic data.
     """
+    return fit_second_order_runs(
+        [(time_sec, command, measured, gravity_torque)]
+    )
+
+
+def _second_order_rows(run) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Design rows and targets, one pair per joint, for one uniform run."""
+    time_sec, command, measured, gravity_torque = run
     time_sec = np.asarray(time_sec, dtype=float)
     command = np.asarray(command, dtype=float)
     measured = np.asarray(measured, dtype=float)
@@ -601,24 +609,62 @@ def fit_second_order(
     step = float(np.mean(dt))
     velocity = np.diff(measured, axis=0) / step
     acceleration = np.diff(velocity, axis=0) / step
-    width = command.shape[1]
-    stiffness = np.empty(width)
-    damping = np.empty(width)
-    friction = np.empty(width)
-    residual = np.empty(width)
-    inverse_inertia = None if gravity_torque is None else np.empty(width)
-    for joint in range(width):
+
+    designs, targets = [], []
+    for joint in range(command.shape[1]):
         error = command[1:-1, joint] - measured[1:-1, joint]
         prior_velocity = velocity[:-1, joint]
         columns = [error, -prior_velocity, -np.sign(prior_velocity)]
         if gravity_torque is not None:
             # Aligned with `error`, which reads the same window of samples.
             columns.append(-gravity_torque[1:-1, joint])
-        design = np.column_stack(columns)
-        params, _, rank, _ = np.linalg.lstsq(design, acceleration[:, joint], rcond=None)
+        designs.append(np.column_stack(columns))
+        targets.append(acceleration[:, joint])
+    return designs, targets
+
+
+def fit_second_order_runs(runs) -> SecondOrderEstimate:
+    """Fit one model across several runs of the same excitation.
+
+    Stacked as rows of one regression rather than fitted separately and
+    averaged: the runs are repeats of one experiment, so the parameters are
+    shared and every sample is evidence about the same numbers. Averaging
+    per-run fits would instead weight a run that happened to be short as
+    heavily as a long one.
+
+    The runs are not concatenated into a single track, because the joins
+    between them are not motion — the arm was driven back to the start in
+    between — and differentiating across a join would invent an acceleration
+    that never happened.
+    """
+    runs = list(runs)
+    if not runs:
+        raise FitError("a fit needs at least one run")
+    per_run = [_second_order_rows(run) for run in runs]
+    widths = {len(designs) for designs, _targets in per_run}
+    if len(widths) != 1:
+        raise FitError(f"the runs cover different joint counts: {sorted(widths)}")
+    columns = {designs[0].shape[1] for designs, _targets in per_run}
+    if len(columns) != 1:
+        raise FitError(
+            "some runs carry a gravity column and some do not, so they cannot "
+            "be fitted together"
+        )
+
+    width = widths.pop()
+    stiffness = np.empty(width)
+    damping = np.empty(width)
+    friction = np.empty(width)
+    residual = np.empty(width)
+    with_gravity = columns.pop() == 4
+    inverse_inertia = np.empty(width) if with_gravity else None
+    for joint in range(width):
+        design = np.vstack([designs[joint] for designs, _targets in per_run])
+        target = np.concatenate([targets[joint] for _designs, targets in per_run])
+        params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
         if rank < 2 or params[0] <= 0 or params[1] < 0:
             raise FitError(f"unidentifiable dynamics for joint {joint}")
-        if gravity_torque is not None:
+        if with_gravity:
             if params[3] <= 0:
                 raise FitError(
                     f"joint {joint} accelerates towards its load rather than away "
@@ -628,7 +674,7 @@ def fit_second_order(
             inverse_inertia[joint] = params[3]
         prediction = design @ params
         stiffness[joint], damping[joint], friction[joint] = params[:3]
-        residual[joint] = float(np.sqrt(np.mean((prediction - acceleration[:, joint]) ** 2)))
+        residual[joint] = float(np.sqrt(np.mean((prediction - target) ** 2)))
     return SecondOrderEstimate(
         stiffness, damping, friction, residual, inverse_inertia
     )

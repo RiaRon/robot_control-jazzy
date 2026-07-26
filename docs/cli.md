@@ -894,7 +894,8 @@ Fit a second-order joint model to a normalized track.
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
-| `--track` | *required* | HDF5 track from `normalize` |
+| `--track` | *one of these two* | HDF5 track from `normalize` |
+| `--manifest` | *one of these two* | Run manifest; fits across the runs it names |
 | `--output` | *required* | JSON estimate to write |
 | `--population` | `128` | Candidate population size; must be positive |
 | `--static` | — | Stiffness set from `r2s identify`; adds the gravity term and turns the ratios into physical parameters |
@@ -913,6 +914,27 @@ qdd = k (q_cmd - q) - d qd - f sign(qd)
 
 so what comes out is `k = kp/J`, `d = b/J`, `f = tau_f/J` — every parameter
 divided by an inertia the track cannot separate from them.
+
+### Fitting across the runs a manifest names
+
+```bash
+robotctl r2s fit --manifest run.json --output estimate.json
+```
+
+The two fit runs are stacked as rows of **one** regression rather than fitted
+separately and averaged. They are repeats of one experiment, so the parameters
+are shared and every sample is evidence about the same numbers; averaging
+per-run fits would weight a short run as heavily as a long one.
+
+They are not concatenated into a single track either. The join between two runs
+is not motion — the arm was driven back to the start in between — and
+differentiating across it would invent an acceleration that never happened.
+
+A manifest that fits on a run it also holds out is refused. Validating against a
+run the model was fitted on validates nothing.
+
+The estimate records `fit_runs` and `holdout_runs`, which `r2s bundle` carries
+into the bundle's `source` block: the fit is what knows which runs it used.
 
 ### With `--static`: the gravity term, and physical units
 
@@ -954,10 +976,12 @@ The output then also carries `inertia_kg_m2`, `damping_nm_s_per_rad`,
 `friction_nm` and `stiffness_nm_per_rad` — the set a simulator needs to behave
 like this arm, measured rather than taken from the URDF.
 
-**Exit codes:** `0` written; `2` `--static` without `--urdf`, a static estimate
-from another profile or asset, a track covering other joints, a URDF the chain
-cannot be built from, or dynamics the fit cannot identify; `3` the two inertias
-disagree; `SystemExit` for a missing path or a non-positive `--population`.
+**Exit codes:** `0` written; `2` neither `--track` nor `--manifest`, `--static`
+without `--urdf`, a static estimate or manifest from another profile or asset, a
+track covering other joints, a manifest that fits on its own holdout, a URDF the
+chain cannot be built from, or dynamics the fit cannot identify; `3` the two
+inertias disagree; `SystemExit` for a missing `--output` or a non-positive
+`--population`.
 
 ## `robotctl r2s identify`
 
