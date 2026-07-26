@@ -541,12 +541,63 @@ identify: 4 poses, 12 rounds at most per joint
 변하지 않은 관절의 강성은 그 "뭔가"입니다. 하류에서 그게 관성이 되면 그 뒤로는
 측정값과 구별되지 않습니다.
 
-**3) 동적 트랙과 합칩니다.** URDF를 실행 중인 스택에서 받아옵니다.
+**3) 동적 트랙을 수집합니다.** 여진을 발행하고 응답을 기록합니다.
+
+먼저 검토 — `--execute` 없이는 아무것도 발행하지 않습니다.
+
+```bash
+robotctl r2s collect --group openarm_right_arm
+```
+
+```text
+openarm_right_arm: amplitude_scale=0.3 samples=611 (6.1 s at 100 Hz) phases=hold,bridge,step,ramp,multisine
+DRY RUN: nothing was published; pass --execute to collect
+```
+
+여진은 **현재 자세** 기준으로 만들어집니다. 팔 한계가 대칭이라 범위 중간값은 전
+관절 0이고, 거기서 시작하면 여진 전에 큰 이동이 먼저 일어납니다. dry run도
+로봇이 필요한 이유가 이것입니다 — 중간값 기준으로 검토하고 `--execute`는 현재
+자세로 돌린다면, 실행되지 않을 트랙을 검토하는 셈입니다.
+
+`bridge`가 위상 목록에 있는 이유: 위상들은 모양이고 그 사이 이음매는 불연속인데,
+실제 프로파일 기준으로 램프→multisine 이음매가 100 Hz에서 **속도 한계의 7배**를
+요구합니다. 진폭을 줄여 불연속을 한 주기에 맞추면 여진이 7분의 1로 쪼그라들어서,
+대신 이음매를 한계 속도로 이어줍니다. 기본 배율에서 11 샘플 추가입니다.
+
+```bash
+# --execute가 100 Hz로 위치 명령을 발행하고 팔이 여진 전체를 지나갑니다.
+# 세 번 반복하며 사이사이 시작 자세로 돌아옵니다. E-stop 준비하십시오.
+robotctl r2s collect --group openarm_right_arm --output run.npz --repetitions 3 --execute
+```
+
+**출발 전에 트랙 전체를 검증합니다.** 중간에 멈추면 아무도 고르지 않은 속도로
+여진 도중에 팔이 남습니다.
+
+세 번인 이유는 두 개로 적합하고 하나를 남겨두기 위해서입니다. 두 번이면 각각
+하나씩이라 적합된 모델을 검증할 대상이 없어서 `2`는 거부합니다.
+
+```bash
+robotctl r2s normalize --input run0.npz --output track0.h5
+```
+
+`/joint_states`는 best-effort로 구독되어 메시지가 유실됩니다. 유실 구간을
+보간하면 **아무도 측정하지 않은 데이터를 지나는 매끄러운 곡선**이 되고, 적합은
+그 곡선과 측정값을 구별하지 못합니다. `--max-gap-periods`(기본 20)를 넘으면
+거부합니다.
+
+**4) 정적·동적을 합칩니다.** URDF를 실행 중인 스택에서 받아옵니다.
 
 ```bash
 ros2 param get --hide-type /robot_state_publisher robot_description > robot.urdf
-robotctl r2s fit --track track.h5 --output right.json --static static.json --urdf robot.urdf
+robotctl r2s fit --manifest run.json --output right.json --static static.json --urdf robot.urdf
 ```
+
+`--manifest`가 지정한 두 run에 **하나의 회귀**로 적합합니다. 따로 적합해서
+평균내지 않습니다 — 같은 실험의 반복이라 파라미터가 공유되고 모든 샘플이 같은
+숫자에 대한 증거입니다. 평균을 내면 짧은 run이 긴 run과 같은 무게를 갖습니다.
+그렇다고 하나의 트랙으로 이어붙이지도 않습니다. run 사이 이음매는 운동이
+아니라 (그 사이 팔을 시작 자세로 되돌렸습니다) 그걸 미분하면 일어난 적 없는
+가속도를 만들어냅니다.
 
 ```text
   joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   kp (N.m/rad)   J from gravity   gap
@@ -559,13 +610,23 @@ robotctl r2s fit --track track.h5 --output right.json --static static.json --urd
 아닌 URDF를 잡아내는 유일한 검사입니다. 25% 넘게 벌어지면 거부하고 아무것도
 쓰지 않습니다.
 
-**4) 번들에 넣습니다.**
+**5) 번들에 넣고 검증합니다.**
 
 ```bash
 robotctl r2s bundle --base bundle.json --fit right.json --fit left.json --output identified.json
-robotctl r2s validate --bundle identified.json --metrics holdout.json --output verdict.json
+robotctl r2s validate --bundle identified.json --manifest run.json --fit right.json --output verdict.json
 robotctl r2s export --bundle identified.json --validation verdict.json --output release.json
 ```
+
+`validate`는 손으로 쓴 메트릭 파일을 읽지 않고 **남겨둔 run에 대해 직접
+채점합니다.** 모델을 그 run의 명령을 따라 **개루프로** 시뮬레이션하고 실제
+측정값과 비교합니다. 개루프인 게 핵심입니다 — 매 스텝 측정값을 되먹이면 이미
+받은 샘플 사이를 얼마나 잘 보간하는지를 재게 되고, 그건 어떤 모델이든 잘합니다.
+시뮬레이터는 그 샘플들 없이 돌아야 합니다.
+
+`improvement_fraction`의 기준선은 **팔이 명령대로 도달했다는 가정**입니다.
+식별을 아예 안 한 사람이 믿을 내용이고, 모델이 그걸 이겨야 들고 다닐 가치가
+있습니다.
 
 각 그룹에 `nominal` 옆에 `identified` 블록이 생깁니다. 성격이 다릅니다 —
 `nominal`은 그룹당 하나의 추정치, `identified`는 **관절당 하나의 측정값**이라
@@ -578,12 +639,12 @@ robotctl r2s export --bundle identified.json --validation verdict.json --output 
 
 ### 아직 남은 것
 
-- **동적 트랙을 실물에서 수집하는 경로가 없습니다.** `r2s collect --execute`는
-  아직 `ROS publisher backend is required`를 출력하고 아무것도 발행하지
-  않습니다. 위 3)의 `track.h5`는 그래서 지금 실물로 만들 수 없습니다. 1)~2)의
-  static 식별과 4)의 번들은 실물로 됩니다.
-- 실측 파라미터는 아직 없습니다. `docs/jazzy-verification.md`에 측정하면
-  기록합니다.
+파이프라인은 이제 `collect → normalize → fit → bundle → validate → export`가
+끊긴 데 없이 이어집니다. 다만 **실기에서 한 번도 돌린 적이 없습니다.** 검증된
+건 전부 합성 로봇 기준이고, 뭐가 검증됐고 뭐가 안 됐는지는
+`docs/jazzy-verification.md`에 적어뒀습니다.
+
+실측 파라미터(`J`, `b`, `τ_f`, `kp`)는 아직 없습니다.
 
 ## 그 밖의 명령
 

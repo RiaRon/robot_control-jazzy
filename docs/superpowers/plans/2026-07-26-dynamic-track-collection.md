@@ -1,5 +1,12 @@
 # Collecting a dynamic track from the real arm
 
+> **Status.** All six tasks implemented (`0235a5f`..`8e7164c`). The pipeline runs
+> end to end against a synthetic robot; **nothing has run on hardware**. Building
+> it exposed a ninth gap the audit missed — the excitation exceeded the profile's
+> velocity limit sevenfold at its phase joins, so `collect --execute` could never
+> have published it — and a seeding error in the holdout predictor. Both are
+> recorded in `docs/jazzy-verification.md`, along with the real-run checklist.
+
 ## Why
 
 `r2s fit --static` now produces an inertia, a damping and a friction in physical

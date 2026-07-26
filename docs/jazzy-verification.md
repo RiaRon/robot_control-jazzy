@@ -294,17 +294,9 @@ term is supplied.
 
 ### Still owed from the real arm
 
-- **A dynamic track.** `r2s collect --execute` still prints `ROS publisher
-  backend is required` and publishes nothing, so no real track exists. The
-  static half of the pipeline (`pose gravity --output`, `r2s identify`,
-  `r2s identify --collect`) reaches hardware; `r2s fit --static` cannot be run on
-  real data until collect does. Planned in
-  `docs/superpowers/plans/2026-07-26-dynamic-track-collection.md`, which also
-  records three further gaps found while auditing it: the adapter discards
-  `/joint_states` timestamps, `normalize_track` interpolates across dropped
-  samples without reporting them, and nothing produces the three repetitions that
-  `split_repetitions` and the bundle's `fit_runs`/`holdout_runs` have always
-  expected — so `validate --metrics` has only ever read a hand-written file.
+- **Measured parameters.** No `J`, `b`, `tau_f` or `kp` has been measured on this
+  arm yet, and no stage of the pipeline has run on it since the dynamic half was
+  built. See "Dynamic track collection" below.
 - **Measured parameters.** No `J`, `b`, `tau_f` or `kp` has been measured on this
   arm yet. The `kp` values of 7.5, 15.4 and 28.4 quoted in the plan are what
   fitting the *existing single-pose* sweep gives, and the point of quoting them is
@@ -329,6 +321,99 @@ When the arm is next available:
 4. Note whether `r_aj_1`, `r_aj_6` and `r_aj_7` — the three the gravity sweep
    showed to be friction-limited rather than gravity-limited — are identifiable
    at all, or come back named.
+5. `robotctl r2s collect --group openarm_right_arm` and read the sample count
+   and phase list, then the same with
+   `--output run.npz --repetitions 3 --execute`.
+6. `normalize` each run and record the reported gap. If any run is refused for a
+   gap, that is the `/joint_states` publisher dropping messages and belongs here.
+7. `fit --manifest run.json --static static.json --urdf robot.urdf`, and record
+   whether the two routes to each inertia agree — that number is the only check
+   that the static and dynamic halves measured the same robot.
+8. `validate --manifest run.json --fit right.json` and record the holdout RMSE,
+   the delay residual and the improvement fraction. **This settles the half of
+   the previous plan's Task 4 that motivated all of it**: whether the gravity
+   term measurably reduces the residual on real data.
+
+## Dynamic track collection
+
+Implemented against
+`docs/superpowers/plans/2026-07-26-dynamic-track-collection.md`. **Not yet run on
+hardware.** The pipeline now runs end to end —
+`collect → normalize → fit → bundle → validate → export` — with no missing link,
+but every check below is against a synthetic robot.
+
+### What the audit found
+
+Five gaps were reported before the work started. Reading the code around them
+turned up three more, and building it turned up a ninth:
+
+| | Found | Consequence |
+| --- | --- | --- |
+| 1 | `collect --execute` had no publisher | printed a sample count and exited 2 |
+| 2 | no recorder | no measured response to fit against |
+| 3 | nothing wrote `normalize`'s `.npz` | the chain broke at its first link |
+| 4 | `collect` was not group-scoped | built an excitation over all 43 joints |
+| 5 | no gate, no move to start | first sample was a jump from anywhere |
+| 6 | `_record` dropped `header.stamp` | no time to align the two streams by |
+| 7 | `normalize_track` interpolated across drops | a hole became a smooth curve |
+| 8 | nothing produced three repetitions | `validate --metrics` read a hand-written file |
+| 9 | **the excitation could never have been published** | see below |
+
+### Defect exposed: the excitation exceeded the velocity limit sevenfold
+
+The excitation's phases are shapes and the joins between them are
+discontinuities. Measured against the real profile at 100 Hz:
+
+| join | commanded step | budget | over by |
+| --- | ---: | ---: | ---: |
+| ramp into multisine, `r_aj_1` | 0.1413 rad | 0.02 rad | **7.1x** |
+| ramp into multisine, `r_aj_2` | 0.0900 rad | 0.02 rad | **4.5x** |
+
+The gate would have refused the whole track, so `collect --execute` could not
+have published it at any point in this branch's history. It was invisible because
+the stage never reached a gate.
+
+Shrinking the amplitude until every discontinuity fits in one sample would shrink
+it by that same factor of seven, which is most of the excitation. The joins are
+bridged at the velocity limit instead: 11 extra samples at the default scale,
+worst step 0.0188 against a budget of 0.020, amplitude unchanged.
+`--amplitude-scale 0.6` is still refused, correctly — a multisine's peak slew is
+frequency times amplitude and no amount of extra time changes either.
+
+### Defect exposed: the holdout predictor was seeded one step late
+
+`predict_second_order` seeded position `q[0]` with `(q[1] - q[0])/dt`. Under
+semi-implicit Euler that difference is `qd[1]`, not `qd[0]`, so it paired a
+position with the velocity from one step later. Small enough to look like
+nothing — an exact model reproduced its own training run to 3e-4 rad instead of
+1e-6 — and it integrates for the whole run. Caught by asserting an exact round
+trip rather than a plausible one.
+
+### Verified against a synthetic robot
+
+| Check | Result |
+| --- | --- |
+| Excitation slews within the profile's velocity limit at every join | worst step 0.0188 / 0.020 |
+| An excitation leaving the envelope is refused before any sample is published | nothing published |
+| The two recorded streams overlap on one clock | over 90% of the run |
+| The streams are not row-aligned into a perfectly tracking arm | stub lags 3 samples |
+| A recording feeds `normalize` with no intervening step | round-trips |
+| Three repetitions start from the same pose and carry the same commands | exact |
+| A dropped run is refused rather than interpolated across | named, with when |
+| A model fitted from a run reproduces that run exactly | 1e-6 rad |
+| A model predicts a run it never saw | RMSE under 1e-4 rad |
+| A wrong model fails the holdout | `model_inadequate` |
+| Unmodelled delay shows up as a delay residual | 12 samples recovered |
+
+### Still not verified
+
+- **Anything on hardware.** No stage of this has touched the arm.
+- **Whether `/joint_states` drops enough to trip the gap check.** The threshold
+  of 20 command periods is a judgement, not a measurement. The first real run
+  either passes it or says how far off it was.
+- **Whether the arm tracks a 611-sample excitation well enough to identify.**
+  The amplitude is 1.5% of each joint's range; whether that excites inertia
+  visibly against friction is a question only the real arm answers.
 
 ## Defects found and fixed during this run
 
