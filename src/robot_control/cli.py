@@ -8,9 +8,14 @@ import time
 
 import numpy as np
 
-from .artifacts import read_hdf5, track_sha256, write_hdf5
+from .artifacts import read_hdf5, track_sha256, write_hdf5, write_sweep
 from .calibration import load_bundle
-from .identification import build_excitation, fit_second_order, validate_holdout
+from .identification import (
+    GravitySweep,
+    build_excitation,
+    fit_second_order,
+    validate_holdout,
+)
 from .interface import CanonicalInterface
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .safety import CommandGate, SafetyError
@@ -150,6 +155,11 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         "--sweep-joint",
         help="canonical joint whose scale --sweep varies, holding the rest at "
         "--scale",
+    )
+    gravity.add_argument(
+        "--output",
+        type=Path,
+        help="write what the run measured, for r2s identify to fit",
     )
     gravity.add_argument(
         "--hold-sec",
@@ -512,6 +522,11 @@ def _pose_gravity(args, profile) -> int:
         raise ValueError("--sweep-joint says which joint --sweep varies; add --sweep")
     if args.hold_sec <= 0:
         raise ValueError("--hold-sec must be positive")
+    if args.output is not None and not args.execute:
+        raise ValueError(
+            "--output records what the arm measured, so it needs --execute; a "
+            "dry run publishes nothing and there would be nothing to record"
+        )
 
     base = _scale_vector(args.scale, group)
     index = None
@@ -551,22 +566,38 @@ def _pose_gravity(args, profile) -> int:
             return 0
 
         try:
-            rows = []
+            poses, torques, applied, errors = [], [], [], []
             for scales in rounds:
                 # Recomputed each round: compensation moves the arm, and the
                 # torque that holds it depends on where it now is.
                 state = adapter.read_state()
-                effort = gate.authorize_effort(chain.gravity_torque(state) * scales)
+                torque = chain.gravity_torque(state)
+                effort = gate.authorize_effort(torque * scales)
                 _publish_for(adapter, effort, args.hold_sec)
                 error = adapter.read_tracking_error()
-                rows.append((scales, error))
+                poses.append(state)
+                torques.append(torque)
+                applied.append(scales)
+                errors.append(error)
                 print(
                     f"scale {_scale_label(scales, index):>8}: worst joint error "
                     f"{np.max(np.abs(error)):+.4f} rad, "
                     f"mean {np.mean(np.abs(error)):.4f} rad"
                 )
-            if len(rows) > 1:
-                _report_sweep(group, rows, index)
+            sweep = GravitySweep(
+                group=group.name,
+                joint_names=tuple(group.joints),
+                poses=np.asarray(poses, dtype=float),
+                modelled_torque=np.asarray(torques, dtype=float),
+                scales=np.asarray(applied, dtype=float),
+                errors=np.asarray(errors, dtype=float),
+                sweep_joint=args.sweep_joint,
+            )
+            if sweep.rounds > 1:
+                _report_sweep(group, sweep, index)
+            if args.output is not None:
+                write_sweep(args.output, sweep, profile)
+                print(f"wrote {args.output}")
         finally:
             # Torque left applied after this process exits would keep pushing.
             adapter.send_effort(np.zeros(len(group.joints)))
@@ -627,7 +658,7 @@ def _describe_torque(group, torque, scales) -> None:
         print(f"  {canonical:<16} {value:+8.2f}   {scale:9.2f} {value * scale:+12.2f}")
 
 
-def _report_sweep(group, rows, index: int | None) -> None:
+def _report_sweep(group, sweep, index: int | None) -> None:
     """Print the sweep as a table, and name what measured best.
 
     With one joint varying, "best" is that joint's own error: a global worst
@@ -635,6 +666,7 @@ def _report_sweep(group, rows, index: int | None) -> None:
     """
     print()
     print("  scale  " + "".join(f"{canonical:>10}" for canonical in group.joints))
+    rows = list(zip(sweep.scales, sweep.errors))
     for scales, error in rows:
         label = _scale_label(scales, index)
         print(f"  {label:>5}  " + "".join(f"{value:+10.4f}" for value in error))

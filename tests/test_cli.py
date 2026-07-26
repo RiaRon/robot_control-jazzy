@@ -606,6 +606,51 @@ def test_pose_gravity_requires_a_scale_or_a_sweep(stiff, capsys):
     assert "--scale, --sweep, or both" in capsys.readouterr().out
 
 
+def test_pose_gravity_writes_what_it_measured(stiff, tmp_path, capsys):
+    from robot_control.artifacts import read_sweep
+    from robot_control.profile import load_builtin_profile
+
+    path = tmp_path / "sweep.json"
+    code = main(
+        ["pose", "gravity", *RIGHT_ARM, "--execute", "--hold-sec", "0.02",
+         "--sweep", "0,0.5,1.0", "--sweep-joint", "r_aj_7", "--output", str(path)]
+    )
+
+    assert code == 0
+    assert str(path) in capsys.readouterr().out
+    sweep = read_sweep(path, load_builtin_profile("openarm_tesollo"))
+    assert sweep.rounds == 3
+    assert sweep.group == "openarm_right_arm"
+    assert sweep.sweep_joint == "r_aj_7"
+    # The scale that varied is the one the sweep was told to vary, and the
+    # errors are the ones the run printed, not a recomputation.
+    np.testing.assert_allclose(sweep.scales[:, 6], [0.0, 0.5, 1.0])
+    np.testing.assert_allclose(sweep.errors[-1], np.zeros(7), atol=1e-9)
+
+
+def test_pose_gravity_writes_a_single_scale_too(stiff, tmp_path):
+    """One pose at one scale is a round; several files make the fit."""
+    from robot_control.artifacts import read_sweep
+    from robot_control.profile import load_builtin_profile
+
+    path = tmp_path / "one.json"
+    code = main(
+        ["pose", "gravity", *RIGHT_ARM, "--execute", "--hold-sec", "0.02",
+         "--scale", "1.0", "--output", str(path)]
+    )
+
+    assert code == 0
+    assert read_sweep(path, load_builtin_profile("openarm_tesollo")).rounds == 1
+
+
+def test_pose_gravity_output_needs_execute(stiff, capsys):
+    """A dry run measures nothing, so there is nothing honest to write."""
+    code = main(["pose", "gravity", *RIGHT_ARM, "--scale", "1.0", "--output", "x.json"])
+
+    assert code == 2
+    assert "--execute" in capsys.readouterr().out
+
+
 def test_pose_follow_accepts_one_gravity_scale_per_joint(draggable, capsys):
     assert (
         main(

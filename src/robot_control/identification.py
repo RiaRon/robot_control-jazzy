@@ -24,6 +24,69 @@ class ValidationResult:
     failures: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class GravitySweep:
+    """One arm pose held at several gravity feedforward scales, and what it did.
+
+    At each round a known torque is published and the joint's standing error is
+    read, which is the observation a stiffness estimate is made of:
+
+    ``kp (q_cmd - q) = tau_g(q) - s tau_model(q)``
+
+    Every round carries its own pose and its own modelled torque rather than one
+    for the whole sweep. Compensation moves the arm, so the load a joint holds
+    at scale 1.0 is not the load it was holding at 0.0, and pairing an error
+    with the torque from a different pose is the one way to get a confident
+    wrong number out of the fit.
+    """
+
+    group: str
+    joint_names: tuple[str, ...]
+    #: (rounds, joints) canonical joint values measured before each round's read.
+    poses: np.ndarray
+    #: (rounds, joints) modelled gravity torque at that round's pose, unscaled.
+    modelled_torque: np.ndarray
+    #: (rounds, joints) the fraction of it actually published.
+    scales: np.ndarray
+    #: (rounds, joints) the controller's own tracking error after the hold.
+    errors: np.ndarray
+    #: The joint whose scale varied, when the sweep varied only one.
+    sweep_joint: str | None = None
+
+    _GRIDS = ("poses", "modelled_torque", "scales", "errors")
+
+    def __post_init__(self) -> None:
+        names = tuple(str(name) for name in self.joint_names)
+        if not names:
+            raise FitError("a sweep needs at least one joint")
+        object.__setattr__(self, "joint_names", names)
+        for field_name in self._GRIDS:
+            grid = np.asarray(getattr(self, field_name), dtype=float)
+            if grid.ndim != 2 or grid.shape[1] != len(names):
+                raise FitError(
+                    f"{field_name} must be (rounds, {len(names)}), got {grid.shape}"
+                )
+            if not np.isfinite(grid).all():
+                raise FitError(f"{field_name} carries a non-finite value")
+            object.__setattr__(self, field_name, grid)
+        counts = {getattr(self, name).shape[0] for name in self._GRIDS}
+        if len(counts) != 1:
+            raise FitError(
+                "every round needs a pose, a modelled torque, a scale and an "
+                f"error, but the counts differ: {sorted(counts)}"
+            )
+        if self.rounds == 0:
+            raise FitError("a sweep needs at least one round")
+        if self.sweep_joint is not None and self.sweep_joint not in names:
+            raise FitError(
+                f"sweep_joint {self.sweep_joint!r} is not one of {list(names)}"
+            )
+
+    @property
+    def rounds(self) -> int:
+        return int(self.poses.shape[0])
+
+
 def build_excitation(
     neutral: np.ndarray,
     amplitude: np.ndarray,
