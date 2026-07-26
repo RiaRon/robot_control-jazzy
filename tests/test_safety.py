@@ -57,9 +57,12 @@ def test_authorize_trajectory_accepts_every_in_bounds_waypoint():
         [0.1, -0.1],
         [0.2, -0.2],
     ]
-    # The gate now stands at the final waypoint, at the time it is reached.
+    # The gate now stands at the final waypoint, at the time it is reached:
+    # three waypoints one 0.2 s period apart, so 0.6 s after dispatch.
     assert gate.hold_pose().tolist() == [0.2, -0.2]
-    assert gate.authorize(np.array([0.25, -0.25]), now_sec=0.5).tolist() == [0.25, -0.25]
+    assert gate.authorize(np.array([0.25, -0.25]), now_sec=0.65).tolist() == [0.25, -0.25]
+    with pytest.raises(SafetyError, match="watchdog"):
+        gate.authorize(np.array([0.25, -0.25]), now_sec=1.5)
 
 
 def test_authorize_trajectory_rejection_leaves_gate_state_untouched():
@@ -73,6 +76,29 @@ def test_authorize_trajectory_rejection_leaves_gate_state_untouched():
     # No prefix was committed, so the pre-trajectory pose is still the reference.
     assert gate.hold_pose().tolist() == [0.0, 0.0]
     assert gate.authorize(np.array([0.05, 0.0]), now_sec=0.05).tolist() == [0.05, 0.0]
+
+
+def test_authorize_trajectory_budgets_the_first_waypoint_over_one_period():
+    """Dispatching immediately after reading the current pose must be allowed.
+
+    That is exactly what the pose CLI does: seed the gate with the measured
+    state, then hand over a trajectory starting now. Charging the first
+    waypoint against the zero-length gap since the seed would leave it a budget
+    of one command period and reject every real move.
+    """
+    gate = _trajectory_gate()
+    gate.authorize(np.array([0.0, 0.0]), now_sec=0.0)
+
+    authorized = gate.authorize_trajectory(
+        [np.array([0.4, 0.0])], start_time_sec=0.0, period_sec=0.5
+    )
+
+    assert authorized[0].tolist() == [0.4, 0.0]
+    # The budget is still one period, not unlimited.
+    with pytest.raises(SafetyError, match="velocity limit exceeded at waypoint 0"):
+        gate.authorize_trajectory(
+            [np.array([0.9, 0.0])], start_time_sec=0.5, period_sec=0.1
+        )
 
 
 def test_authorize_trajectory_rejects_velocity_between_adjacent_waypoints():

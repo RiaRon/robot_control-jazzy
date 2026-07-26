@@ -47,10 +47,17 @@ class CommandGate:
         arbitrary intermediate waypoint. So every waypoint is validated before
         any is returned, and gate state is committed only once all of them pass.
 
-        The watchdog guards the gap before the trajectory starts, not the
-        spacing inside it. A trajectory is handed to the controller as a single
-        goal and interpolated there, so waypoints deliberately spaced wider than
-        the watchdog are a planned motion rather than a stalled command stream.
+        ``start_time_sec`` is when the trajectory is dispatched; waypoint *i* is
+        reached at ``start_time_sec + (i + 1) * period_sec``. Every waypoint,
+        including the first, therefore has one period of travel budget. The gap
+        since the last authorized command is the watchdog's business, not a
+        velocity budget: charging the first waypoint against it would reject a
+        trajectory dispatched immediately after reading the current pose.
+
+        The watchdog guards that leading gap, not the spacing inside the
+        trajectory. A trajectory is handed to the controller as a single goal
+        and interpolated there, so waypoints deliberately spaced wider than the
+        watchdog are a planned motion rather than a stalled command stream.
         """
         self._refuse_if_closed()
         points = [np.asarray(point, dtype=float) for point in points]
@@ -59,25 +66,23 @@ class CommandGate:
         if not np.isfinite(period_sec) or period_sec <= 0:
             raise SafetyError("trajectory period must be positive and finite")
 
-        previous = self._last
-        elapsed = period_sec
         if self._last_time is not None:
-            elapsed = start_time_sec - self._last_time
-            if elapsed < 0:
+            idle = start_time_sec - self._last_time
+            if idle < 0:
                 raise SafetyError("trajectory starts before the last authorized command")
-            if elapsed > self.watchdog_sec:
+            if idle > self.watchdog_sec:
                 raise SafetyError("watchdog expired; hold pose required")
 
+        previous = self._last
         for index, point in enumerate(points):
             where = f" at waypoint {index}"
             self._check_position(point, where)
             if previous is not None:
-                self._check_velocity(point, previous, elapsed, where)
+                self._check_velocity(point, previous, period_sec, where)
             previous = point
-            elapsed = period_sec
 
         self._last = points[-1].copy()
-        self._last_time = start_time_sec + (len(points) - 1) * period_sec
+        self._last_time = start_time_sec + len(points) * period_sec
         return points
 
     def _refuse_if_closed(self) -> None:
