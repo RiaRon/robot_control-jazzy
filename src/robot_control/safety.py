@@ -37,6 +37,11 @@ class CommandGate:
     velocity: np.ndarray
     command_period_sec: float
     effort: np.ndarray | None = None
+    #: How far a streamed command may run ahead of the measured position. Needed
+    #: because ``follow`` rate-limits from the previous command: that is what
+    #: lets the command outrun the arm's standing droop, and on its own it would
+    #: also let a blocked joint wind up command, and torque, without limit.
+    max_lead: np.ndarray | None = None
     watchdog_sec: float = 0.25
     _last: np.ndarray | None = field(default=None, init=False)
     _last_time: float | None = field(default=None, init=False)
@@ -111,14 +116,23 @@ class CommandGate:
         measured: np.ndarray,
         elapsed_sec: float,
     ) -> tuple[np.ndarray, str | None]:
-        """Step from *measured* towards *target*, within the limits.
+        """Step towards *target*, rate-limited and bounded, for a servo stream.
 
         Returns the command and, if anything bounded it, a phrase naming what.
-        The step is budgeted from the *measured* pose rather than from the last
-        command on purpose: these arms sit behind their command by the droop
-        their impedance control needs to hold position, so budgeting from the
-        command would let the real movement exceed the velocity limit by that
-        standing error.
+
+        The step is rate-limited from the **previous command**, not from the
+        measured position. That distinction decides whether the arm moves at all:
+        these joints hold position through impedance control, so they sit behind
+        their command by the droop that produces their holding torque. Budgeting
+        from the measured position caps the command at one period's travel ahead
+        of where the arm *is*, which is less than that standing droop — so the
+        command lands behind the equilibrium and the arm never advances. Fake
+        hardware, having no droop, tracks perfectly either way and hides it.
+
+        Rate-limiting from the command alone would let a joint held still by an
+        obstacle accumulate command without limit, and with it the torque its
+        stiffness produces, so ``max_lead`` bounds how far the command may run
+        ahead of the measured position.
         """
         self._refuse_if_closed()
         target = np.asarray(target, dtype=float)
@@ -130,20 +144,31 @@ class CommandGate:
             raise SafetyError("elapsed time must be finite and not negative")
 
         limited: list[str] = []
+        # Nothing to rate-limit from on the first sample, so the measured pose is
+        # the only honest starting point.
+        base = measured if self._last is None else self._last
         permitted = self.velocity * max(elapsed_sec, self.command_period_sec)
-        step = np.clip(target - measured, -permitted, permitted)
-        if np.any(np.abs(target - measured) > permitted + 1e-12):
+        step = np.clip(target - base, -permitted, permitted)
+        if np.any(np.abs(target - base) > permitted + 1e-12):
             limited.append("velocity")
 
-        command = measured + step
+        command = base + step
+        if self.max_lead is not None:
+            lead = command - measured
+            bounded = np.clip(lead, -self.max_lead, self.max_lead)
+            if np.any(bounded != lead):
+                limited.append("lead")
+            command = measured + bounded
+
         clamped = np.clip(command, self.lower, self.upper)
         if np.any(clamped != command):
             limited.append("position")
         command = clamped
 
-        # _last is updated so hold_pose still names something safe, but not
-        # _last_time: follow is given an interval, not a clock, and feeding the
-        # watchdog from here would let a stalled stream look alive.
+        # _last carries the command, which is what the next step budgets from,
+        # and what hold_pose should name. Not _last_time: follow is given an
+        # interval rather than a clock, and feeding the watchdog from here would
+        # let a stalled stream look alive.
         self._last = command.copy()
         return command, (" and ".join(limited) + " limit" if limited else None)
 

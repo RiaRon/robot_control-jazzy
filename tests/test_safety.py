@@ -181,6 +181,7 @@ def _streaming_gate(**overrides) -> CommandGate:
         velocity=np.array([2.0, 2.0]),
         effort=np.array([10.0, 10.0]),
         command_period_sec=0.01,
+        max_lead=np.array([0.5, 0.5]),
     )
     settings.update(overrides)
     return CommandGate(**settings)
@@ -245,19 +246,6 @@ def test_follow_rejects_a_target_that_is_not_a_number():
         gate.follow(np.array([np.nan, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01)
 
 
-def test_follow_measures_velocity_from_where_the_arm_is():
-    """The step has to be bounded against the measured pose, not the last
-    command. A drooping arm sits behind its command, so budgeting from the
-    command would let the real step exceed the limit."""
-    gate = _streaming_gate()
-
-    command, _limited = gate.follow(
-        np.array([1.0, 0.0]), np.array([0.5, 0.0]), elapsed_sec=0.01
-    )
-
-    np.testing.assert_allclose(command, [0.52, 0.0])
-
-
 def test_authorize_effort_bounds_torque_by_the_profile():
     """Effort is feedforward torque: too much accelerates the arm rather than
     misposing it, so it is refused rather than clamped."""
@@ -295,3 +283,59 @@ def test_effort_limits_are_optional_so_existing_gates_keep_working():
     assert gate.authorize(np.array([0.0]), now_sec=0.0).tolist() == [0.0]
     with pytest.raises(SafetyError, match="no effort limit"):
         gate.authorize_effort(np.array([1.0]))
+
+
+def test_follow_rate_limits_from_the_previous_command_not_the_measured_pose():
+    """The bug this pins cost a real-hardware session.
+
+    These arms sit behind their command by the droop their impedance control
+    needs to hold position. Budgeting each step from the measured pose caps the
+    command at one period's travel ahead of where the arm is — which is less
+    than the standing droop, so the command lands behind the equilibrium and the
+    arm never advances. Fake hardware has no droop, so it tracked perfectly and
+    hid this entirely.
+    """
+    gate = _streaming_gate(max_lead=np.array([0.5, 0.5]))
+    droop = 0.03  # larger than one period's budget of 2.0 * 0.01 = 0.02
+
+    measured = np.array([0.0, 0.0])
+    for _ in range(5):
+        command, _limited = gate.follow(
+            np.array([1.0, 0.0]), measured, elapsed_sec=0.01
+        )
+        # The arm follows its command, lagging by the droop it needs to hold.
+        measured = np.array([max(0.0, command[0] - droop), 0.0])
+
+    # Five samples at 0.02 rad each: the command has to have advanced.
+    assert command[0] > 0.09, f"command stalled at {command[0]}"
+    assert measured[0] > 0.0, "the arm never moved"
+
+
+def test_follow_bounds_how_far_the_command_may_lead_the_measured_pose():
+    """A blocked arm must not let the command wind away from it.
+
+    Rate-limiting from the previous command is what makes progress possible; on
+    its own it also means a joint held still by an obstacle would accumulate
+    command indefinitely, and with it the torque its stiffness produces.
+    """
+    gate = _streaming_gate(max_lead=np.array([0.1, 0.1]))
+    stuck = np.array([0.0, 0.0])
+
+    for _ in range(50):
+        command, limited = gate.follow(np.array([1.0, 0.0]), stuck, elapsed_sec=0.01)
+
+    assert command[0] == pytest.approx(0.1)
+    assert limited is not None and "lead" in limited
+
+
+def test_follow_still_bounds_the_first_sample_against_the_measured_pose():
+    """With no previous command there is nothing to rate-limit from, so the
+    measured pose is the only honest starting point."""
+    gate = _streaming_gate(max_lead=np.array([0.5, 0.5]))
+
+    command, limited = gate.follow(
+        np.array([1.0, 0.0]), np.array([0.5, 0.0]), elapsed_sec=0.01
+    )
+
+    np.testing.assert_allclose(command, [0.52, 0.0])
+    assert limited is not None and "velocity" in limited

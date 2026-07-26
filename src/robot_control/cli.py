@@ -34,6 +34,12 @@ MAX_GRAVITY_SCALE = 1.5
 # Following ends on its own rather than running until interrupted: a servo loop
 # left running is a robot that moves when someone touches the marker hours later.
 DEFAULT_FOLLOW_SEC = 60.0
+# How long a streamed command may be ahead of the arm, expressed as travel time
+# at the joint's velocity limit. It has to exceed the standing droop or the arm
+# cannot advance at all, and stay small enough that a blocked joint does not wind
+# up torque: 0.1 s is 0.2 rad at 2 rad/s, an order over the droop measured with
+# compensation on, and about 4 N.m at the stiffness the hardware applies.
+LEAD_SEC = 0.1
 SETTLE_PASSES = 4
 # Below this fraction of improvement the loop has stopped converging: the arm
 # is against a hard stop, or holding something, and more passes would only wind
@@ -232,6 +238,7 @@ def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
         velocity=np.array([joint.velocity for joint in limits]),
         command_period_sec=1.0 / profile.ros["jazzy"].command_rate_hz,
         effort=np.array([joint.effort for joint in limits]),
+        max_lead=np.array([joint.velocity * LEAD_SEC for joint in limits]),
     )
     if seed is not None:
         # Seeding makes the velocity limit apply to the move itself, not just

@@ -507,6 +507,21 @@ step is limited to the profile's velocity bound and the count of clamped samples
 is reported at the end. Position limits clamp the same way: the arm stops at the
 limit and keeps tracking rather than ending the session mid-drag.
 
+Each step is rate-limited from the **previous command**, not from the measured
+position, and that distinction decides whether the arm moves at all. These joints
+hold position by sitting behind their command by the droop that produces their
+holding torque — 0.02 to 0.05 rad measured, against a per-sample budget of
+0.02 rad at 100 Hz. Budgeting from the measured position caps the command at one
+period's travel ahead of where the arm *is*, which is less than that droop, so
+the command lands behind the equilibrium and nothing advances. Fake hardware has
+no droop and tracks perfectly either way, which is exactly why this only appeared
+on the real arm.
+
+A third bound follows from that: `max_lead` limits how far the command may run
+ahead of the measured position, so a joint held still by an obstacle cannot wind
+up command, and with it torque, without limit. It is set from the profile's
+velocity limit over `LEAD_SEC`, and `lead limit` in the clamp report names it.
+
 ### Stopping, and what the arm does then
 
 Following ends when `--seconds` runs out, or on Ctrl-C. Either way the last

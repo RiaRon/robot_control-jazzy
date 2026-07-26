@@ -505,3 +505,43 @@ def test_pose_follow_refuses_a_group_with_no_planning_group(no_ros, capsys):
 def test_pose_follow_refuses_an_out_of_range_gravity_scale(no_ros, capsys):
     assert main(["pose", "follow", *RIGHT_ARM, "--gravity", "9"]) == 2
     assert "outside 0 to 1.5" in capsys.readouterr().out
+
+
+class DroopingDraggableArm(DraggableArm):
+    """A dragging stub that also droops, which fake hardware never does.
+
+    This is the case that mattered: with droop larger than one period's velocity
+    budget, a command rate-limited from the measured pose can never advance, and
+    the arm sits still while the loop reports thousands of samples sent.
+    """
+
+    #: Radians the joint sits behind its command in order to hold position.
+    DROOP = 0.03
+
+    def stream_positions(self, positions, period_sec):
+        command = np.asarray(positions, dtype=float)
+        self.streamed.append(command.copy())
+        # Move towards the command, stopping the droop short of it.
+        gap = command - self.joints
+        self.joints = self.joints + np.sign(gap) * np.maximum(
+            np.abs(gap) - self.DROOP, 0.0
+        )
+
+
+def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
+    """The regression that a perfect-tracking stub cannot catch."""
+    from robot_control import ros_adapter
+
+    chain = _stub_chain([0.5] * 7)
+    arm = DroopingDraggableArm(target=_reachable_target(chain, np.full(7, 0.15)))
+    arm.load = chain.gravity_torque(np.zeros(7))
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+
+    assert main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "1.0"]) == 0
+
+    assert arm.streamed, "nothing was streamed"
+    # The arm has to have actually moved, not merely been commanded at.
+    assert np.abs(arm.joints).max() > DroopingDraggableArm.DROOP, (
+        f"a drooping arm did not advance: {arm.joints}"
+    )
