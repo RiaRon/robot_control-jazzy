@@ -34,7 +34,7 @@ groups:
     joints: [l_hj_gripper_1]
     controller: left_gripper_controller
     moveit_group: left_gripper
-    action: gripper_command
+    action: parallel_gripper_command
   tesollo_abduction:
     joints: [r_hj_thumb_1, r_hj_index_1, r_hj_middle_1, r_hj_ring_1, r_hj_pinky_1]
     controller: joint_trajectory_controller

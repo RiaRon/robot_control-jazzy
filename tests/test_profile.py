@@ -46,11 +46,11 @@ def test_group_contract_declares_openarm_controllers_and_moveit_groups():
     assert groups["openarm_left_arm"].action == "follow_joint_trajectory"
     assert groups["openarm_left_arm"].tip_link == "openarm_left_hand"
 
-    # The gripper is driven by a GripperActionController, not a trajectory
-    # controller, so the action must be declared rather than assumed.
+    # The gripper is driven by parallel_gripper_action_controller, not a
+    # trajectory controller, so the action must be declared rather than assumed.
     assert groups["openarm_left_gripper"].controller == "left_gripper_controller"
     assert groups["openarm_left_gripper"].moveit_group == "left_gripper"
-    assert groups["openarm_left_gripper"].action == "gripper_command"
+    assert groups["openarm_left_gripper"].action == "parallel_gripper_command"
 
 
 def test_group_contract_marks_tesollo_groups_executable_without_moveit():

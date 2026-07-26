@@ -26,12 +26,14 @@ class Joint:
     effort: float
 
 
-# How a controller accepts a goal. A parallel-jaw gripper is driven by
-# GripperActionController, which takes a single command rather than a
-# trajectory, so the action cannot be inferred from the controller name.
+# How a controller accepts a goal. The action cannot be inferred from the
+# controller name: the OpenArm grippers run
+# parallel_gripper_action_controller, whose server takes a
+# control_msgs/ParallelGripperCommand carrying a sensor_msgs/JointState, and
+# shares neither its goal nor its result fields with a trajectory controller.
 FOLLOW_JOINT_TRAJECTORY = "follow_joint_trajectory"
-GRIPPER_COMMAND = "gripper_command"
-_ACTIONS = (FOLLOW_JOINT_TRAJECTORY, GRIPPER_COMMAND)
+PARALLEL_GRIPPER_COMMAND = "parallel_gripper_command"
+_ACTIONS = (FOLLOW_JOINT_TRAJECTORY, PARALLEL_GRIPPER_COMMAND)
 
 
 @dataclass(frozen=True)
