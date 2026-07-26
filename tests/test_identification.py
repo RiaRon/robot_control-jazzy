@@ -20,6 +20,89 @@ def test_excitation_contains_step_ramp_hold_and_multisine():
     assert np.max(np.abs(command[:, 0])) <= 0.2 + 1e-12
 
 
+class TestSlewLimitedExcitation:
+    """An excitation the arm can actually be commanded through.
+
+    The phases are designed as shapes — hold, step, ramp, multisine — and the
+    joins between them are discontinuities. Published as position commands at
+    100 Hz, the join into the multisine asks for 7x the profile's velocity limit
+    on the real arm, so the gate refuses the whole track. Shrinking the amplitude
+    until the discontinuity fits would shrink the excitation to nothing; bridging
+    the joins at the limit keeps the amplitude and costs a few samples.
+    """
+
+    RATE = 100.0
+    NEUTRAL = np.array([0.0, 0.2])
+    # What the real profile gives at the default --amplitude-scale: 5% of a
+    # +-3.14 and a +-2.0 joint's range, at 0.3. The budget below is the arms'
+    # 2.0 rad/s over one 100 Hz period.
+    AMPLITUDE = np.array([0.0942, 0.06])
+
+    def _build(self, max_step=None):
+        return build_excitation(
+            self.NEUTRAL, self.AMPLITUDE, self.RATE, max_step=max_step
+        )
+
+    def test_without_a_limit_nothing_changes(self):
+        """The old three-argument form still builds the shapes it always did."""
+        _time, command, phases = self._build()
+
+        assert {"step", "ramp", "hold", "multisine"} <= set(phases)
+        assert np.max(np.abs(np.diff(command, axis=0))) > 0.1
+
+    def test_every_step_fits_the_budget(self):
+        budget = np.array([0.02, 0.02])
+
+        _time, command, _phases = self._build(max_step=budget)
+
+        largest = np.max(np.abs(np.diff(command, axis=0)), axis=0)
+        assert np.all(largest <= budget + 1e-12), largest
+
+    def test_the_amplitude_is_kept_rather_than_shrunk(self):
+        budget = np.array([0.02, 0.02])
+
+        _time, command, _phases = self._build(max_step=budget)
+
+        # Both extremes of the designed swing are still reached.
+        reached = np.ptp(command, axis=0)
+        np.testing.assert_allclose(reached, 2 * self.AMPLITUDE, rtol=1e-6)
+
+    def test_bridging_costs_samples_but_keeps_the_phases(self):
+        budget = np.array([0.02, 0.02])
+
+        _t0, plain, phases0 = self._build()
+        time, bridged, phases = self._build(max_step=budget)
+
+        assert len(bridged) > len(plain)
+        assert len(time) == len(bridged) == len(phases)
+        assert {"step", "ramp", "hold", "multisine", "bridge"} == set(phases)
+
+    def test_the_clock_still_matches_the_samples(self):
+        budget = np.array([0.02, 0.02])
+
+        time, command, _phases = self._build(max_step=budget)
+
+        assert len(time) == len(command)
+        np.testing.assert_allclose(np.diff(time), 1.0 / self.RATE, rtol=1e-9)
+
+    def test_a_multisine_too_fast_to_slew_is_refused(self):
+        """Extra time cannot fix it: the peak slew is frequency times amplitude,
+        and stretching the track changes neither."""
+        with pytest.raises(FitError, match="multisine"):
+            self._build(max_step=np.array([1e-4, 1e-4]))
+
+    def test_the_refusal_names_the_scale_that_would_fit(self):
+        with pytest.raises(FitError, match="amplitude"):
+            build_excitation(
+                self.NEUTRAL, self.AMPLITUDE, self.RATE,
+                max_step=np.array([1e-4, 1.0]),
+            )
+
+    def test_a_mismatched_budget_is_refused(self):
+        with pytest.raises(FitError, match="max_step"):
+            self._build(max_step=np.array([0.02]))
+
+
 def test_three_repetitions_split_two_fit_one_holdout():
     assert split_repetitions(["run-1", "run-2", "run-3"]) == (
         ("run-1", "run-2"),

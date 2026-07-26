@@ -440,16 +440,75 @@ def fit_static_gravity(
     )
 
 
+MULTISINE_FREQUENCIES = (0.7, 1.3, 2.1, 3.7)
+
+#: Peak slew of the unit multisine, in rad/s per rad of amplitude. Every
+#: component is at its steepest when its sine crosses zero, and they can line up,
+#: so this is the bound the design has to be checked against.
+MULTISINE_SLEW = 2 * np.pi * sum(MULTISINE_FREQUENCIES) / len(MULTISINE_FREQUENCIES)
+
+
+def _bridge(start: np.ndarray, target: np.ndarray, max_step: np.ndarray) -> np.ndarray:
+    """Samples slewing from *start* towards *target*, none longer than max_step.
+
+    The target itself is not included: the phase that follows provides it.
+    """
+    travel = target - start
+    reach = np.abs(travel) / max_step
+    needed = int(np.ceil(float(np.max(reach)))) if np.any(reach > 0) else 0
+    if needed <= 1:
+        return np.zeros((0, len(start)))
+    alpha = (np.arange(1, needed) / needed)[:, None]
+    return start + alpha * travel
+
+
 def build_excitation(
     neutral: np.ndarray,
     amplitude: np.ndarray,
     rate_hz: float,
+    max_step: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build a deterministic step/ramp/hold/multisine identification track."""
+    """Build a deterministic step/ramp/hold/multisine identification track.
+
+    The phases are shapes, and the joins between them are discontinuities. That
+    is harmless on paper and not harmless as a stream of position commands: on
+    the real arm at 100 Hz, the join into the multisine asks for seven times the
+    profile's velocity limit, so the gate refuses the whole track.
+
+    *max_step* is how far each joint may move per sample. Given it, the joins are
+    bridged at that rate rather than jumped. The alternative — shrinking the
+    amplitude until every discontinuity fits in one sample — would shrink it by
+    the same factor of seven, which is most of the excitation; bridging keeps the
+    amplitude and costs a few samples.
+
+    A multisine too fast to slew is refused rather than bridged. Its peak slew is
+    its frequencies times its amplitude, and no amount of extra time changes
+    either.
+    """
     neutral = np.asarray(neutral, dtype=float)
     amplitude = np.asarray(amplitude, dtype=float)
     if neutral.shape != amplitude.shape or neutral.ndim != 1 or rate_hz <= 0:
         raise FitError("invalid excitation arguments")
+    if max_step is not None:
+        max_step = np.asarray(max_step, dtype=float)
+        if max_step.shape != neutral.shape or np.any(max_step <= 0):
+            raise FitError(
+                "max_step must be one positive value per joint, "
+                f"{len(neutral)} of them"
+            )
+        peak = MULTISINE_SLEW * amplitude / rate_hz
+        over = peak > max_step + 1e-12
+        if np.any(over):
+            worst = int(np.argmax(peak / max_step))
+            fits = float(np.min(max_step / peak))
+            raise FitError(
+                f"the multisine cannot be slewed: joint {worst} would move "
+                f"{peak[worst]:.4g} rad per sample against a budget of "
+                f"{max_step[worst]:.4g}. Extra time does not help — the peak "
+                "slew is frequency times amplitude. Scale the amplitude by "
+                f"{fits:.3g} or less."
+            )
+
     definitions = (
         ("hold", 0.5),
         ("step", 0.5),
@@ -471,12 +530,19 @@ def build_excitation(
             alpha = np.linspace(1.0, -1.0, count)[:, None]
             values = neutral + alpha * amplitude
         elif name == "multisine":
-            frequencies = (0.7, 1.3, 2.1, 3.7)
-            wave = sum(np.sin(2 * np.pi * f * (elapsed + local)) for f in frequencies)
-            wave /= len(frequencies)
+            wave = sum(
+                np.sin(2 * np.pi * f * (elapsed + local))
+                for f in MULTISINE_FREQUENCIES
+            )
+            wave /= len(MULTISINE_FREQUENCIES)
             values = neutral + wave[:, None] * amplitude
         else:
             values = np.tile(phase_start, (count, 1))
+        if max_step is not None:
+            bridge = _bridge(phase_start, values[0], max_step)
+            if len(bridge):
+                blocks.append(bridge)
+                labels.extend(["bridge"] * len(bridge))
         phase_start = values[-1]
         blocks.append(values)
         labels.extend([name] * count)
