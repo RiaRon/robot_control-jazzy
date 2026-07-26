@@ -8,6 +8,9 @@ injected backend, which is how it is tested without a running ROS graph.
 Nothing here decides whether a motion is safe. The adapter converts between the
 canonical boundary and ROS names, and puts on the wire exactly what it is
 given; :class:`~robot_control.safety.CommandGate` is what authorizes it.
+
+Reading state, forward kinematics, and inverse kinematics only observe the
+robot, so they need no ``execute``. Sending a goal does.
 """
 
 from __future__ import annotations
@@ -115,14 +118,10 @@ class RosAdapter:
         self,
         profile: RobotProfile,
         group_name: str,
-        execute: bool,
+        execute: bool = False,
         backend: Any | None = None,
         node_name: str = "robot_control_pose",
     ):
-        if not execute:
-            # Refusing here rather than at send time means a dry run can never
-            # reach a live ROS graph, not even to read state.
-            raise SafetyError("the ROS adapter publishes; it requires explicit --execute")
         if group_name not in profile.groups:
             raise ValueError(
                 f"unknown group {group_name!r}; known groups are "
@@ -136,6 +135,9 @@ class RosAdapter:
             )
         self.profile = profile
         self.group = group
+        # Reading state, FK, and IK observe the robot and are always allowed;
+        # only putting a goal on the wire needs --execute.
+        self.execute = execute
         self.interface = CanonicalInterface(profile)
         self._backend = backend if backend is not None else _RclpyBackend(node_name)
 
@@ -205,6 +207,7 @@ class RosAdapter:
         self, points: Sequence[Sequence[float]], period_sec: float
     ) -> None:
         """Send an authorized canonical trajectory to the group's controller."""
+        self._require_execute()
         self._require_action(FOLLOW_JOINT_TRAJECTORY)
         if not points:
             raise ValueError("a trajectory needs at least one waypoint")
@@ -223,10 +226,15 @@ class RosAdapter:
 
     def send_gripper(self, position: float) -> None:
         """Send an authorized canonical position to the group's gripper action."""
+        self._require_execute()
         self._require_action(PARALLEL_GRIPPER_COMMAND)
         source = self.interface.group_command_to_source(self.group.name, [position])
         joint, value = next(iter(source.items()))
         self._backend.gripper_command(self.group.controller, joint, value)
+
+    def _require_execute(self) -> None:
+        if not self.execute:
+            raise SafetyError("publishing requires explicit --execute")
 
     def _require_planning_group(self) -> str:
         if self.group.moveit_group is None or self.group.tip_link is None:

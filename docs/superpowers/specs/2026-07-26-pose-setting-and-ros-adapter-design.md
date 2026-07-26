@@ -111,7 +111,13 @@ Responsibilities:
 - Send a canonical trajectory through `FollowJointTrajectory` to the controller
   that owns those joints, resolved from the profile group.
 - Call `/compute_ik` for an end-effector pose and return a canonical solution.
-- Refuse to construct at all when `execute` was not requested.
+- Refuse to put any goal on the wire when `execute` was not requested.
+
+Reading state, forward kinematics, and inverse kinematics observe the robot
+rather than command it, so they are always allowed; `pose show` and the
+dry-run form of `pose ee` depend on that. Only sending a goal needs `execute`.
+An earlier draft of this document had the adapter refuse to construct without
+`execute`, which contradicted `show` reporting the current state.
 
 Group-to-controller mapping is profile data, not code. The profile gains an
 optional `controller` and `moveit_group` per group; absent entries mean the

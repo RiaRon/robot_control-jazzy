@@ -104,9 +104,26 @@ def _adapter(profile, group="arm", execute=True, backend=None):
     )
 
 
-def test_adapter_refuses_to_construct_without_execute(profile):
+def test_adapter_reads_without_execute_but_refuses_to_send(profile):
+    """Observing the robot is not publishing to it."""
+    backend = RecordingBackend(ik=(MOVEIT_SUCCESS, {"arm_1": 0.4, "arm_2": -0.5}))
+    adapter = RosAdapter(profile, "arm", execute=False, backend=backend)
+
+    np.testing.assert_allclose(adapter.read_state(), [0.1, 0.2])
+    adapter.read_pose()
+    adapter.solve_ik(Pose((0.1, 0.2, 0.3), NEUTRAL), seed=np.array([0.0, 0.0]))
+
     with pytest.raises(SafetyError, match="--execute"):
-        RosAdapter(profile, "arm", execute=False, backend=RecordingBackend())
+        adapter.send_trajectory([np.array([0.1, 0.2])], period_sec=0.5)
+    assert backend.trajectories == []
+
+
+def test_gripper_send_also_requires_execute(profile):
+    backend = RecordingBackend()
+
+    with pytest.raises(SafetyError, match="--execute"):
+        RosAdapter(profile, "hand", execute=False, backend=backend).send_gripper(0.02)
+    assert backend.gripper_goals == []
 
 
 def test_adapter_reports_unavailable_when_rclpy_is_missing(profile, monkeypatch):
