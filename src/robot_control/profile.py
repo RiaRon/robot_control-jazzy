@@ -26,10 +26,25 @@ class Joint:
     effort: float
 
 
+# How a controller accepts a goal. A parallel-jaw gripper is driven by
+# GripperActionController, which takes a single command rather than a
+# trajectory, so the action cannot be inferred from the controller name.
+FOLLOW_JOINT_TRAJECTORY = "follow_joint_trajectory"
+GRIPPER_COMMAND = "gripper_command"
+_ACTIONS = (FOLLOW_JOINT_TRAJECTORY, GRIPPER_COMMAND)
+
+
 @dataclass(frozen=True)
 class Group:
     name: str
     joints: tuple[str, ...]
+    controller: str | None = None
+    moveit_group: str | None = None
+    action: str | None = None
+
+    @property
+    def executable(self) -> bool:
+        return self.controller is not None
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,12 @@ class RobotProfile:
     @property
     def joint_names(self) -> tuple[str, ...]:
         return tuple(j.canonical for j in self.joints)
+
+    def executable_groups(self) -> dict[str, Group]:
+        """Return only the groups a controller can actually be commanded on."""
+        return {
+            name: group for name, group in self.groups.items() if group.executable
+        }
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
@@ -87,6 +108,30 @@ def _resolve_manifest(profile_path: Path, value: str) -> Path:
     return direct
 
 
+def _group(name: str, body: dict[str, Any]) -> Group:
+    controller = body.get("controller")
+    moveit_group = body.get("moveit_group")
+    action = body.get("action")
+    if controller is None:
+        # A planning group or an action without a controller names no endpoint,
+        # so it would silently never execute.
+        if moveit_group is not None:
+            raise ProfileError(f"group {name} declares a moveit_group without a controller")
+        if action is not None:
+            raise ProfileError(f"group {name} declares an action without a controller")
+    else:
+        action = FOLLOW_JOINT_TRAJECTORY if action is None else str(action)
+        if action not in _ACTIONS:
+            raise ProfileError(f"group {name} declares an unsupported action: {action}")
+    return Group(
+        name=name,
+        joints=tuple(body["joints"]),
+        controller=None if controller is None else str(controller),
+        moveit_group=None if moveit_group is None else str(moveit_group),
+        action=action,
+    )
+
+
 def load_profile(path: str | Path) -> RobotProfile:
     path = Path(path).resolve()
     raw = _mapping(yaml.safe_load(path.read_text()), "profile")
@@ -116,7 +161,7 @@ def load_profile(path: str | Path) -> RobotProfile:
         raise ProfileError(f"joints absent from asset manifest: {sorted(missing_manifest)}")
 
     groups = {
-        name: Group(name=name, joints=tuple(_mapping(body, f"group {name}")["joints"]))
+        name: _group(name, _mapping(body, f"group {name}"))
         for name, body in _mapping(raw.get("groups"), "groups").items()
     }
     counts = {name: 0 for name in names}

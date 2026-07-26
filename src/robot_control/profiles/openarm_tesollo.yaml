@@ -15,21 +15,35 @@ ros:
     state_topic: /robot_control/openarm_tesollo/state
     controller: openarm_tesollo_canonical_controller
     command_rate_hz: 100
+# A group is executable only if it names a controller. `moveit_group` names the
+# SRDF planning group used for IK and FK; groups without one are reachable by
+# direct joint values only. `action` defaults to follow_joint_trajectory.
 groups:
   openarm_right_arm:
     joints: [r_aj_1, r_aj_2, r_aj_3, r_aj_4, r_aj_5, r_aj_6, r_aj_7]
+    controller: right_joint_trajectory_controller
+    moveit_group: right_arm
   openarm_left_arm:
     joints: [l_aj_1, l_aj_2, l_aj_3, l_aj_4, l_aj_5, l_aj_6, l_aj_7]
+    controller: left_joint_trajectory_controller
+    moveit_group: left_arm
   openarm_left_gripper:
     joints: [l_hj_gripper_1]
+    controller: left_gripper_controller
+    moveit_group: left_gripper
+    action: gripper_command
   tesollo_abduction:
     joints: [r_hj_thumb_1, r_hj_index_1, r_hj_middle_1, r_hj_ring_1, r_hj_pinky_1]
+    controller: joint_trajectory_controller
   tesollo_curl:
     joints: [r_hj_thumb_2, r_hj_index_2, r_hj_middle_2, r_hj_ring_2, r_hj_pinky_2]
+    controller: joint_trajectory_controller
   tesollo_pip:
     joints: [r_hj_thumb_3, r_hj_index_3, r_hj_middle_3, r_hj_ring_3, r_hj_pinky_3]
+    controller: joint_trajectory_controller
   tesollo_dip:
     joints: [r_hj_thumb_4, r_hj_index_4, r_hj_middle_4, r_hj_ring_4, r_hj_pinky_4]
+    controller: joint_trajectory_controller
 joints:
   - {canonical: r_aj_1, source: openarm_right_joint1, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
   - {canonical: r_aj_2, source: openarm_right_joint2, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}

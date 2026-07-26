@@ -1,11 +1,15 @@
 from pathlib import Path
+import re
 
 import pytest
+import yaml
 
 from robot_control.profile import ProfileError, load_profile
 
 
-PROFILE = Path(__file__).parents[1] / "src/robot_control/profiles/openarm_tesollo.yaml"
+ROOT = Path(__file__).parents[1]
+PROFILE = ROOT / "src/robot_control/profiles/openarm_tesollo.yaml"
+MOVEIT_CONFIG = ROOT / "ros_ws/src/openarm_ros2/openarm_bimanual_moveit_config/config"
 
 
 def test_openarm_tesollo_profile_has_complete_canonical_contract():
@@ -27,6 +31,122 @@ def test_openarm_tesollo_profile_has_complete_canonical_contract():
     assert set().union(*(set(group.joints) for group in profile.groups.values())) == set(
         profile.joint_names
     )
+
+
+def test_group_contract_declares_openarm_controllers_and_moveit_groups():
+    groups = load_profile(PROFILE).groups
+
+    assert groups["openarm_right_arm"].controller == "right_joint_trajectory_controller"
+    assert groups["openarm_right_arm"].moveit_group == "right_arm"
+    assert groups["openarm_right_arm"].action == "follow_joint_trajectory"
+
+    assert groups["openarm_left_arm"].controller == "left_joint_trajectory_controller"
+    assert groups["openarm_left_arm"].moveit_group == "left_arm"
+    assert groups["openarm_left_arm"].action == "follow_joint_trajectory"
+
+    # The gripper is driven by a GripperActionController, not a trajectory
+    # controller, so the action must be declared rather than assumed.
+    assert groups["openarm_left_gripper"].controller == "left_gripper_controller"
+    assert groups["openarm_left_gripper"].moveit_group == "left_gripper"
+    assert groups["openarm_left_gripper"].action == "gripper_command"
+
+
+def test_group_contract_marks_tesollo_groups_executable_without_moveit():
+    profile = load_profile(PROFILE)
+
+    tesollo = [name for name in profile.groups if name.startswith("tesollo_")]
+    assert tesollo
+    for name in tesollo:
+        group = profile.groups[name]
+        # The DG5F hand has no IK solver configured, so it is reachable by
+        # direct joint values only.
+        assert group.controller == "joint_trajectory_controller"
+        assert group.moveit_group is None
+        assert name in profile.executable_groups()
+
+
+def test_group_contract_matches_vendored_moveit_configuration():
+    """Declared names must exist in the vendored MoveIt configuration.
+
+    This fails if a vendor snapshot bump renames a controller or a planning
+    group, which would otherwise only surface as a runtime action timeout.
+    """
+    profile = load_profile(PROFILE)
+    source_by_canonical = {joint.canonical: joint.source for joint in profile.joints}
+
+    srdf = (MOVEIT_CONFIG / "openarm_bimanual.srdf").read_text()
+    srdf_groups = set(re.findall(r'<group name="([^"]+)"', srdf))
+    controllers = yaml.safe_load((MOVEIT_CONFIG / "moveit_controllers.yaml").read_text())
+    controllers = controllers["moveit_simple_controller_manager"]
+
+    openarm = {
+        name: group
+        for name, group in profile.executable_groups().items()
+        if name.startswith("openarm_")
+    }
+    assert set(openarm) == {
+        "openarm_right_arm",
+        "openarm_left_arm",
+        "openarm_left_gripper",
+    }
+    for name, group in openarm.items():
+        assert group.moveit_group in srdf_groups, name
+        assert group.controller in controllers["controller_names"], name
+        declared = tuple(controllers[group.controller]["joints"])
+        assert declared == tuple(source_by_canonical[j] for j in group.joints), name
+
+
+def test_group_contract_excludes_groups_without_a_controller(tmp_path):
+    profile = _write_two_group_profile(tmp_path, extra="")
+
+    loaded = load_profile(profile)
+    assert set(loaded.groups) == {"one", "two"}
+    assert set(loaded.executable_groups()) == {"one"}
+
+
+def test_group_contract_rejects_moveit_group_without_controller(tmp_path):
+    profile = _write_two_group_profile(tmp_path, extra="    moveit_group: orphan\n")
+
+    with pytest.raises(ProfileError, match="moveit_group.*without a controller"):
+        load_profile(profile)
+
+
+def test_group_contract_rejects_unknown_action(tmp_path):
+    profile = _write_two_group_profile(
+        tmp_path, extra="    controller: c2\n    action: teleport\n"
+    )
+
+    with pytest.raises(ProfileError, match="unsupported action"):
+        load_profile(profile)
+
+
+def _write_two_group_profile(tmp_path: Path, extra: str) -> Path:
+    """Write a minimal two-group profile; ``extra`` is appended to group ``two``."""
+    import hashlib
+
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("control_joint_order: [j1, j2]\n")
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        f"""
+name: groups
+components: [openarm]
+asset: {{id: asset, manifest: manifest.yaml, manifest_sha256: {digest}}}
+joints:
+  - {{canonical: j1, source: a, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+  - {{canonical: j2, source: b, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+groups:
+  one:
+    joints: [j1]
+    controller: c1
+  two:
+    joints: [j2]
+{extra}ros:
+  jazzy: {{command_topic: /cmd, state_topic: /state, controller: c, command_rate_hz: 100}}
+"""
+    )
+    return profile
 
 
 def test_profile_rejects_manifest_hash_mismatch(tmp_path):
