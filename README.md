@@ -435,6 +435,156 @@ robotctl pose joints --group openarm_right_arm --values 0,0,0,0.6,0,0,0 --execut
 지점**을 고치는데, 움직이는 팔에는 끝나는 지점이 없습니다. 배율은 앞의
 `pose gravity --sweep`으로 먼저 정하십시오.
 
+## 8. Real2Sim 파라미터 식별
+
+시뮬레이터가 이 팔처럼 움직이려면 관절별 **관성 `J`, 감쇠 `b`, 마찰 `τ_f`,
+강성 `kp`** 가 필요합니다. URDF에서 가져오는 게 아니라 측정합니다.
+
+### 왜 두 실험이 필요한가
+
+물리 방정식은 이렇습니다.
+
+```
+J q̈ = kp(q_cmd − q) − b q̇ − τ_f sign(q̇) − τ_g(q) + τ_ff
+```
+
+**동적 트랙**(`r2s fit`)은 이 식을 `J`로 나눠서 풉니다. 그래서 나오는 건
+`k = kp/J`, `d = b/J`, `f = τ_f/J` — 전부 **관성으로 나눠진 값**이고, 관성
+자체는 이 실험만으로는 분리되지 않습니다.
+
+**중력 sweep**(6장)은 `q̇ = q̈ = 0`인 곳에서 동작하므로 같은 식이 이렇게
+붕괴합니다.
+
+```
+오차 = (α·τ_model − s·τ_model) / kp + c
+```
+
+여기서 나오는 `kp`는 **관성이 들어 있지 않은 N·m/rad** 입니다. 둘을 합치면
+관성이 떨어져 나옵니다.
+
+```
+J = kp / k        b = d·J        τ_f = f·J
+```
+
+어느 한쪽만으로는 안 나오는 값입니다.
+
+### 왜 자세가 여러 개 필요한가
+
+한 자세에서는 `τ_model`이 상수라 오프셋과 구별되지 않습니다. `kp`·마찰·모델
+오차가 **미지수 3개에 방정식 1개**입니다. 실제로 첫 sweep을 관절별로 적합했을
+때 `kp`가 7.5 / 15.4 / 28.4로 나왔습니다. 벤더 헤더의 20에 대해 양쪽으로
+흩어졌는데, 이건 로봇이 이상한 게 아니라 **부정 결정계의 징후**입니다.
+
+여러 자세에서 재면 `τ_model`이 바뀌고 마찰은 그대로라 분리됩니다.
+
+### 절차
+
+**1) 자세 세트를 먼저 검토합니다.** `--execute` 없이는 아무것도 움직이지
+않습니다.
+
+```bash
+robotctl r2s identify --collect --group openarm_right_arm --poses 4 --output static.json
+```
+
+```text
+openarm_right_arm: 4 poses, scales 0,0.5,1
+            r_aj_1   r_aj_2   r_aj_3   r_aj_4   r_aj_5   r_aj_6   r_aj_7
+  pose 0   +0.000   +0.000   +0.000   +0.000   +0.000   +0.000   +0.000
+  pose 1   +1.555   +0.898   -0.125   +0.515   -0.008   +0.059   +0.897
+  cond        2.8      2.8      2.8      2.8      2.8      2.8      2.8
+  worst conditioned: r_aj_1 at 2.8
+DRY RUN: nothing moved and nothing was written.
+```
+
+> **이 dry run이 곧 검토입니다.** 자기 충돌도, 책상도, 위에 놓인 물건도
+> **아무것도 확인하지 않습니다.** 프로파일은 관절을 하나씩 제한할 뿐, 그 자세의
+> 팔이 있을 수 있는 자리인지는 말해주지 않습니다. RViz에서 각 자세를 눈으로
+> 확인하십시오.
+
+`cond`는 그 관절의 회귀 조건수입니다. 200을 넘으면 숫자를 주지 않고 **거부**하고
+어느 관절인지 말합니다. `--poses`나 `--reach`를 올리거나 다른 `--seed`로
+다시 설계하십시오.
+
+**2) 같은 `--seed`로 실행합니다.** 자세 세트는 seed에 대해 결정적이므로 방금
+본 자세를 그대로 방문합니다.
+
+```bash
+# --execute가 설계된 자세로 팔을 차례로 옮기고 그 자리에서 토크를 발행합니다.
+# E-stop 준비하십시오.
+robotctl r2s identify --collect --group openarm_right_arm --poses 4 --seed 0 \
+  --sweep-dir sweeps --output static.json --execute
+```
+
+**출발 전에 전체 여정을 검증합니다** — 모든 자세를 위치 한계에, 모든 구간을
+`--duration`에서의 속도 한계에 대해서. 다섯 번째 자세가 범위 밖이라 중간에
+멈추면 아무도 고르지 않은 자리에 팔이 남습니다. 미리 거부하면 아무 비용도
+들지 않습니다.
+
+토크는 **자세마다** 해제됩니다. 마지막에 한 번이 아닙니다.
+
+```text
+identify: 4 poses, 12 rounds at most per joint
+  joint            kp (N.m/rad)   alpha   offset (rad)  residual (rad)   cond  rounds  frozen
+  r_aj_1                  7.52   1.083       +0.00210         0.00021    4.8      12       0
+  ...
+```
+
+`alpha`는 모델 토크가 틀린 배수입니다 — URDF가 모르는 질량, 케이블, 붙여놓은
+것들. `offset`은 배율과 무관한 성분이고, 여기가 **스틱션**이 사는 자리입니다.
+`frozen`은 토크가 바뀌었는데 관절이 안 움직여서 버린 라운드 수입니다. 스틱션
+밴드 안에서는 위치 오차가 아니라 마찰이 관절을 잡고 있어서, 그 샘플들은 노이즈를
+더하는 게 아니라 **적합된 강성을 무한대로 끌어당깁니다**. 실측에서 `r_aj_4`는
+여섯 배율 연속 정확히 `+0.0075` rad였습니다.
+
+**부분 답을 쓰지 않습니다.** 관절 하나라도 식별 못 하면 아무것도 안 쓰고
+어느 관절이 왜 실패했는지 출력합니다. 최소자승은 늘 뭔가를 돌려주고, 부하가
+변하지 않은 관절의 강성은 그 "뭔가"입니다. 하류에서 그게 관성이 되면 그 뒤로는
+측정값과 구별되지 않습니다.
+
+**3) 동적 트랙과 합칩니다.** URDF를 실행 중인 스택에서 받아옵니다.
+
+```bash
+ros2 param get --hide-type /robot_state_publisher robot_description > robot.urdf
+robotctl r2s fit --track track.h5 --output right.json --static static.json --urdf robot.urdf
+```
+
+```text
+  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   kp (N.m/rad)   J from gravity   gap
+  r_aj_1             0.35000      1.5000        0.4000          20.00          0.35000  0.0%
+```
+
+첫 칼럼 `J`는 `kp/k`입니다. 마지막의 `J from gravity`는 `1/g` — 중력 칼럼에서
+직접 나온 값입니다. **다른 실험의 다른 칼럼에서 나오므로, 둘이 맞는다는 건
+계산이 아니라 증거입니다.** 다른 로봇에서 측정한 static estimate나, 트랙의 팔이
+아닌 URDF를 잡아내는 유일한 검사입니다. 25% 넘게 벌어지면 거부하고 아무것도
+쓰지 않습니다.
+
+**4) 번들에 넣습니다.**
+
+```bash
+robotctl r2s bundle --base bundle.json --fit right.json --fit left.json --output identified.json
+robotctl r2s validate --bundle identified.json --metrics holdout.json --output verdict.json
+robotctl r2s export --bundle identified.json --validation verdict.json --output release.json
+```
+
+각 그룹에 `nominal` 옆에 `identified` 블록이 생깁니다. 성격이 다릅니다 —
+`nominal`은 그룹당 하나의 추정치, `identified`는 **관절당 하나의 측정값**이라
+어느 sweep과 어느 트랙에서 나왔는지, 어떤 교차검증을 통과했는지 함께 실립니다.
+
+블록은 자기가 **측정된** 프로파일·에셋·매니페스트 해시를 기록합니다. 번들
+헤더가 주장하는 것과 나란히요. 같은 정보를 두 번 쓰는 것처럼 보이지만, 이게
+바로 체크섬이 못 하는 검사입니다 — 체크섬은 쓸 때 다시 계산되므로, 다른 로봇
+번들에서 복사해 붙인 블록도 똑같이 서명해줍니다.
+
+### 아직 남은 것
+
+- **동적 트랙을 실물에서 수집하는 경로가 없습니다.** `r2s collect --execute`는
+  아직 `ROS publisher backend is required`를 출력하고 아무것도 발행하지
+  않습니다. 위 3)의 `track.h5`는 그래서 지금 실물로 만들 수 없습니다. 1)~2)의
+  static 식별과 4)의 번들은 실물로 됩니다.
+- 실측 파라미터는 아직 없습니다. `docs/jazzy-verification.md`에 측정하면
+  기록합니다.
+
 ## 그 밖의 명령
 
 ```bash

@@ -248,6 +248,82 @@ Gravity compensation cannot remove that component. A friction feedforward would
 need the sign of motion, which a stationary joint does not have, so standing
 accuracy stays the business of `pose ee --settle`.
 
+## Real2Sim parameter identification
+
+Implemented against the plan in
+`docs/superpowers/plans/2026-07-26-real2sim-parameter-identification.md`. **Not
+yet run on hardware** — what follows is what is verified in simulation, what is
+still owed from the real arm, and one defect the work exposed.
+
+### Verified against a synthetic robot
+
+Each check builds a robot with known parameters, simulates it, and asks whether
+the pipeline recovers them.
+
+| Check | Result |
+| --- | --- |
+| Static fit recovers `kp`, `alpha` and the offset from exact sweeps | exact to 1e-6 relative |
+| Static fit under 2e-4 rad of noise | within 5% |
+| Dynamic fit with the gravity column recovers `k`, `d`, `f` and `1/J` | within 1–2% |
+| `combine` recovers `J`, `b`, `tau_f` end to end | within 2% |
+| The two independent inertias agree | under 2% apart |
+| `r2s identify --collect` drives a stub arm and recovers its `kp` and `alpha` | within 2% |
+
+The last one is the one worth naming: it designs a pose set, moves a stub arm
+through it, sweeps at each pose, writes a file per pose, and refits from disk to
+the same numbers. Every stage of the static half runs in that one test.
+
+The simulation uses semi-implicit Euler so that the finite differences
+`fit_second_order` takes are exactly the accelerations the simulation used. A
+correct fit is then exact, and any bias shows up as bias rather than hiding inside
+discretisation error.
+
+### Defect exposed: the dynamic fit had no gravity term
+
+`fit_second_order` fitted `qdd = k(q_cmd−q) − d·qd − f·sign(qd)`. The real
+equation carries `−tau_g(q)/J`, and with that term missing the regression has
+nowhere to put a standing load but the stiffness and damping columns. It had only
+ever run on synthetic tracks with no load in them, so this had never shown.
+
+It is not a small error. On a simulated seven-joint arm under its own weight, the
+fit without the gravity term **refuses outright** — the load drives a fitted
+parameter out of the range the fit accepts, so `r_aj_2` comes back
+`unidentifiable dynamics`. A lighter load would be worse: it would return a
+plausible wrong number. A test pins both the refusal and the recovery once the
+term is supplied.
+
+### Still owed from the real arm
+
+- **A dynamic track.** `r2s collect --execute` still prints `ROS publisher
+  backend is required` and publishes nothing, so no real track exists. The
+  static half of the pipeline (`pose gravity --output`, `r2s identify`,
+  `r2s identify --collect`) reaches hardware; `r2s fit --static` cannot be run on
+  real data until collect does.
+- **Measured parameters.** No `J`, `b`, `tau_f` or `kp` has been measured on this
+  arm yet. The `kp` values of 7.5, 15.4 and 28.4 quoted in the plan are what
+  fitting the *existing single-pose* sweep gives, and the point of quoting them is
+  that they scatter in both directions around the vendor header's 20 — the
+  signature of an under-determined fit, which is why several poses are needed.
+  They are not a result.
+- **Whether the designed pose set is collision-free on the real arm.** Nothing in
+  the tool checks the arm against itself or its surroundings; the profile bounds
+  each joint separately. The pose set is deterministic in `--seed` and the dry run
+  prints the itinerary so the review is real, but the review is a person looking
+  at RViz.
+
+### Real hardware run checklist
+
+When the arm is next available:
+
+1. `robotctl r2s identify --collect --group openarm_right_arm --poses 4 --output static.json`
+   and read every pose in RViz before going further.
+2. The same command with `--seed 0 --sweep-dir sweeps --execute`.
+3. Record the `kp`, `alpha`, `offset`, residual, conditioning and frozen counts
+   here, and whether `r_aj_4` is still frozen once the poses vary its load.
+4. Note whether `r_aj_1`, `r_aj_6` and `r_aj_7` — the three the gravity sweep
+   showed to be friction-limited rather than gravity-limited — are identifiable
+   at all, or come back named.
+
 ## Defects found and fixed during this run
 
 Three defects were exposed only once the build blocker was cleared. Each was
