@@ -78,16 +78,17 @@ brought up first, and the bringup has to be told which buses to open.
 
 ### 1. Bring the CAN buses up
 
-`ip link show` names the buses in enumeration order, not by arm. Confirm which
-adapter is which before configuring anything:
+One bimanual OpenArm is one bus per arm. List what the machine actually has
+before configuring anything:
 
 ```bash
 ip -br link show type can
 ```
 
-A leader–follower rig enumerates four buses. On this one the **follower** arms
-are `can2` (right) and `can3` (left); the leader takes `can0` and `can1`.
-Substitute the names your own `ip link` output reports.
+A single robot on a dual-channel adapter enumerates as `can0` and `can1`, both
+reported against the same `parentdev`. Those are the two buses to configure.
+Substitute whatever names your own output reports; a rig with more than one
+robot attached will show four or more.
 
 The interfaces must be configured in **CAN FD** mode at **1 Mbit/s arbitration
 and 5 Mbit/s data**. `openarm_description` renders its `ros2_control` block with
@@ -97,7 +98,7 @@ motors:
 
 ```bash
 # Repeat for each bus this run will open. Configuring requires the link down.
-for iface in can2 can3; do
+for iface in can0 can1; do
   sudo ip link set "$iface" down
   sudo ip link set "$iface" type can bitrate 1000000 dbitrate 5000000 fd on
   sudo ip link set "$iface" up
@@ -107,12 +108,13 @@ done
 Verify before launching anything — `state UP` and `fd on` must both appear:
 
 ```bash
-ip -details link show can2 | grep -E "state|fd on"
+ip -details link show can0 | grep -E "state|fd on"
 ```
 
 The vendored `ros_ws/src/openarm_can/setup/openarm-can-configure-socketcan-4-arms`
-does the same thing for all four buses at once, but it aborts unless `can0`
-through `can3` all exist, and it needs `-fd` passed explicitly:
+does the same thing, but it is written for a four-bus rig: it aborts unless
+`can0` through `can3` all exist, so it is no use with a single robot attached.
+With four buses present it still needs `-fd` passed explicitly:
 
 ```bash
 ./ros_ws/src/openarm_can/setup/openarm-can-configure-socketcan-4-arms -fd
@@ -123,12 +125,15 @@ through `can3` all exist, and it needs `-fd` passed explicitly:
 ```bash
 source /opt/ros/jazzy/setup.bash
 # --real opens the named CAN buses and the physical arms will move:
-./ros_ws/pose_bringup.sh --real --right-can can2 --left-can can3
+./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1
 ```
 
 Both buses must be named; the wrapper refuses to guess, and the names are
-positional to the arm, not to the number. Getting them the wrong way round
-mirrors the robot: the left arm answers commands addressed to the right.
+positional to the arm, not to the number. Nothing downstream can catch a swap:
+`openarm_hardware` addresses both arms with the same motor IDs — `0x01`–`0x07`
+sending, `0x11`–`0x17` receiving, `0x08`/`0x18` for the gripper — so a mirrored
+pair of buses reports plausible joint values either way, and the first symptom
+is the left arm answering a command addressed to the right.
 
 The pose commands themselves are identical to the fake-hardware ones — same
 groups, same options, same gate. Nothing in `robotctl` changes between fake and
@@ -330,7 +335,7 @@ anything that did try to open a bus fails loudly instead of finding a real one.
 
 ```bash
 # --real drives the physical robot; both buses must be named explicitly:
-robotctl pose rviz --real --right-can can2 --left-can can3
+robotctl pose rviz --real --right-can can0 --left-can can1
 ```
 
 `--real` without both interfaces is refused rather than guessed. The buses must
@@ -548,8 +553,8 @@ separate long-lived branch.
 The buses are configured but not talking. Check, in this order:
 
 ```bash
-ip -details link show can2 | grep -E "state|fd on"   # state UP and fd on
-candump can2                                         # frames while the arm is powered
+ip -details link show can0 | grep -E "state|fd on"   # state UP and fd on
+candump can0                                         # frames while the arm is powered
 ```
 
 `state STOPPED` means the link was never brought up. `state UP` with no frames
