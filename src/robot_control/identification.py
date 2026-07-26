@@ -135,6 +135,126 @@ class StaticEstimate:
     unidentifiable: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True)
+class PoseSet:
+    """Poses to sweep at, and how well they condition each joint's fit."""
+
+    poses: np.ndarray
+    scales: tuple[float, ...]
+    condition: np.ndarray
+
+    @property
+    def worst_joint(self) -> int:
+        return int(np.argmax(self.condition))
+
+    @property
+    def worst_condition(self) -> float:
+        return float(np.max(self.condition))
+
+
+def _static_design(torques: np.ndarray, scales: Sequence[float]) -> np.ndarray:
+    """Rows of the static regression for one joint, over poses and scales."""
+    return np.array(
+        [(torque, -scale * torque, 1.0) for torque in torques for scale in scales],
+        dtype=float,
+    )
+
+
+def _condition(design: np.ndarray) -> float:
+    """Conditioning of a regression with its columns scaled to comparable size.
+
+    Without the normalisation the number would mostly report that a torque in
+    N.m and a column of ones are different sizes, which says nothing about
+    whether the parameters can be separated.
+    """
+    norms = np.linalg.norm(design, axis=0)
+    if not np.all(norms > 0):
+        return float("inf")
+    return float(np.linalg.cond(design / norms))
+
+
+def _set_condition(torques: np.ndarray, scales: Sequence[float]) -> np.ndarray:
+    """Per joint, how well a candidate set of poses separates its parameters."""
+    torques = np.atleast_2d(torques)
+    return np.array(
+        [
+            _condition(_static_design(torques[:, joint], scales))
+            for joint in range(torques.shape[1])
+        ]
+    )
+
+
+def design_pose_set(
+    torque_at,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    *,
+    scales: Sequence[float],
+    poses: int = 4,
+    candidates: int = 256,
+    seed: int = 0,
+    reach: float = 0.5,
+) -> PoseSet:
+    """Choose poses that let each joint's stiffness be told from its torque model.
+
+    Greedy: start at the middle of the envelope, then repeatedly add whichever
+    candidate leaves the worst-conditioned joint best off. Greedy rather than a
+    search because the payoff is nearly all in the second pose — one pose is one
+    equation in three unknowns and later ones only add redundancy — so the
+    achieved number is reported to the caller to judge rather than promised.
+
+    *reach* bounds sampling to a fraction of each joint's range about its middle.
+    A pose against a hard stop cannot droop, and a joint that cannot droop looks
+    exactly like one held by stiction.
+
+    Deterministic in *seed*, which is what makes a dry run a review: `--execute`
+    with the same seed visits the poses that were printed. Nothing here checks
+    for self-collision — the profile bounds each joint, not the arm against
+    itself — so the printed itinerary is the review, not a formality.
+    """
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    scales = tuple(float(scale) for scale in scales)
+    if lower.shape != upper.shape or lower.ndim != 1 or not lower.size:
+        raise FitError("limits must be one matching value per joint")
+    if np.any(upper <= lower):
+        raise FitError("every joint's upper limit must exceed its lower limit")
+    if poses < 1:
+        raise FitError("a pose set needs at least one pose")
+    if len(set(scales)) < 2:
+        raise FitError(
+            "a sweep needs at least two distinct scales, or the joint is never "
+            "seen responding to a change in torque"
+        )
+    if not 0.0 < reach <= 1.0:
+        raise FitError("reach must be a fraction of the range, above 0 and at most 1")
+    if candidates < 1:
+        raise FitError("candidates must be positive")
+
+    middle = (lower + upper) / 2
+    half = (upper - lower) / 2 * reach
+    rng = np.random.default_rng(seed)
+    pool = middle + rng.uniform(-1.0, 1.0, (candidates, lower.size)) * half
+    pool_torque = np.array([np.asarray(torque_at(pose), dtype=float) for pose in pool])
+
+    chosen = [middle.copy()]
+    torques = [np.asarray(torque_at(middle), dtype=float)]
+    while len(chosen) < poses:
+        scores = [
+            np.max(_set_condition(np.vstack([*torques, candidate]), scales))
+            for candidate in pool_torque
+        ]
+        best = int(np.argmin(scores))
+        chosen.append(pool[best].copy())
+        torques.append(pool_torque[best].copy())
+
+    return PoseSet(
+        poses=np.array(chosen),
+        scales=scales,
+        condition=_set_condition(np.array(torques), scales),
+    )
+
+
 def _frozen_rounds(sweep: GravitySweep, joint: int, noise_rad: float) -> set[int]:
     """Rounds where the applied torque changed and the joint did not move.
 
@@ -233,13 +353,12 @@ def fit_static_gravity(
             )
             continue
         design = np.asarray(rows, dtype=float)
-        norms = np.linalg.norm(design, axis=0)
-        if not np.all(norms > 0):
+        condition[joint] = _condition(design)
+        if not np.isfinite(condition[joint]):
             unidentifiable.append(
                 (name, "no torque was ever fed forward to this joint")
             )
             continue
-        condition[joint] = float(np.linalg.cond(design / norms))
         if condition[joint] > max_condition:
             unidentifiable.append(
                 (

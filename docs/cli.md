@@ -791,9 +791,19 @@ measured at several poses.
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
-| `--sweep` | *required, twice or more* | A file from `pose gravity --output`; pass it once per pose |
+| `--sweep` | — | A file from `pose gravity --output`; pass it once per pose. At least two in total, counting collected ones |
 | `--output` | *required* | JSON stiffness set to write |
 | `--noise` | `0.0004` | Radians below which a joint counts as not having moved |
+| `--collect` | off | Design a pose set and sweep at each pose, rather than only fitting files that exist |
+| `--group` | *required with `--collect`* | Group to collect on; must declare an `effort_controller` |
+| `--sweep-dir` | *required with `--collect --execute`* | Directory to write one sweep file per collected pose |
+| `--poses` | `4` | Poses to design; at least 2 |
+| `--scales` | `0,0.5,1.0` | Comma-separated gravity scales to hold at every pose |
+| `--reach` | `0.5` | Fraction of each joint's range the poses may use, about its middle |
+| `--seed` | `0` | Pose-set seed; the same seed designs the same poses |
+| `--duration` | `3.0` | Seconds to take moving between poses |
+| `--hold-sec` | `2.0` | Seconds to publish at each scale before measuring |
+| `--execute` | off | Move the arm through the designed poses |
 
 ```bash
 robotctl r2s identify --sweep sweeps/pose0.json --sweep sweeps/pose1.json --sweep sweeps/pose2.json --output static.json
@@ -840,6 +850,64 @@ rather than merely adding noise. Both members of such a pair go: the first is
 where the joint stopped, and nothing says whether that was its equilibrium or the
 edge of the band. Measured on the real right arm, `r_aj_4` sat at exactly
 `+0.0075` rad across six consecutive scales.
+
+### Collecting the poses instead of driving them by hand
+
+`--collect` designs a pose set, moves the arm to each pose, sweeps there, and
+writes one file per pose. Review it first — without `--execute` nothing moves:
+
+```bash
+robotctl r2s identify --collect --group openarm_right_arm --poses 4 --output static.json
+```
+
+```text
+openarm_right_arm: 4 poses, scales 0,0.5,1
+            r_aj_1   r_aj_2   r_aj_3   r_aj_4   r_aj_5   r_aj_6   r_aj_7
+  pose 0   +0.000   +0.000   +0.000   +0.000   +0.000   +0.000   +0.000
+  pose 1   +1.555   +0.898   -0.125   +0.515   -0.008   +0.059   +0.897
+  ...
+  cond        2.8      2.8      2.8      2.8      2.8      2.8      2.8
+  worst conditioned: r_aj_1 at 2.8
+DRY RUN: nothing moved and nothing was written.
+```
+
+> **The dry run is the review, not a formality.** Nothing here checks the arm
+> against itself, the table, or anything on it. The profile bounds each joint
+> separately; it says nothing about whether the arm in that posture is where the
+> arm can be. Look at each pose in RViz before committing to it.
+
+The pose set is deterministic in `--seed`, so `--execute` with the same seed
+visits the poses you just reviewed:
+
+```bash
+# --execute moves the arm to each designed pose in turn and publishes torque
+# there. Keep the E-stop within reach.
+robotctl r2s identify --collect --group openarm_right_arm --poses 4 --seed 0 \
+  --sweep-dir sweeps --output static.json --execute
+```
+
+The whole itinerary is authorized before the first move — every pose against the
+profile's position limits, and every leg against its velocity limits at
+`--duration`. A run that stopped partway because the fifth pose was out of range
+would leave the arm somewhere nobody chose, and refusing up front costs nothing.
+The conditioning is checked the same way, before moving rather than after
+fitting.
+
+Torque is released at every pose, not only at the end.
+
+`--reach` keeps the poses off the hard stops. A pose against a stop cannot droop,
+and a joint that cannot droop looks exactly like one held by stiction — the fit
+would read the constraint as friction.
+
+`--sweep` composes with `--collect`, so a joint frozen at every designed pose can
+be fixed by adding one pose by hand rather than recollecting everything:
+
+```bash
+# Both --execute lines publish torque and the second also moves the arm; pose
+# the joint you want to free by hand first, then measure there.
+robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.5,1.0 --output sweeps/byhand.json
+robotctl r2s identify --collect --group openarm_right_arm --sweep sweeps/byhand.json --sweep-dir sweeps2 --output static.json --execute
+```
 
 ### Why it refuses rather than reporting a partial answer
 

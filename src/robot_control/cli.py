@@ -21,9 +21,11 @@ from .artifacts import (
 from .calibration import load_bundle
 from .identification import (
     DEFAULT_NOISE_RAD,
+    MAX_CONDITION,
     FitError,
     GravitySweep,
     build_excitation,
+    design_pose_set,
     fit_second_order,
     fit_static_gravity,
     validate_holdout,
@@ -58,6 +60,16 @@ DEFAULT_FOLLOW_SEC = 60.0
 # compensation on, and about 4 N.m at the stiffness the hardware applies.
 LEAD_SEC = 0.1
 SETTLE_PASSES = 4
+# Enough to condition the fit with a pose to spare: one pose is one equation in
+# three unknowns, the second separates them, and the rest buy redundancy against
+# measurement noise.
+DEFAULT_POSES = 4
+# Spanning zero so every pose sees the joint both uncompensated and over-
+# compensated, which is what puts a slope through the samples.
+DEFAULT_COLLECT_SCALES = "0,0.5,1.0"
+# Half of each joint's range, about its middle. A pose against a hard stop cannot
+# droop, and a joint that cannot droop looks exactly like one held by stiction.
+DEFAULT_REACH = 0.5
 # Below this fraction of improvement the loop has stopped converging: the arm
 # is against a hard stop, or holding something, and more passes would only wind
 # the command further past a target it cannot reach.
@@ -68,6 +80,15 @@ SETTLE_PROGRESS = 0.1
 # refused.
 UNUSABLE = 2
 REFUSED = 3
+
+
+class Refused(RuntimeError):
+    """Understood, measured, and declined — the exit-3 half of the convention.
+
+    Distinct from a ValueError, which means the request itself could not be
+    carried out. An under-conditioned pose set is a well-formed request whose
+    answer is no.
+    """
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -102,6 +123,58 @@ def _parser() -> argparse.ArgumentParser:
                 default=DEFAULT_NOISE_RAD,
                 help="radians below which a joint counts as not having moved, "
                 "so its samples are dropped as frozen by stiction",
+            )
+            item.add_argument(
+                "--collect",
+                action="store_true",
+                help="design a pose set and sweep at each pose, instead of only "
+                "fitting files that already exist",
+            )
+            item.add_argument("--group", help="group to collect on; needs --collect")
+            item.add_argument(
+                "--sweep-dir",
+                type=Path,
+                help="directory to write one sweep file per collected pose",
+            )
+            item.add_argument(
+                "--poses", type=int, default=DEFAULT_POSES, help="poses to design"
+            )
+            item.add_argument(
+                "--scales",
+                default=DEFAULT_COLLECT_SCALES,
+                help="comma-separated gravity scales to hold at every pose",
+            )
+            item.add_argument(
+                "--reach",
+                type=float,
+                default=DEFAULT_REACH,
+                help="fraction of each joint's range the poses may use, about "
+                "its middle; keeps the set off the hard stops",
+            )
+            item.add_argument(
+                "--seed",
+                type=int,
+                default=0,
+                help="pose-set seed; the same seed designs the same poses, which "
+                "is what makes a dry run a review of the run",
+            )
+            item.add_argument(
+                "--duration",
+                type=float,
+                default=DEFAULT_DURATION_SEC,
+                help="seconds to take moving between poses",
+            )
+            item.add_argument(
+                "--hold-sec",
+                type=float,
+                default=DEFAULT_HOLD_SEC,
+                help="seconds to publish at each scale before measuring",
+            )
+            item.add_argument(
+                "--execute",
+                action="store_true",
+                help="move the arm through the designed poses; without it the "
+                "itinerary is only designed and printed",
             )
         if stage == "collect":
             mode = item.add_mutually_exclusive_group()
@@ -602,44 +675,53 @@ def _pose_gravity(args, profile) -> int:
             print("DRY RUN: torque computed but not published; pass --execute")
             return 0
 
-        try:
-            poses, torques, applied, errors = [], [], [], []
-            for scales in rounds:
-                # Recomputed each round: compensation moves the arm, and the
-                # torque that holds it depends on where it now is.
-                state = adapter.read_state()
-                torque = chain.gravity_torque(state)
-                effort = gate.authorize_effort(torque * scales)
-                _publish_for(adapter, effort, args.hold_sec)
-                error = adapter.read_tracking_error()
-                poses.append(state)
-                torques.append(torque)
-                applied.append(scales)
-                errors.append(error)
-                print(
-                    f"scale {_scale_label(scales, index):>8}: worst joint error "
-                    f"{np.max(np.abs(error)):+.4f} rad, "
-                    f"mean {np.mean(np.abs(error)):.4f} rad"
-                )
-            sweep = GravitySweep(
-                group=group.name,
-                joint_names=tuple(group.joints),
-                poses=np.asarray(poses, dtype=float),
-                modelled_torque=np.asarray(torques, dtype=float),
-                scales=np.asarray(applied, dtype=float),
-                errors=np.asarray(errors, dtype=float),
-                sweep_joint=args.sweep_joint,
-            )
-            if sweep.rounds > 1:
-                _report_sweep(group, sweep, index)
-            if args.output is not None:
-                write_sweep(args.output, sweep, profile)
-                print(f"wrote {args.output}")
-        finally:
-            # Torque left applied after this process exits would keep pushing.
-            adapter.send_effort(np.zeros(len(group.joints)))
-            print("torque released")
+        sweep = _measure_sweep(
+            adapter, chain, gate, group, rounds, args.hold_sec, index, args.sweep_joint
+        )
+        if sweep.rounds > 1:
+            _report_sweep(group, sweep, index)
+        if args.output is not None:
+            write_sweep(args.output, sweep, profile)
+            print(f"wrote {args.output}")
     return 0
+
+
+def _measure_sweep(
+    adapter, chain, gate, group, rounds, hold_sec, index, sweep_joint
+) -> GravitySweep:
+    """Hold each scale in turn, read what the arm did, and release the torque."""
+    poses, torques, applied, errors = [], [], [], []
+    try:
+        for scales in rounds:
+            # Recomputed each round: compensation moves the arm, and the torque
+            # that holds it depends on where it now is.
+            state = adapter.read_state()
+            torque = chain.gravity_torque(state)
+            effort = gate.authorize_effort(torque * scales)
+            _publish_for(adapter, effort, hold_sec)
+            error = adapter.read_tracking_error()
+            poses.append(state)
+            torques.append(torque)
+            applied.append(scales)
+            errors.append(error)
+            print(
+                f"scale {_scale_label(scales, index):>8}: worst joint error "
+                f"{np.max(np.abs(error)):+.4f} rad, "
+                f"mean {np.mean(np.abs(error)):.4f} rad"
+            )
+    finally:
+        # Torque left applied after this process exits would keep pushing.
+        adapter.send_effort(np.zeros(len(group.joints)))
+        print("torque released")
+    return GravitySweep(
+        group=group.name,
+        joint_names=tuple(group.joints),
+        poses=np.asarray(poses, dtype=float),
+        modelled_torque=np.asarray(torques, dtype=float),
+        scales=np.asarray(applied, dtype=float),
+        errors=np.asarray(errors, dtype=float),
+        sweep_joint=sweep_joint,
+    )
 
 
 def _scale_vector(given: str | None, group) -> np.ndarray:
@@ -874,10 +956,40 @@ def _identify(args, profile) -> int:
     something; downstream it becomes an inertia, and nothing after this point
     could tell it from a measured one.
     """
-    if not args.output:
+    from .ros_adapter import AdapterUnavailable
+
+    reviewing = args.collect and not args.execute
+    if not args.output and not reviewing:
         print("error: --output is required")
         return UNUSABLE
-    sweeps = args.sweep or []
+    if args.collect and not args.group:
+        print("error: --collect needs --group, to say which arm to drive")
+        return UNUSABLE
+    if args.collect and args.execute and not args.sweep_dir:
+        print(
+            "error: --collect --execute needs --sweep-dir; the measurements are "
+            "the only record of a run that moved the robot"
+        )
+        return UNUSABLE
+
+    collected: list[Path] = []
+    if args.collect:
+        try:
+            written = _collect_poses(args, profile)
+        except (SafetyError, Refused) as error:
+            print(f"refused: {error}")
+            return REFUSED
+        except AdapterUnavailable as error:
+            print(f"unavailable: {error}")
+            return UNUSABLE
+        except (ValueError, OSError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        if written is None:
+            return 0  # a review, which is all --collect without --execute does
+        collected = written
+
+    sweeps = list(args.sweep or []) + collected
     if len(sweeps) < 2:
         print(
             f"refused: --sweep must name at least two poses, got {len(sweeps)}. "
@@ -916,6 +1028,112 @@ def _identify(args, profile) -> int:
     )
     print(f"identify: {args.output}")
     return 0
+
+
+def _collect_poses(args, profile) -> list[Path] | None:
+    """Design a pose set, show it, and with --execute sweep at every pose.
+
+    Returns the sweep files written, or None when this was only a review.
+
+    The whole itinerary is authorized before the first move. A run that stopped
+    partway because the fifth pose was out of range would leave the arm somewhere
+    nobody chose, which is worse than not starting: the point of validating up
+    front is that the refusal costs nothing.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if not group.compensable:
+        raise ValueError(
+            f"group {group.name!r} declares no effort_controller, so torque "
+            "cannot be published for it"
+        )
+    if group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no tip_link, so its chain cannot be built"
+        )
+    if args.poses < 2:
+        raise ValueError(
+            f"--poses must be at least 2, got {args.poses}; one pose cannot "
+            "separate a joint's stiffness from its torque model"
+        )
+    if args.hold_sec <= 0 or args.duration <= 0:
+        raise ValueError("--hold-sec and --duration must be positive")
+    scales = _parse_floats(args.scales, "--scales")
+    _check_scales(np.asarray(scales, dtype=float), group)
+
+    joints = {joint.canonical: joint for joint in profile.joints}
+    limits = [joints[canonical] for canonical in group.joints]
+
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        design = design_pose_set(
+            chain.gravity_torque,
+            np.array([joint.lower for joint in limits]),
+            np.array([joint.upper for joint in limits]),
+            scales=scales,
+            poses=args.poses,
+            seed=args.seed,
+            reach=args.reach,
+        )
+        _report_design(group, design)
+
+        # Both checks before anything moves, cheapest first.
+        if design.worst_condition > MAX_CONDITION:
+            joint = group.joints[design.worst_joint]
+            raise Refused(
+                f"the designed poses do not vary {joint}'s load enough to tell "
+                f"its stiffness from its torque model: condition "
+                f"{design.worst_condition:.3g} over {MAX_CONDITION:g}. Raise "
+                "--poses or --reach, or try another --seed."
+            )
+        start = adapter.read_state()
+        _gate(profile, group, seed=start).authorize_trajectory(
+            list(design.poses), start_time_sec=0.0, period_sec=args.duration
+        )
+
+        if not args.execute:
+            print(
+                "DRY RUN: nothing moved and nothing was written. Nothing here "
+                "checks the arm against itself or its surroundings for "
+                "collision — the profile bounds each joint, not the arm — so "
+                "review the poses above in RViz, then run the same --seed with "
+                "--execute."
+            )
+            return None
+
+        written: list[Path] = []
+        rounds = [np.full(len(group.joints), scale) for scale in scales]
+        for index, pose in enumerate(design.poses):
+            print(f"\npose {index}: moving over {args.duration:g} s")
+            state = adapter.read_state()
+            gate = _gate(profile, group, seed=state)
+            points = gate.authorize_trajectory(
+                [pose], start_time_sec=0.0, period_sec=args.duration
+            )
+            adapter.send_trajectory(points, period_sec=args.duration)
+            sweep = _measure_sweep(
+                adapter, chain, gate, group, rounds, args.hold_sec, None, None
+            )
+            path = Path(args.sweep_dir) / f"pose{index}.json"
+            write_sweep(path, sweep, profile)
+            print(f"wrote {path}")
+            written.append(path)
+        return written
+
+
+def _report_design(group, design) -> None:
+    """Print the itinerary and how well it conditions each joint's fit."""
+    print(
+        f"{group.name}: {len(design.poses)} poses, scales "
+        + ",".join(f"{scale:g}" for scale in design.scales)
+    )
+    print("  " + " " * 7 + "".join(f"{canonical:>9}" for canonical in group.joints))
+    for index, pose in enumerate(design.poses):
+        print(f"  pose {index}" + "".join(f"{value:+9.3f}" for value in pose))
+    print("  cond  " + "".join(f"{value:9.1f}" for value in design.condition))
+    joint = group.joints[design.worst_joint]
+    print(f"  worst conditioned: {joint} at {design.worst_condition:.1f}")
 
 
 def _report_static(estimate, poses: int) -> None:
