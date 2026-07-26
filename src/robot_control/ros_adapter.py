@@ -39,6 +39,12 @@ MARKER_SERVICE = (
     "/rviz_moveit_motion_planning_display"
     "/robot_interaction_interactive_marker_topic/get_interactive_markers"
 )
+# Published by the RViz display while a drag is in progress. Useless for reading
+# a pose once, which is what the service is for, and exactly right for following.
+MARKER_FEEDBACK_TOPIC = (
+    "/rviz_moveit_motion_planning_display"
+    "/robot_interaction_interactive_marker_topic/feedback"
+)
 
 
 class AdapterUnavailable(RuntimeError):
@@ -243,6 +249,44 @@ class RosAdapter:
             self.group.effort_controller, list(source.values())
         )
 
+    def watch_marker(self) -> None:
+        """Start listening to the marker's drag stream.
+
+        The feedback topic carries a pose only while a drag is in progress, so a
+        servo loop subscribes once and reads whatever has arrived since, rather
+        than asking for a pose it might be between.
+        """
+        tip = self._require_planning_group()
+        self._backend.watch_marker(f"{MARKER_PREFIX}{tip}")
+
+    def latest_marker_target(self) -> Pose | None:
+        """Return the newest dragged pose, or None if none has arrived yet."""
+        return self._backend.latest_marker()
+
+    def stream_positions(
+        self, positions: Sequence[float], period_sec: float
+    ) -> None:
+        """Send one servo sample to the group's trajectory controller.
+
+        Published on the controller's topic interface rather than as an action
+        goal: a goal per sample would spend the whole period on the accept and
+        result handshake. The controller replaces its active trajectory with
+        each message, which is what makes a stream of single points track.
+        """
+        self._require_execute()
+        self._require_action(FOLLOW_JOINT_TRAJECTORY)
+        source = self.interface.group_command_to_source(self.group.name, positions)
+        self._backend.publish_trajectory_point(
+            self.group.controller,
+            list(source),
+            list(source.values()),
+            period_sec,
+        )
+
+    def pump(self, timeout_sec: float = 0.0) -> None:
+        """Let subscriptions deliver. A servo loop must call this every cycle."""
+        self._backend.pump(timeout_sec)
+
     def read_marker_pose(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Pose:
         """Return the pose of the RViz goal marker for this group's tip link.
 
@@ -354,6 +398,7 @@ class _RclpyBackend:
             from sensor_msgs.msg import JointState
             from std_msgs.msg import Float64MultiArray, Header, String
             from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+            from visualization_msgs.msg import InteractiveMarkerFeedback
             from visualization_msgs.srv import GetInteractiveMarkers
         except ImportError as error:
             raise AdapterUnavailable(
@@ -372,6 +417,7 @@ class _RclpyBackend:
         self._Quaternion, self._Point = Quaternion, Point
         self._GetPositionFK, self._GetPositionIK = GetPositionFK, GetPositionIK
         self._GetInteractiveMarkers = GetInteractiveMarkers
+        self._MarkerFeedback = InteractiveMarkerFeedback
         self._ControllerState = JointTrajectoryControllerState
         self._Float64MultiArray = Float64MultiArray
         self._String = String
@@ -398,6 +444,10 @@ class _RclpyBackend:
         self._ik_client = None
         self._marker_client = None
         self._effort_publishers: dict[str, Any] = {}
+        self._stream_publishers: dict[str, Any] = {}
+        self._marker_subscription = None
+        self._marker_name: str | None = None
+        self._marker_target: Pose | None = None
 
     def close(self) -> None:
         self._node.destroy_node()
@@ -569,6 +619,63 @@ class _RclpyBackend:
         publisher.publish(
             self._Float64MultiArray(data=[float(value) for value in values])
         )
+
+    def watch_marker(self, name: str) -> None:
+        self._marker_name = name
+        if self._marker_subscription is not None:
+            return
+        self._marker_subscription = self._node.create_subscription(
+            self._MarkerFeedback,
+            MARKER_FEEDBACK_TOPIC,
+            self._record_marker,
+            10,
+        )
+
+    def _record_marker(self, message: Any) -> None:
+        if message.marker_name != self._marker_name:
+            return
+        position, orientation = message.pose.position, message.pose.orientation
+        self._marker_target = Pose(
+            (position.x, position.y, position.z),
+            (orientation.x, orientation.y, orientation.z, orientation.w),
+            message.header.frame_id,
+        )
+
+    def latest_marker(self) -> Pose | None:
+        return self._marker_target
+
+    def pump(self, timeout_sec: float) -> None:
+        self._rclpy.spin_once(self._node, timeout_sec=timeout_sec)
+
+    def publish_trajectory_point(
+        self,
+        controller: str,
+        joint_names: Sequence[str],
+        positions: Sequence[float],
+        period_sec: float,
+    ) -> None:
+        topic = f"/{controller}/joint_trajectory"
+        publisher = self._stream_publishers.get(topic)
+        if publisher is None:
+            publisher = self._node.create_publisher(self._JointTrajectory, topic, 10)
+            self._stream_publishers[topic] = publisher
+            deadline = time.monotonic() + DEFAULT_TIMEOUT_SEC
+            while (
+                publisher.get_subscription_count() == 0
+                and time.monotonic() < deadline
+            ):
+                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+            if publisher.get_subscription_count() == 0:
+                raise AdapterUnavailable(
+                    f"nothing is subscribed to {topic}; is {controller} active?"
+                )
+        trajectory = self._JointTrajectory()
+        trajectory.joint_names = list(joint_names)
+        point = self._JointTrajectoryPoint()
+        point.positions = [float(value) for value in positions]
+        point.time_from_start = self._duration(period_sec)
+        trajectory.points.append(point)
+        publisher.publish(trajectory)
 
     def marker_pose(self, name: str, timeout_sec: float) -> Pose | None:
         if self._marker_client is None:

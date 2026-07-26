@@ -388,3 +388,120 @@ def test_pose_gravity_refuses_torque_over_the_profile_limit(stiff, capsys, monke
 
     assert code == 3
     assert "effort limit exceeded" in capsys.readouterr().out
+
+
+class DraggableArm(StiffArm):
+    """A stub that reports a marker being dragged, and follows what it is sent."""
+
+    def __init__(self, target=None):
+        super().__init__()
+        self.joints = np.zeros(7)
+        self.streamed = []
+        self._target = target
+        self.pumped = 0
+
+    def watch_marker(self):
+        self.watching = True
+
+    def latest_marker_target(self):
+        return self._target
+
+    def pump(self, timeout_sec=0.0):
+        self.pumped += 1
+
+    def read_state(self, timeout_sec=None):
+        return self.joints.copy()
+
+    def stream_positions(self, positions, period_sec):
+        self.joints = np.asarray(positions, dtype=float).copy()
+        self.streamed.append(self.joints)
+
+
+def _reachable_target(chain, q):
+    """A pose the stub chain can actually hold, so following can converge."""
+    from robot_control.ros_adapter import Pose
+
+    pose = chain.pose(q)
+    trace = np.trace(pose[:3, :3])
+    w = np.sqrt(max(0.0, 1.0 + trace)) / 2.0
+    if w < 1e-8:
+        return Pose(tuple(pose[:3, 3]), (0.0, 0.0, 0.0, 1.0), "world")
+    return Pose(
+        tuple(pose[:3, 3]),
+        (
+            (pose[2, 1] - pose[1, 2]) / (4 * w),
+            (pose[0, 2] - pose[2, 0]) / (4 * w),
+            (pose[1, 0] - pose[0, 1]) / (4 * w),
+            w,
+        ),
+        "world",
+    )
+
+
+@pytest.fixture
+def draggable(monkeypatch):
+    from robot_control import ros_adapter
+
+    chain = _stub_chain([0.5] * 7)
+    arm = DraggableArm(target=_reachable_target(chain, np.full(7, 0.05)))
+    arm.load = chain.gravity_torque(np.zeros(7))
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+    return arm
+
+
+def test_pose_follow_dry_run_streams_nothing(draggable, capsys):
+    assert main(["pose", "follow", *RIGHT_ARM, "--seconds", "0.1"]) == 0
+
+    assert draggable.streamed == []
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+def test_pose_follow_streams_towards_the_dragged_marker(draggable, capsys):
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.4"]) == 0
+    )
+
+    assert draggable.streamed, "nothing was streamed"
+    # Each sample must move the arm towards the marker, not away from it.
+    assert np.abs(draggable.joints).sum() > 0.0
+    assert "followed" in capsys.readouterr().out
+
+
+def test_pose_follow_holds_still_when_no_marker_has_been_dragged(capsys, monkeypatch):
+    """No target is not a reason to command zero; it is a reason to command
+    nothing, so the controller keeps holding where the arm already is."""
+    from robot_control import ros_adapter
+
+    chain = _stub_chain([0.5] * 7)
+    arm = DraggableArm(target=None)
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+
+    assert main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2"]) == 0
+
+    assert arm.streamed == []
+
+
+def test_pose_follow_releases_torque_it_was_holding(draggable, capsys):
+    assert (
+        main(
+            ["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2",
+             "--gravity", "1.0"]
+        )
+        == 0
+    )
+
+    np.testing.assert_allclose(draggable.published[-1], np.zeros(7))
+
+
+def test_pose_follow_refuses_a_group_with_no_planning_group(no_ros, capsys):
+    code = main(["pose", "follow", "--group", "tesollo_curl", "--seconds", "1"])
+
+    assert code == 2
+    assert "no planning group" in capsys.readouterr().out
+
+
+def test_pose_follow_refuses_an_out_of_range_gravity_scale(no_ros, capsys):
+    assert main(["pose", "follow", *RIGHT_ARM, "--gravity", "9"]) == 2
+    assert "outside 0 to 1.5" in capsys.readouterr().out

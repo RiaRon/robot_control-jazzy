@@ -463,6 +463,88 @@ applied after the process is gone would keep pushing.
 `effort_controller` or no `tip_link`, a scale outside range, or no adapter;
 `3` torque over the profile's effort limit.
 
+## `robotctl pose follow`
+
+Track the dragged RViz marker continuously, instead of committing one pose at a
+time.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--profile` | `openarm_tesollo` | Built-in profile to load |
+| `--group` | *required* | Group to move; must have a planning group |
+| `--gravity` | `0.0` | Gravity feedforward scale to hold while following |
+| `--seconds` | `60.0` | How long to follow before stopping on its own |
+| `--execute` | off | Publish; without it the command only reports what it would do |
+
+```bash
+# --execute streams position commands and the arm moves while you drag:
+robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
+```
+
+```text
+following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
+drag the marker in RViz; the arm tracks it until the time runs out
+followed 4193 samples; the arm holds its last commanded pose
+  velocity limit clamped on 271 of 4193 samples
+```
+
+### How it differs from `pose ee --from-marker`
+
+`pose ee` reads the marker once and sends one trajectory. `pose follow` reads the
+marker's `feedback` stream — the topic that publishes throughout a drag — and
+commands at the controller rate.
+
+Inverse kinematics is differential here, from the Jacobian, not `/compute_ik`.
+A service round trip per sample cannot keep up with 100 Hz, and a Jacobian step
+is local: the arm sweeps to a nearby solution instead of jumping between IK
+branches the way successive fresh solves can. The inverse is damped least
+squares, so a drag through a singularity produces a bounded step rather than an
+unbounded joint velocity.
+
+Every sample goes through `CommandGate.follow`, which **clamps rather than
+refuses**. Dragging faster than the arm can move is normal operation, so the
+step is limited to the profile's velocity bound and the count of clamped samples
+is reported at the end. Position limits clamp the same way: the arm stops at the
+limit and keeps tracking rather than ending the session mid-drag.
+
+### Stopping, and what the arm does then
+
+Following ends when `--seconds` runs out, or on Ctrl-C. Either way the last
+thing that happens is that commanding stops and any feedforward torque is set
+back to zero. The trajectory controller holds its last commanded position, which
+is where the arm already is, so it stays where you left it rather than going
+limp or springing anywhere.
+
+It ends on its own by design. A servo loop left running is a robot that moves
+when somebody brushes the marker hours later.
+
+### The all-zeros home pose is singular
+
+At exactly `q = 0` the arm's Jacobian has rank 5, and its entire z row is zero:
+no joint moves the tool centre point vertically from there. Dragging the marker
+up produces no motion, correctly — the damped inverse asks for the bounded step,
+which is nothing.
+
+```text
+q = 0     singular values: [1.8674 1.5266 1.4142 0.286 0.2856 0.0000]   rank 5
+elbow 0.6 singular values: [1.8601 1.5187 1.4142 0.275 0.2743 0.0524]   rank 6
+```
+
+Bend the arm before following. Anything off the exact home pose is fine:
+
+```bash
+# --execute sends the trajectory, bending the elbow off the singularity first:
+robotctl pose joints --group openarm_right_arm --values 0,0,0,0.6,0,0,0 --execute
+```
+
+`--gravity` is worth using here in a way it is not for a single pose:
+`pose ee --settle` corrects where a move *ends*, which a moving arm never does.
+Tune the scale first with `pose gravity --sweep`.
+
+**Exit codes:** `0` followed and stopped; `2` unknown group, group with no
+planning group, a gravity scale outside range, non-positive `--seconds`, or no
+adapter; `3` refused by the safety gate.
+
 ## `robotctl pose rviz`
 
 Launch the bimanual MoveIt stack with RViz through `ros_ws/pose_bringup.sh`.

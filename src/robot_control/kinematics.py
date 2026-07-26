@@ -21,6 +21,10 @@ import numpy as np
 
 #: Standard gravity, along -z of the chain's base frame.
 GRAVITY = np.array([0.0, 0.0, -9.80665])
+#: Damping for the least-squares inverse used by :meth:`Chain.delta_q`. Small
+#: enough not to blunt ordinary motion, large enough to bound a step taken at a
+#: singularity.
+DEFAULT_DAMPING = 0.05
 
 
 class KinematicsError(ValueError):
@@ -107,6 +111,30 @@ class Chain:
             jacobian[3:, column] = axis
         return jacobian
 
+    def delta_q(
+        self,
+        q: Sequence[float],
+        twist: Sequence[float],
+        damping: float = DEFAULT_DAMPING,
+    ) -> np.ndarray:
+        """Return the joint step that moves the tip by *twist*.
+
+        Damped least squares rather than a pseudo-inverse. At a singularity the
+        Jacobian loses rank and a pseudo-inverse asks for an unbounded joint
+        velocity to achieve a motion the arm cannot make; the damping trades a
+        little accuracy for a step that stays finite. Servoing runs wherever the
+        operator drags, singularities included.
+        """
+        twist = np.asarray(twist, dtype=float)
+        if twist.shape != (6,):
+            raise KinematicsError(
+                f"a twist needs six values, three linear and three angular, "
+                f"got {twist.size}"
+            )
+        jacobian = self.jacobian(q)
+        square = jacobian @ jacobian.T + (damping**2) * np.eye(6)
+        return jacobian.T @ np.linalg.solve(square, twist)
+
     def gravity_torque(self, q: Sequence[float]) -> np.ndarray:
         """Return the joint torque that holds the chain against gravity.
 
@@ -136,6 +164,37 @@ class Chain:
                 f"this chain has {len(self.joints)} joints, got {q.size} values"
             )
         return q
+
+
+def twist_between(current: np.ndarray, goal: np.ndarray) -> np.ndarray:
+    """Return the six-vector taking pose *current* to pose *goal*.
+
+    Linear part first, then the rotation as an axis-angle vector, which is what
+    a Jacobian's angular rows are expressed in.
+    """
+    current = np.asarray(current, dtype=float)
+    goal = np.asarray(goal, dtype=float)
+    twist = np.zeros(6)
+    twist[:3] = goal[:3, 3] - current[:3, 3]
+    twist[3:] = _log_rotation(goal[:3, :3] @ current[:3, :3].T)
+    return twist
+
+
+def _log_rotation(rotation: np.ndarray) -> np.ndarray:
+    """Return the axis-angle vector of a rotation matrix."""
+    # Clipped because a matrix assembled from measured joint values is only
+    # orthonormal to floating-point precision, and acos would raise just outside.
+    cosine = np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0)
+    angle = float(np.arccos(cosine))
+    if angle < 1e-12:
+        return np.zeros(3)
+    if abs(angle - np.pi) < 1e-6:
+        # At half a turn the skew part vanishes; recover the axis from the
+        # symmetric part instead, where it survives.
+        axis = np.sqrt(np.maximum(np.diag(rotation) + 1.0, 0.0) / 2.0)
+        return angle * axis / np.linalg.norm(axis)
+    skew = (rotation - rotation.T) / (2.0 * np.sin(angle))
+    return angle * np.array([skew[2, 1], skew[0, 2], skew[1, 0]])
 
 
 def chain_from_urdf(urdf: str, joint_names: Iterable[str], tip_link: str) -> Chain:

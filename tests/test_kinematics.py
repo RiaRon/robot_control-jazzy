@@ -250,3 +250,87 @@ def test_chain_from_urdf_rejects_an_unknown_joint(tmp_path):
 def test_chain_from_urdf_rejects_an_unreachable_tip(tmp_path):
     with pytest.raises(KinematicsError, match="nowhere"):
         chain_from_urdf(URDF, ["j1"], "nowhere")
+
+
+def test_twist_between_poses_is_zero_when_they_match():
+    from robot_control.kinematics import twist_between
+
+    pose = _two_link().pose(np.array([0.3, -0.2]))
+
+    np.testing.assert_allclose(twist_between(pose, pose), np.zeros(6), atol=1e-12)
+
+
+def test_twist_between_poses_reports_translation_and_rotation():
+    from robot_control.kinematics import twist_between
+
+    start = np.eye(4)
+    goal = np.eye(4)
+    goal[:3, 3] = [0.1, -0.2, 0.3]
+    # A quarter turn about +z.
+    goal[:3, :3] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+
+    twist = twist_between(start, goal)
+
+    np.testing.assert_allclose(twist[:3], [0.1, -0.2, 0.3])
+    np.testing.assert_allclose(twist[3:], [0.0, 0.0, np.pi / 2], atol=1e-12)
+
+
+def test_delta_q_moves_the_tip_towards_the_twist_it_was_given():
+    """One step reduces the error but does not erase it.
+
+    Damped least squares deliberately asks for less than the full correction —
+    that is what keeps it finite at a singularity. The servo loop recomputes at
+    the controller rate, so partial steps are the design, not a shortfall.
+    """
+    from robot_control.kinematics import twist_between
+
+    chain = _two_link()
+    q = np.array([0.4, -0.7])
+    goal = chain.pose(q).copy()
+    goal[:3, 3] += [0.01, 0.0, 0.01]
+
+    before = np.linalg.norm(twist_between(chain.pose(q), goal)[:3])
+    stepped = q + chain.delta_q(q, twist_between(chain.pose(q), goal))
+    after = np.linalg.norm(twist_between(chain.pose(stepped), goal)[:3])
+
+    assert after < before / 2.0, f"{before} -> {after}"
+
+
+def test_delta_q_converges_when_iterated_as_the_servo_loop_does():
+    """The property the loop depends on: repeated steps arrive.
+
+    The goal is a pose the chain can actually hold, taken from its own forward
+    kinematics. A translated goal would not do: this arm's tip orientation is
+    fixed by the sum of its two joints, so moving the tip without turning it is
+    not something it can do, and least squares would settle at the compromise
+    rather than converge.
+    """
+    from robot_control.kinematics import twist_between
+
+    chain = _two_link()
+    goal = chain.pose(np.array([0.55, -0.55]))
+    q = np.array([0.4, -0.7])
+
+    for _ in range(40):
+        q = q + chain.delta_q(q, twist_between(chain.pose(q), goal))
+
+    np.testing.assert_allclose(chain.pose(q), goal, atol=1e-6)
+
+
+def test_delta_q_stays_finite_at_a_singularity():
+    """Fully extended, the two-link arm cannot move along its own length. A
+    plain pseudo-inverse blows up there; damped least squares must not."""
+    chain = _two_link()
+    straight = np.zeros(2)
+
+    step = chain.delta_q(straight, np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+
+    assert np.isfinite(step).all()
+    assert np.abs(step).max() < 100.0
+
+
+def test_delta_q_rejects_a_twist_of_the_wrong_length():
+    chain = _two_link()
+
+    with pytest.raises(KinematicsError, match="six"):
+        chain.delta_q(np.zeros(2), np.array([1.0, 0.0, 0.0]))

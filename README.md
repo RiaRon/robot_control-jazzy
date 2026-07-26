@@ -315,6 +315,69 @@ robotctl pose gravity --group openarm_right_arm --scale 0.75 --execute
 배율이 조작자 손에 있습니다. 최적값은 1.0 근처지만 1.0은 아닐 것이며, 그건
 위 sweep이 답할 문제입니다.
 
+## 7. 마커를 실시간으로 추종 — `pose follow`
+
+한 번에 한 자세씩 커밋하는 대신, 끄는 대로 따라옵니다.
+
+```bash
+# --execute가 위치 명령을 스트리밍합니다. 끄는 동안 팔이 움직입니다.
+robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
+```
+
+```text
+following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
+drag the marker in RViz; the arm tracks it until the time runs out
+followed 634 samples; the arm holds its last commanded pose
+  velocity limit clamped on 74 of 634 samples
+```
+
+### `pose ee --from-marker`와 다른 점
+
+`pose ee`는 마커를 **한 번** 읽고 트래젝토리 하나를 보냅니다. `pose follow`는
+마커의 `feedback` 스트림(드래그 중 계속 나오는 토픽)을 읽어 컨트롤러 주기로
+명령합니다.
+
+역기구학이 `/compute_ik`가 아니라 **자코비안 기반 미분 IK**입니다. 100 Hz에
+서비스 왕복은 못 따라가고, 자코비안 스텝은 국소적이라 팔이 가까운 해로
+쓸려갑니다 — 매번 새로 IK를 풀면 해 분기 사이로 튈 수 있습니다. 역행렬은
+감쇠 최소자승이라 특이점을 지나가도 스텝이 유한합니다.
+
+모든 샘플이 `CommandGate.follow`를 지나며 **거부가 아니라 클램프**됩니다.
+팔보다 빨리 끄는 건 정상 조작이므로, 프로파일 속도 한계로 제한하고 몇 개가
+제한됐는지 끝에 보고합니다.
+
+### 멈출 때
+
+`--seconds`가 끝나거나 Ctrl-C로 끝납니다. 어느 쪽이든 마지막에 명령을 멈추고
+피드포워드 토크를 0으로 되돌립니다. 트래젝토리 컨트롤러가 마지막 명령 위치를
+잡고 있고 그게 팔이 이미 있는 곳이므로, 힘이 빠지거나 어디로 튀지 않고 그
+자리에 섭니다.
+
+**스스로 끝나는 게 설계입니다.** 서보 루프를 켜둔 채로 두면, 몇 시간 뒤 누가
+마커를 건드릴 때 움직이는 로봇이 됩니다.
+
+### 전 관절 0 자세는 특이점입니다
+
+정확히 `q = 0`에서 자코비안의 **z 행 전체가 0**이고 rank가 5입니다. 그
+자세에서는 어떤 관절도 TCP를 수직으로 움직이지 못합니다. 마커를 위로 끌어도
+움직이지 않는 게 **정상**입니다.
+
+```
+q = 0      특이값: [1.8674 1.5266 1.4142 0.286 0.2856 0.0000]   rank 5
+팔꿈치 0.6 특이값: [1.8601 1.5187 1.4142 0.275 0.2743 0.0524]   rank 6
+```
+
+추종 전에 팔을 살짝 굽히십시오. 정확한 home만 아니면 됩니다:
+
+```bash
+# --execute가 트래젝토리를 보내 팔꿈치를 특이점에서 빼냅니다.
+robotctl pose joints --group openarm_right_arm --values 0,0,0,0.6,0,0,0 --execute
+```
+
+`--gravity`는 여기서 특히 의미가 있습니다. `pose ee --settle`은 이동이 **끝나는
+지점**을 고치는데, 움직이는 팔에는 끝나는 지점이 없습니다. 배율은 앞의
+`pose gravity --sweep`으로 먼저 정하십시오.
+
 ## 그 밖의 명령
 
 ```bash

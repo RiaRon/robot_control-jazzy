@@ -31,6 +31,9 @@ DEFAULT_HOLD_SEC = 2.0
 # and over-compensating does not mispose the arm, it drives it away from where
 # it was holding.
 MAX_GRAVITY_SCALE = 1.5
+# Following ends on its own rather than running until interrupted: a servo loop
+# left running is a robot that moves when someone touches the marker hours later.
+DEFAULT_FOLLOW_SEC = 60.0
 SETTLE_PASSES = 4
 # Below this fraction of improvement the loop has stopped converging: the arm
 # is against a hard stop, or holding something, and more passes would only wind
@@ -146,6 +149,25 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     )
     gravity.add_argument("--execute", action="store_true")
 
+    follow = stages.add_parser(
+        "follow", help="follow the RViz end-effector marker continuously"
+    )
+    follow.add_argument("--profile", default="openarm_tesollo")
+    follow.add_argument("--group", required=True)
+    follow.add_argument(
+        "--gravity",
+        type=float,
+        default=0.0,
+        help="gravity feedforward scale to hold while following",
+    )
+    follow.add_argument(
+        "--seconds",
+        type=float,
+        default=DEFAULT_FOLLOW_SEC,
+        help="how long to follow before stopping on its own",
+    )
+    follow.add_argument("--execute", action="store_true")
+
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
     rviz.add_argument("--profile", default="openarm_tesollo")
     rviz.add_argument(
@@ -173,6 +195,8 @@ def _pose(args: argparse.Namespace) -> int:
             return _pose_joints(args, profile)
         if args.stage == "gravity":
             return _pose_gravity(args, profile)
+        if args.stage == "follow":
+            return _pose_follow(args, profile)
         return _pose_ee(args, profile)
     except (SafetyError, IkFailed) as error:
         print(f"refused: {error}")
@@ -551,6 +575,101 @@ def _report_sweep(group, rows) -> None:
         f"(worst joint {np.max(np.abs(best[1])):+.4f} rad)"
     )
     print("re-run with --scale to hold there, and record it in the profile notes")
+
+
+def _pose_follow(args, profile) -> int:
+    """Track the dragged marker continuously, at the controller rate.
+
+    Differential inverse kinematics rather than /compute_ik: a service round trip
+    per sample cannot keep up, and the Jacobian gives a step that is smooth and
+    local, so the arm sweeps to a nearby solution instead of jumping between
+    branches the way a fresh IK solve can.
+
+    Every sample is clamped by the gate rather than refused, since dragging
+    faster than the arm can move is normal operation, not an error.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if group.moveit_group is None or group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no planning group, so it has no "
+            "end-effector marker to follow"
+        )
+    if not 0.0 <= args.gravity <= MAX_GRAVITY_SCALE:
+        raise ValueError(
+            f"gravity scale {args.gravity:g} is outside 0 to {MAX_GRAVITY_SCALE:g}"
+        )
+    if args.seconds <= 0:
+        raise ValueError("--seconds must be positive")
+
+    period = 1.0 / profile.ros["jazzy"].command_rate_hz
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        gate = _gate(profile, group, seed=None)
+        adapter.watch_marker()
+        state = adapter.read_state()
+        print(
+            f"following {group.tip_link} at {1.0 / period:g} Hz for "
+            f"{args.seconds:g} s, gravity scale {args.gravity:g}"
+        )
+        print("drag the marker in RViz; the arm tracks it until the time runs out")
+        if not args.execute:
+            print("DRY RUN: nothing is published; pass --execute to follow")
+            return 0
+        _follow_loop(adapter, chain, gate, group, state, period, args)
+    return 0
+
+
+def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
+    from .kinematics import twist_between
+
+    samples = 0
+    notes: dict[str, int] = {}
+    deadline = time.monotonic() + args.seconds
+    try:
+        while time.monotonic() < deadline:
+            cycle = time.monotonic()
+            adapter.pump(timeout_sec=0.0)
+            target = adapter.latest_marker_target()
+            state = adapter.read_state(timeout_sec=1.0)
+            if args.gravity > 0.0:
+                adapter.send_effort(
+                    gate.authorize_effort(chain.gravity_torque(state) * args.gravity)
+                )
+            if target is not None:
+                goal = np.eye(4)
+                goal[:3, 3] = target.position
+                goal[:3, :3] = _rotation_from_quaternion(target.orientation)
+                step = chain.delta_q(state, twist_between(chain.pose(state), goal))
+                command, limited = gate.follow(state + step, state, period)
+                if limited is not None:
+                    notes[limited] = notes.get(limited, 0) + 1
+                adapter.stream_positions(command, period_sec=period)
+                samples += 1
+            time.sleep(max(0.0, period - (time.monotonic() - cycle)))
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+    finally:
+        # Stop commanding, and stop pushing. The trajectory controller holds its
+        # last position, which is where the arm already is, so it stays put.
+        if args.gravity > 0.0:
+            adapter.send_effort(np.zeros(len(group.joints)))
+        print(f"followed {samples} samples; the arm holds its last commanded pose")
+        for note, count in sorted(notes.items()):
+            print(f"  {note} clamped on {count} of {samples} samples")
+
+
+def _rotation_from_quaternion(orientation) -> np.ndarray:
+    """Return the 3x3 rotation of a quaternion given in x, y, z, w order."""
+    x, y, z, w = (float(value) for value in orientation)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
 
 
 def _pose_rviz(args) -> int:
