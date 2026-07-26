@@ -278,6 +278,8 @@ Move a group so its end-effector reaches a pose, solving IK through
 | `--relative` | off | Treat `--xyz` and `--rpy` as an offset from the current pose |
 | `--duration` | `3.0` | Seconds allowed for the move |
 | `--execute` | off | Publish; without it the command only prints |
+| `--settle` | off | Re-command until the residual falls below `--tolerance` |
+| `--tolerance` | `0.005` | Metres of residual `--settle` aims for |
 
 `--relative` is the usual form when nudging a setup. IK is a `move_group`
 service, so unlike `pose joints` there is **no offline form**: even a dry run
@@ -342,10 +344,54 @@ unavailable: RViz is running but holds no marker named
 to 'right_arm' so it publishes one
 ```
 
+### The arm stops short, and `--settle` closes the gap
+
+Every `--execute` prints how far the tool centre point ended up from where it
+was sent:
+
+```text
+EXECUTED: openarm_right_arm over 3 s
+residual: 58.4 mm from the commanded pose
+```
+
+That residual is not an IK error — the solution's own FK lands on the target to
+within a rounding digit. It is the arms holding position through the DM motors'
+impedance control with no gravity feedforward. The controller commands position
+only, and the motor's torque is `kp * (commanded - actual)`, so a joint can only
+hold against gravity *while it sits short of its command*. The steady-state
+error is therefore roughly the holding torque divided by `kp`, which is why the
+shoulder and elbow miss by ~0.07 rad while the low-load wrist joints miss by
+~0.004.
+
+Re-sending the same solution changes nothing: it reproduces the same shortfall
+exactly. `--settle` instead adds each pass's measured shortfall to the command,
+so the arm is asked to go past the target by what it last missed:
+
+```bash
+# --execute publishes; --settle keeps correcting until it lands:
+robotctl pose ee --group openarm_right_arm --from-marker --execute --settle
+```
+
+```text
+EXECUTED: openarm_right_arm over 3 s
+settle 1: 58.4 -> 6.1 mm
+settle 2: 6.1 -> 1.4 mm
+settled: 1.4 mm after 2 corrections
+```
+
+Each pass is authorised by a fresh safety gate, so a wound-up command is checked
+against the profile's position limits rather than trusted for having been safe
+once. The loop gives up after four corrections, and stops early if a pass fails
+to improve the residual by at least a tenth — an arm against a hard stop or
+holding a load will not converge, and further passes would only wind the command
+further past a pose it cannot reach.
+
+`--settle` needs `--execute`: a dry run sends nothing to fall short of.
+
 **Exit codes:** `0` solved and sent or printed; `2` unknown group, group with
 no planning group, malformed `--xyz` or `--rpy`, `--from-marker` combined with
-`--rpy` or `--relative`, no adapter, or no marker to read; `3` no IK solution,
-or refused by the safety gate.
+`--rpy` or `--relative`, `--settle` without `--execute`, no adapter, or no
+marker to read; `3` no IK solution, or refused by the safety gate.
 
 ## `robotctl pose rviz`
 

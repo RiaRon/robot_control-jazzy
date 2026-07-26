@@ -1,5 +1,6 @@
 import sys
 
+import numpy as np
 import pytest
 
 from robot_control.cli import main
@@ -128,6 +129,107 @@ def test_pose_ee_from_marker_rejects_rpy(no_ros, capsys):
 def test_pose_ee_from_marker_needs_ros(no_ros, capsys):
     assert main(["pose", "ee", *RIGHT_ARM, "--from-marker"]) == 2
     assert "rclpy" in capsys.readouterr().out
+
+
+class DroopingArm:
+    """A stub adapter whose joints stop short of every command, as the real
+    ones do: the DM motors hold position by *having* a position error, so a
+    command repeated unchanged reproduces the same shortfall."""
+
+    #: Radians of droop at zero load angle. The real value is the holding
+    #: torque divided by kp, so it follows the pose rather than the step size.
+    DROOP = 0.05
+
+    def __init__(self, *_args, **_kwargs):
+        from robot_control.ros_adapter import Pose
+
+        self._Pose = Pose
+        self.joints = np.zeros(7)
+        self.target = np.full(7, 0.2)
+        self.sent = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exception):
+        return None
+
+    # Position along a single axis stands in for the tool centre point, so the
+    # residual the CLI prints is a readable multiple of the joint error.
+    def read_pose(self):
+        return self._Pose((float(self.joints.mean()), 0.0, 0.0), (0, 0, 0, 1), "world")
+
+    def read_marker_pose(self):
+        return self._Pose((float(self.target.mean()), 0.0, 0.0), (0, 0, 0, 1), "world")
+
+    def read_state(self):
+        return self.joints.copy()
+
+    def solve_ik(self, _pose, seed):
+        return self.target.copy()
+
+    def send_trajectory(self, points, period_sec):
+        command = np.asarray(points[-1], dtype=float)
+        self.sent.append(command)
+        # The joint settles where kp times the error balances the load, so it
+        # stops short by an amount the pose sets, not the size of the step.
+        self.joints = command - self.DROOP * np.cos(command)
+
+
+@pytest.fixture
+def drooping(monkeypatch):
+    from robot_control import ros_adapter
+
+    arm = DroopingArm()
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    return arm
+
+
+def test_pose_ee_reports_how_far_short_the_arm_stopped(drooping, capsys):
+    """A silent miss is the failure mode; the residual is always printed."""
+    assert main(["pose", "ee", *RIGHT_ARM, "--from-marker", "--execute"]) == 0
+
+    output = capsys.readouterr().out
+    assert "residual" in output
+    assert len(drooping.sent) == 1
+
+
+def test_pose_ee_settle_drives_the_residual_below_the_tolerance(drooping, capsys):
+    assert (
+        main(
+            [
+                "pose",
+                "ee",
+                *RIGHT_ARM,
+                "--from-marker",
+                "--execute",
+                "--settle",
+                "--tolerance",
+                "0.002",
+            ]
+        )
+        == 0
+    )
+
+    assert len(drooping.sent) > 1, "settle sent no correction"
+    np.testing.assert_allclose(drooping.joints, drooping.target, atol=0.002)
+    assert "settled" in capsys.readouterr().out
+
+
+def test_pose_ee_settle_corrects_by_adding_the_shortfall(drooping):
+    """Re-sending the IK solution unchanged would reproduce the same droop, so
+    each pass has to command past the target by what the last pass missed."""
+    main(["pose", "ee", *RIGHT_ARM, "--from-marker", "--execute", "--settle"])
+
+    first, second = drooping.sent[0], drooping.sent[1]
+    np.testing.assert_allclose(first, drooping.target)
+    assert (second > first).all(), "the correction did not command past the target"
+
+
+def test_pose_ee_settle_requires_execute(no_ros, capsys):
+    """A dry run sends nothing, so there is no shortfall to correct."""
+    assert main(["pose", "ee", *RIGHT_ARM, "--from-marker", "--settle"]) == 2
+    assert "--execute" in capsys.readouterr().out
 
 
 def test_pose_ee_needs_ros_even_for_a_dry_run(no_ros, capsys):

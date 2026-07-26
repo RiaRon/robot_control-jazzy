@@ -19,6 +19,16 @@ from .track import normalize_track
 
 DEFAULT_DURATION_SEC = 3.0
 
+# The arms hold position through the DM motors' impedance control, which needs
+# a standing position error to produce holding torque, so a command lands short
+# by roughly (gravity torque / kp). --settle closes that gap by re-commanding.
+DEFAULT_TOLERANCE_M = 0.005
+SETTLE_PASSES = 4
+# Below this fraction of improvement the loop has stopped converging: the arm
+# is against a hard stop, or holding something, and more passes would only wind
+# the command further past a target it cannot reach.
+SETTLE_PROGRESS = 0.1
+
 # Exit codes, shared with the r2s stages: 2 means the request or the
 # environment cannot support the command, 3 means it was understood and
 # refused.
@@ -93,6 +103,17 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     )
     end_effector.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
     end_effector.add_argument("--execute", action="store_true")
+    end_effector.add_argument(
+        "--settle",
+        action="store_true",
+        help="re-command until the residual falls below --tolerance",
+    )
+    end_effector.add_argument(
+        "--tolerance",
+        type=float,
+        default=DEFAULT_TOLERANCE_M,
+        help="metres of residual --settle aims for",
+    )
 
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
     rviz.add_argument("--profile", default="openarm_tesollo")
@@ -276,6 +297,11 @@ def _pose_ee(args, profile) -> int:
             "end-effector pose; set it with pose joints --values instead"
         )
     interface = CanonicalInterface(profile)
+    if args.settle and not args.execute:
+        raise ValueError(
+            "--settle corrects what a move actually reached, so it needs "
+            "--execute; a dry run sends nothing to fall short of"
+        )
     xyz, rpy = None, None
     if args.from_marker:
         # The marker carries a full pose already, so anything that modifies a
@@ -324,7 +350,56 @@ def _pose_ee(args, profile) -> int:
             return 0
         adapter.send_trajectory(points, period_sec=args.duration)
         print(f"EXECUTED: {group.name} over {args.duration:g} s")
+        _report_residual(adapter, target, solution, profile, group, args)
     return 0
+
+
+def _residual(adapter, target) -> float:
+    """Metres between where the tool centre point is and where it was sent."""
+    landed = adapter.read_pose()
+    return float(
+        np.linalg.norm(np.asarray(landed.position) - np.asarray(target.position))
+    )
+
+
+def _report_residual(adapter, target, solution, profile, group, args) -> None:
+    """Print how far short the move stopped, and with --settle, close the gap.
+
+    The arms hold position through impedance control with no gravity feedforward,
+    so a joint only produces holding torque while it sits short of its command.
+    Re-sending the same solution therefore reproduces the same shortfall exactly;
+    each pass has to command past the target by what the last one missed.
+    """
+    residual = _residual(adapter, target)
+    if not args.settle:
+        print(f"residual: {residual * 1000:.1f} mm from the commanded pose")
+        return
+
+    command = np.asarray(solution, dtype=float)
+    for attempt in range(1, SETTLE_PASSES + 1):
+        if residual <= args.tolerance:
+            print(f"settled: {residual * 1000:.1f} mm after {attempt - 1} corrections")
+            return
+        actual = adapter.read_state()
+        command = command + (solution - actual)
+        # A fresh gate each pass, so the wound-up command is checked against the
+        # profile limits rather than trusted for having been safe once.
+        gate = _gate(profile, group, seed=actual)
+        points = gate.authorize_trajectory(
+            [command], start_time_sec=0.0, period_sec=args.duration
+        )
+        adapter.send_trajectory(points, period_sec=args.duration)
+        corrected = _residual(adapter, target)
+        print(f"settle {attempt}: {residual * 1000:.1f} -> {corrected * 1000:.1f} mm")
+        if corrected > residual * (1.0 - SETTLE_PROGRESS):
+            print(
+                f"settle: stopped converging at {corrected * 1000:.1f} mm; the arm "
+                "is against a limit, holding a load, or the target is unreachable"
+            )
+            return
+        residual = corrected
+
+    print(f"settle: {residual * 1000:.1f} mm after {SETTLE_PASSES} corrections")
 
 
 def _pose_rviz(args) -> int:
