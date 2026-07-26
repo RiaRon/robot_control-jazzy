@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
+
+from .identification import CombinedEstimate
 from .profile import RobotProfile
 
 
@@ -23,6 +27,32 @@ class ControllerCalibration:
 
 
 @dataclass(frozen=True)
+class IdentifiedParameters:
+    """Measured joint parameters, in physical units, with where they came from.
+
+    Distinct from the ``nominal`` block, which is a per-group guess: these are
+    per joint and were measured, so they carry the sweeps and the track they were
+    measured from and the cross-check they survived.
+    """
+
+    joint_names: tuple[str, ...]
+    #: J, kg m^2.
+    inertia: np.ndarray
+    #: b, N.m.s/rad.
+    damping: np.ndarray
+    #: tau_f, N.m.
+    friction: np.ndarray
+    #: kp, N.m/rad.
+    stiffness: np.ndarray
+    #: The factor the URDF's modelled gravity torque was wrong by.
+    torque_scale: np.ndarray
+    #: How far the two independent routes to the inertia differed.
+    inertia_disagreement: np.ndarray
+    sweep_sha256: tuple[str, ...]
+    track_sha256: str
+
+
+@dataclass(frozen=True)
 class CalibrationBundle:
     schema_version: int
     profile: str
@@ -30,6 +60,118 @@ class CalibrationBundle:
     groups: Mapping[str, Mapping[str, Any]]
     controller: ControllerCalibration
     payload: Mapping[str, Any]
+    #: Per group, by group name. Empty for v1 and for v2 bundles predating it.
+    identified: Mapping[str, IdentifiedParameters] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.identified is None:
+            object.__setattr__(self, "identified", {})
+
+
+#: Every measured array in an identified block, and the floor each must clear.
+#: Inertia and stiffness are strict: a joint with neither cannot be simulated at
+#: all. Damping and friction may legitimately be zero.
+_IDENTIFIED_FIELDS = (
+    ("inertia_kg_m2", "inertia", False),
+    ("damping_nm_s_per_rad", "damping", True),
+    ("friction_nm", "friction", True),
+    ("stiffness_nm_per_rad", "stiffness", False),
+    ("torque_scale", "torque_scale", True),
+    ("inertia_disagreement", "inertia_disagreement", True),
+)
+
+
+def identified_block(
+    combined: CombinedEstimate,
+    profile: RobotProfile,
+    *,
+    torque_scale: Sequence[float],
+    sweep_sha256: Sequence[str],
+    track_sha256: str,
+) -> dict[str, Any]:
+    """Build the block a bundle carries, so there is one way to produce it."""
+    torque_scale = np.asarray(torque_scale, dtype=float)
+    if torque_scale.shape != combined.inertia.shape:
+        raise CalibrationError("torque_scale must carry one value per joint")
+    return {
+        "joint_names": list(combined.joint_names),
+        "inertia_kg_m2": combined.inertia.tolist(),
+        "damping_nm_s_per_rad": combined.damping.tolist(),
+        "friction_nm": combined.friction.tolist(),
+        "stiffness_nm_per_rad": combined.stiffness.tolist(),
+        "torque_scale": torque_scale.tolist(),
+        "inertia_disagreement": np.nan_to_num(
+            combined.disagreement, nan=0.0
+        ).tolist(),
+        # What the numbers were measured on, as opposed to what the bundle around
+        # them claims to be. The checksum is recomputed on write, so it signs a
+        # pasted block just as happily; this is what does not.
+        "fitted_against": {
+            "profile": profile.name,
+            "asset_id": profile.asset_id,
+            "manifest_sha256": profile.manifest_sha256,
+        },
+        "provenance": {
+            "sweep_sha256": list(sweep_sha256),
+            "track_sha256": str(track_sha256),
+        },
+    }
+
+
+def _identified(raw: Any, group_name: str, profile: RobotProfile) -> IdentifiedParameters:
+    if not isinstance(raw, dict):
+        raise CalibrationError(f"{group_name}: identified must be an object")
+    where = f"{group_name} identified"
+
+    fitted = raw.get("fitted_against") or {}
+    if (
+        fitted.get("profile") != profile.name
+        or fitted.get("asset_id") != profile.asset_id
+        or fitted.get("manifest_sha256") != profile.manifest_sha256
+    ):
+        raise CalibrationError(
+            f"{where}: parameters were fitted against {fitted.get('profile')!r} / "
+            f"{fitted.get('asset_id')!r}, not this profile and asset"
+        )
+
+    joints = tuple(raw.get("joint_names") or ())
+    expected = profile.groups[group_name].joints
+    if joints != expected:
+        raise CalibrationError(
+            f"{where}: joint names {list(joints)} are not group {group_name!r}'s "
+            f"{list(expected)}"
+        )
+
+    provenance = raw.get("provenance") or {}
+    sweeps = provenance.get("sweep_sha256") or []
+    track = provenance.get("track_sha256")
+    if not sweeps or not track:
+        raise CalibrationError(
+            f"{where}: provenance needs the sweeps and the track it was measured "
+            "from; a number with no source is not a measurement"
+        )
+
+    values: dict[str, np.ndarray] = {}
+    for key, field, allow_zero in _IDENTIFIED_FIELDS:
+        array = np.asarray(raw.get(key), dtype=float)
+        if array.shape != (len(joints),) or not np.isfinite(array).all():
+            raise CalibrationError(
+                f"{where}: {key} must carry one finite value per joint, "
+                f"{len(joints)} of them"
+            )
+        floor = 0.0 if allow_zero else np.nextafter(0.0, 1.0)
+        if np.any(array < floor):
+            raise CalibrationError(
+                f"{where}: {key} carries {array.min():g}, which is not physical"
+            )
+        values[field] = array
+
+    return IdentifiedParameters(
+        joint_names=joints,
+        sweep_sha256=tuple(str(item) for item in sweeps),
+        track_sha256=str(track),
+        **values,
+    )
 
 
 def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -97,7 +239,14 @@ def load_bundle(path: str | Path, profile: RobotProfile) -> CalibrationBundle:
         str(control.get("interpolation", "none")),
         control.get("filter", {"type": "none"}),
     )
-    return CalibrationBundle(2, profile.name, profile.asset_id, groups, controller, payload)
+    identified = {
+        name: _identified(body["identified"], name, profile)
+        for name, body in groups.items()
+        if isinstance(body, dict) and "identified" in body
+    }
+    return CalibrationBundle(
+        2, profile.name, profile.asset_id, groups, controller, payload, identified
+    )
 
 
 def write_bundle(

@@ -3,14 +3,109 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import subprocess
+import time
 
 import numpy as np
 
-from .artifacts import read_hdf5, track_sha256, write_hdf5
-from .calibration import load_bundle
-from .identification import build_excitation, fit_second_order, validate_holdout
-from .profile import load_builtin_profile
-from .track import normalize_track
+from .artifacts import (
+    ArtifactError,
+    read_hdf5,
+    read_static_estimate,
+    read_sweep,
+    sweep_sha256,
+    track_sha256,
+    write_hdf5,
+    write_static_estimate,
+    write_sweep,
+)
+from .calibration import (
+    CalibrationError,
+    identified_block,
+    load_bundle,
+    write_bundle,
+)
+from .identification import (
+    DEFAULT_NOISE_RAD,
+    MAX_CONDITION,
+    MAX_INERTIA_DISAGREEMENT,
+    FitError,
+    GravitySweep,
+    CombinedEstimate,
+    SecondOrderEstimate,
+    build_excitation,
+    combine,
+    design_pose_set,
+    fit_second_order,
+    fit_second_order_runs,
+    fit_static_gravity,
+    score_holdout,
+    split_repetitions,
+    validate_holdout,
+)
+from .interface import CanonicalInterface
+from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
+from .safety import CommandGate, SafetyError
+from .srdf import named_state, repository_root
+from .track import DEFAULT_MAX_GAP_PERIODS, TrackError, normalize_track
+
+
+DEFAULT_DURATION_SEC = 3.0
+
+# The arms hold position through the DM motors' impedance control, which needs
+# a standing position error to produce holding torque, so a command lands short
+# by roughly (gravity torque / kp). --settle closes that gap by re-commanding.
+DEFAULT_TOLERANCE_M = 0.005
+# Long enough for the arm to stop moving after a torque step before its
+# tracking error is read, at the 100 Hz the controller manager runs.
+DEFAULT_HOLD_SEC = 2.0
+# Refuse a scale beyond this. The model is only as good as the URDF's masses,
+# and over-compensating does not mispose the arm, it drives it away from where
+# it was holding.
+MAX_GRAVITY_SCALE = 1.5
+# Following ends on its own rather than running until interrupted: a servo loop
+# left running is a robot that moves when someone touches the marker hours later.
+DEFAULT_FOLLOW_SEC = 60.0
+# How long a streamed command may be ahead of the arm, expressed as travel time
+# at the joint's velocity limit. It has to exceed the standing droop or the arm
+# cannot advance at all, and stay small enough that a blocked joint does not wind
+# up torque: 0.1 s is 0.2 rad at 2 rad/s, an order over the droop measured with
+# compensation on, and about 4 N.m at the stiffness the hardware applies.
+LEAD_SEC = 0.1
+SETTLE_PASSES = 4
+# Enough to condition the fit with a pose to spare: one pose is one equation in
+# three unknowns, the second separates them, and the rest buy redundancy against
+# measurement noise.
+DEFAULT_POSES = 4
+# Spanning zero so every pose sees the joint both uncompensated and over-
+# compensated, which is what puts a slope through the samples.
+DEFAULT_COLLECT_SCALES = "0,0.5,1.0"
+# Half of each joint's range, about its middle. A pose against a hard stop cannot
+# droop, and a joint that cannot droop looks exactly like one held by stiction.
+DEFAULT_REACH = 0.5
+# Two to fit and one held out, which is what split_repetitions has always
+# required. Two runs would leave one of each, and a model fitted on one run has
+# nothing to be validated against.
+REPETITIONS = 3
+# Below this fraction of improvement the loop has stopped converging: the arm
+# is against a hard stop, or holding something, and more passes would only wind
+# the command further past a target it cannot reach.
+SETTLE_PROGRESS = 0.1
+
+# Exit codes, shared with the r2s stages: 2 means the request or the
+# environment cannot support the command, 3 means it was understood and
+# refused.
+UNUSABLE = 2
+REFUSED = 3
+
+
+class Refused(RuntimeError):
+    """Understood, measured, and declined — the exit-3 half of the convention.
+
+    Distinct from a ValueError, which means the request itself could not be
+    carried out. An under-conditioned pose set is a well-formed request whose
+    answer is no.
+    """
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,34 +113,1765 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     r2s = commands.add_parser("r2s")
     stages = r2s.add_subparsers(dest="stage", required=True)
-    for stage in ("preflight", "collect", "normalize", "fit", "validate", "export"):
+    for stage in (
+        "preflight",
+        "collect",
+        "normalize",
+        "fit",
+        "identify",
+        "bundle",
+        "validate",
+        "export",
+    ):
         item = stages.add_parser(stage)
         item.add_argument("--profile", default="openarm_tesollo")
+        if stage == "identify":
+            item.add_argument(
+                "--sweep",
+                type=Path,
+                action="append",
+                help="a file written by pose gravity --output; pass it once per "
+                "pose, since one pose cannot separate stiffness from the "
+                "torque model",
+            )
+            item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--noise",
+                type=float,
+                default=DEFAULT_NOISE_RAD,
+                help="radians below which a joint counts as not having moved, "
+                "so its samples are dropped as frozen by stiction",
+            )
+            item.add_argument(
+                "--collect",
+                action="store_true",
+                help="design a pose set and sweep at each pose, instead of only "
+                "fitting files that already exist",
+            )
+            item.add_argument("--group", help="group to collect on; needs --collect")
+            item.add_argument(
+                "--sweep-dir",
+                type=Path,
+                help="directory to write one sweep file per collected pose",
+            )
+            item.add_argument(
+                "--poses", type=int, default=DEFAULT_POSES, help="poses to design"
+            )
+            item.add_argument(
+                "--scales",
+                default=DEFAULT_COLLECT_SCALES,
+                help="comma-separated gravity scales to hold at every pose",
+            )
+            item.add_argument(
+                "--reach",
+                type=float,
+                default=DEFAULT_REACH,
+                help="fraction of each joint's range the poses may use, about "
+                "its middle; keeps the set off the hard stops",
+            )
+            item.add_argument(
+                "--seed",
+                type=int,
+                default=0,
+                help="pose-set seed; the same seed designs the same poses, which "
+                "is what makes a dry run a review of the run",
+            )
+            item.add_argument(
+                "--duration",
+                type=float,
+                default=DEFAULT_DURATION_SEC,
+                help="seconds to take moving between poses",
+            )
+            item.add_argument(
+                "--hold-sec",
+                type=float,
+                default=DEFAULT_HOLD_SEC,
+                help="seconds to publish at each scale before measuring",
+            )
+            item.add_argument(
+                "--execute",
+                action="store_true",
+                help="move the arm through the designed poses; without it the "
+                "itinerary is only designed and printed",
+            )
         if stage == "collect":
             mode = item.add_mutually_exclusive_group()
             mode.add_argument("--dry-run", action="store_true")
             mode.add_argument("--execute", action="store_true")
             item.add_argument("--amplitude-scale", type=float, default=0.3)
+            item.add_argument(
+                "--group", help="group to excite; needs a trajectory controller"
+            )
+            item.add_argument(
+                "--output", type=Path, help="`.npz` recording to write"
+            )
+            item.add_argument(
+                "--repetitions",
+                type=int,
+                default=1,
+                help="run the same excitation this many times; 3 writes a "
+                "manifest naming two to fit and one to hold out",
+            )
         if stage == "fit":
             item.add_argument("--population", type=int, default=128)
             item.add_argument("--track", type=Path)
             item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--static",
+                type=Path,
+                help="a stiffness set from r2s identify; adds the gravity term "
+                "and turns the fit's ratios into physical parameters",
+            )
+            item.add_argument(
+                "--urdf",
+                type=Path,
+                help="robot description to compute the modelled torque along the "
+                "track; required with --static",
+            )
+            item.add_argument(
+                "--manifest",
+                type=Path,
+                help="run manifest from r2s collect --repetitions 3; fits across "
+                "the runs it names, instead of one --track",
+            )
         if stage == "normalize":
             item.add_argument("--input", type=Path)
+            item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--max-gap-periods",
+                type=float,
+                default=DEFAULT_MAX_GAP_PERIODS,
+                help="command periods a stream may skip before the hole counts "
+                "as missing data rather than jitter",
+            )
+        if stage == "bundle":
+            item.add_argument(
+                "--base", type=Path, help="schema v2 bundle to merge parameters into"
+            )
+            item.add_argument(
+                "--fit",
+                type=Path,
+                action="append",
+                help="output of r2s fit --static; pass it once per group",
+            )
             item.add_argument("--output", type=Path)
         if stage in {"validate", "export"}:
             item.add_argument("--bundle", type=Path)
         if stage == "validate":
             item.add_argument("--metrics", type=Path)
             item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--manifest",
+                type=Path,
+                help="run manifest from r2s collect --repetitions 3; scores the "
+                "held-out run instead of reading --metrics",
+            )
+            item.add_argument(
+                "--fit",
+                type=Path,
+                help="fit estimate to score against the holdout; needs --manifest",
+            )
+            item.add_argument(
+                "--urdf",
+                type=Path,
+                help="robot description, required when the fit carries a "
+                "gravity term",
+            )
         if stage == "export":
             item.add_argument("--validation", type=Path)
             item.add_argument("--output", type=Path)
+    _add_pose(commands)
     return parser
+
+
+def _add_pose(commands: argparse._SubParsersAction) -> None:
+    pose = commands.add_parser("pose", help="read and set robot poses")
+    stages = pose.add_subparsers(dest="stage", required=True)
+
+    show = stages.add_parser("show", help="report the current pose")
+    show.add_argument("--profile", default="openarm_tesollo")
+    show.add_argument("--group")
+
+    joints = stages.add_parser("joints", help="set a group by joint values")
+    joints.add_argument("--profile", default="openarm_tesollo")
+    joints.add_argument("--group", required=True)
+    target = joints.add_mutually_exclusive_group(required=True)
+    target.add_argument("--values", help="comma-separated canonical values")
+    target.add_argument("--named", help="an SRDF group state, such as home")
+    joints.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
+    joints.add_argument("--execute", action="store_true")
+
+    end_effector = stages.add_parser("ee", help="set a group by end-effector pose")
+    end_effector.add_argument("--profile", default="openarm_tesollo")
+    end_effector.add_argument("--group", required=True)
+    where = end_effector.add_mutually_exclusive_group(required=True)
+    where.add_argument("--xyz", help="x,y,z in metres")
+    where.add_argument(
+        "--from-marker",
+        action="store_true",
+        help="take the target from the RViz end-effector marker you dragged",
+    )
+    end_effector.add_argument("--rpy", help="roll,pitch,yaw in radians")
+    end_effector.add_argument(
+        "--relative",
+        action="store_true",
+        help="treat --xyz and --rpy as an offset from the current pose",
+    )
+    end_effector.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
+    end_effector.add_argument("--execute", action="store_true")
+    end_effector.add_argument(
+        "--settle",
+        action="store_true",
+        help="re-command until the residual falls below --tolerance",
+    )
+    end_effector.add_argument(
+        "--tolerance",
+        type=float,
+        default=DEFAULT_TOLERANCE_M,
+        help="metres of residual --settle aims for",
+    )
+
+    gravity = stages.add_parser(
+        "gravity", help="publish gravity feedforward torque, and tune its scale"
+    )
+    gravity.add_argument("--profile", default="openarm_tesollo")
+    gravity.add_argument("--group", required=True)
+    gravity.add_argument(
+        "--scale",
+        help="fraction of the modelled torque to publish: one value, or one "
+        "per joint",
+    )
+    gravity.add_argument(
+        "--sweep",
+        help="comma-separated scales to measure in turn, for tuning",
+    )
+    gravity.add_argument(
+        "--sweep-joint",
+        help="canonical joint whose scale --sweep varies, holding the rest at "
+        "--scale",
+    )
+    gravity.add_argument(
+        "--output",
+        type=Path,
+        help="write what the run measured, for r2s identify to fit",
+    )
+    gravity.add_argument(
+        "--hold-sec",
+        type=float,
+        default=DEFAULT_HOLD_SEC,
+        help="seconds to publish at each scale before measuring",
+    )
+    gravity.add_argument("--execute", action="store_true")
+
+    follow = stages.add_parser(
+        "follow", help="follow the RViz end-effector marker continuously"
+    )
+    follow.add_argument("--profile", default="openarm_tesollo")
+    follow.add_argument("--group", required=True)
+    follow.add_argument(
+        "--gravity",
+        help="gravity feedforward scale to hold while following: one value, or "
+        "one per joint",
+    )
+    follow.add_argument(
+        "--seconds",
+        type=float,
+        default=DEFAULT_FOLLOW_SEC,
+        help="how long to follow before stopping on its own",
+    )
+    follow.add_argument("--execute", action="store_true")
+
+    rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
+    rviz.add_argument("--profile", default="openarm_tesollo")
+    rviz.add_argument(
+        "--real",
+        action="store_true",
+        help="drive real hardware over CAN instead of fake hardware",
+    )
+    rviz.add_argument("--right-can", help="CAN interface for the right arm")
+    rviz.add_argument("--left-can", help="CAN interface for the left arm")
+
+
+def _pose(args: argparse.Namespace) -> int:
+    """Dispatch a pose stage, mapping every failure onto the exit convention."""
+    # Imported here so `robotctl r2s` never pays for it. The module itself is
+    # rclpy-free; only using an adapter pulls ROS in.
+    from .ros_adapter import AdapterUnavailable, IkFailed
+
+    try:
+        if args.stage == "rviz":
+            return _pose_rviz(args)
+        profile = load_builtin_profile(args.profile)
+        if args.stage == "show":
+            return _pose_show(args, profile)
+        if args.stage == "joints":
+            return _pose_joints(args, profile)
+        if args.stage == "gravity":
+            return _pose_gravity(args, profile)
+        if args.stage == "follow":
+            return _pose_follow(args, profile)
+        return _pose_ee(args, profile)
+    except (SafetyError, IkFailed) as error:
+        print(f"refused: {error}")
+        return REFUSED
+    except AdapterUnavailable as error:
+        print(f"unavailable: {error}")
+        return UNUSABLE
+    except (ValueError, OSError) as error:
+        # ProfileError, InterfaceError, and SrdfError are all ValueError.
+        print(f"error: {error}")
+        return UNUSABLE
+
+
+def _group(profile, name: str):
+    if name not in profile.groups:
+        raise ValueError(
+            f"unknown group {name!r}; known groups are {sorted(profile.groups)}"
+        )
+    group = profile.groups[name]
+    if group.controller is None:
+        raise ValueError(f"group {name!r} declares no controller, so it cannot be set")
+    return group
+
+
+def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
+    """Build a gate over one group's profile limits, optionally seeded."""
+    joints = {joint.canonical: joint for joint in profile.joints}
+    limits = [joints[canonical] for canonical in group.joints]
+    gate = CommandGate(
+        execute=True,
+        lower=np.array([joint.lower for joint in limits]),
+        upper=np.array([joint.upper for joint in limits]),
+        velocity=np.array([joint.velocity for joint in limits]),
+        command_period_sec=1.0 / profile.endpoint().command_rate_hz,
+        effort=np.array([joint.effort for joint in limits]),
+        max_lead=np.array([joint.velocity * LEAD_SEC for joint in limits]),
+    )
+    if seed is not None:
+        # Seeding makes the velocity limit apply to the move itself, not just
+        # between waypoints of a multi-point plan.
+        gate.authorize(seed, now_sec=0.0)
+    return gate
+
+
+def _parse_floats(text: str, label: str) -> list[float]:
+    values = []
+    for item in text.split(","):
+        try:
+            values.append(float(item))
+        except ValueError:
+            raise ValueError(f"{label} is not a number: {item!r}") from None
+    return values
+
+
+def _target_from_args(args, profile, group, interface) -> np.ndarray:
+    """Resolve --values or --named into a canonical target for the group."""
+    if args.values is not None:
+        values = _parse_floats(args.values, "--values")
+        if len(values) != len(group.joints):
+            raise ValueError(
+                f"group {group.name!r} has {len(group.joints)} joints, "
+                f"but --values gave {len(values)}"
+            )
+        return np.asarray(values, dtype=float)
+
+    if group.moveit_group is None:
+        raise ValueError(
+            f"group {group.name!r} has no planning group, so it has no SRDF "
+            "named states; use --values"
+        )
+    state = named_state(group.moveit_group, args.named)
+    return interface.group_state_to_canonical(group.name, state)
+
+
+def _describe(group, interface, target: np.ndarray) -> None:
+    """Print exactly what would go on the wire, in the robot's own names."""
+    names = interface.group_source_names(group.name)
+    source = interface.group_command_to_source(group.name, target)
+    print(f"group: {group.name} -> controller {group.controller} ({group.action})")
+    print(f"  {'canonical':<16} {'source joint':<28} {'commanded (rad)':>15}")
+    for canonical, name in zip(group.joints, names):
+        print(f"  {canonical:<16} {name:<28} {source[name]:>+15.4f}")
+
+
+def _pose_show(args, profile) -> int:
+    from .ros_adapter import AdapterUnavailable, RosAdapter, make_backend
+
+    interface = CanonicalInterface(profile)
+    groups = (
+        {args.group: _group(profile, args.group)}
+        if args.group
+        else profile.executable_groups()
+    )
+    # The static contract is worth printing even with no robot to read.
+    for name, group in groups.items():
+        planning = group.moveit_group or "-"
+        print(f"{name}: controller={group.controller} planning_group={planning}")
+
+    try:
+        backend = make_backend()
+    except AdapterUnavailable as error:
+        print(f"unavailable: {error}")
+        return UNUSABLE
+    try:
+        for name, group in groups.items():
+            adapter = RosAdapter(profile, name, execute=False, backend=backend)
+            state = adapter.read_state()
+            values = " ".join(f"{value:+.4f}" for value in state)
+            print(f"{name}: {values}")
+            if group.moveit_group is not None and group.tip_link is not None:
+                pose = adapter.read_pose()
+                xyz = " ".join(f"{value:+.4f}" for value in pose.position)
+                rpy = " ".join(f"{value:+.4f}" for value in pose.rpy)
+                print(f"{name}: {group.tip_link} xyz [{xyz}] rpy [{rpy}]")
+    finally:
+        backend.close()
+    return 0
+
+
+def _pose_joints(args, profile) -> int:
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    interface = CanonicalInterface(profile)
+    target = _target_from_args(args, profile, group, interface)
+
+    if not args.execute:
+        # A dry run stays entirely offline, so it can never reach the robot.
+        _gate(profile, group, seed=None).authorize_trajectory(
+            [target], start_time_sec=0.0, period_sec=args.duration
+        )
+        print(f"DRY RUN: would send over {args.duration:g} s; pass --execute to send")
+        _describe(group, interface, target)
+        return 0
+
+    with RosAdapter(profile, args.group, execute=True) as adapter:
+        gate = _gate(profile, group, seed=adapter.read_state())
+        points = gate.authorize_trajectory(
+            [target], start_time_sec=0.0, period_sec=args.duration
+        )
+        _describe(group, interface, target)
+        if group.action == PARALLEL_GRIPPER_COMMAND:
+            adapter.send_gripper(float(points[-1][0]))
+        else:
+            adapter.send_trajectory(points, period_sec=args.duration)
+        print(f"EXECUTED: {group.name} over {args.duration:g} s")
+    return 0
+
+
+def _pose_ee(args, profile) -> int:
+    from .ros_adapter import Pose, RosAdapter, quaternion_from_rpy
+
+    group = _group(profile, args.group)
+    if group.moveit_group is None or group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no planning group, so it has no "
+            "end-effector pose; set it with pose joints --values instead"
+        )
+    interface = CanonicalInterface(profile)
+    if args.settle and not args.execute:
+        raise ValueError(
+            "--settle corrects what a move actually reached, so it needs "
+            "--execute; a dry run sends nothing to fall short of"
+        )
+    xyz, rpy = None, None
+    if args.from_marker:
+        # The marker carries a full pose already, so anything that modifies a
+        # typed one would move the arm somewhere the operator never saw.
+        for name, given in (("--relative", args.relative), ("--rpy", args.rpy)):
+            if given:
+                raise ValueError(f"{name} cannot be combined with --from-marker")
+    else:
+        xyz = _parse_floats(args.xyz, "--xyz")
+        if len(xyz) != 3:
+            raise ValueError(f"--xyz needs exactly three values, got {len(xyz)}")
+        if args.rpy is not None:
+            rpy = _parse_floats(args.rpy, "--rpy")
+            if len(rpy) != 3:
+                raise ValueError(f"--rpy needs exactly three values, got {len(rpy)}")
+
+    # Even a dry run needs move_group: IK is a service, with no offline form.
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        current = adapter.read_pose()
+        seed = adapter.read_state()
+        if args.from_marker:
+            target = adapter.read_marker_pose()
+        elif args.relative:
+            target = current.translated(xyz)
+            if rpy is not None:
+                roll, pitch, yaw = (a + b for a, b in zip(current.rpy, rpy))
+                target = target.rotated_to(quaternion_from_rpy(roll, pitch, yaw))
+        else:
+            orientation = (
+                current.orientation if rpy is None else quaternion_from_rpy(*rpy)
+            )
+            target = Pose(tuple(xyz), orientation, current.frame_id)
+
+        solution = adapter.solve_ik(target, seed=seed)
+        gate = _gate(profile, group, seed=seed)
+        points = gate.authorize_trajectory(
+            [solution], start_time_sec=0.0, period_sec=args.duration
+        )
+
+        start = " ".join(f"{value:+.4f}" for value in current.position)
+        goal = " ".join(f"{value:+.4f}" for value in target.position)
+        print(f"{group.tip_link}: [{start}] -> [{goal}] in {target.frame_id}")
+        _describe(group, interface, solution)
+        if not args.execute:
+            print("DRY RUN: solved but not sent; pass --execute to send")
+            return 0
+        adapter.send_trajectory(points, period_sec=args.duration)
+        print(f"EXECUTED: {group.name} over {args.duration:g} s")
+        _report_residual(adapter, target, solution, profile, group, args)
+    return 0
+
+
+def _residual(adapter, target) -> float:
+    """Metres between where the tool centre point is and where it was sent."""
+    landed = adapter.read_pose()
+    return float(
+        np.linalg.norm(np.asarray(landed.position) - np.asarray(target.position))
+    )
+
+
+def _report_residual(adapter, target, solution, profile, group, args) -> None:
+    """Print how far short the move stopped, and with --settle, close the gap.
+
+    The arms hold position through impedance control with no gravity feedforward,
+    so a joint only produces holding torque while it sits short of its command.
+    Re-sending the same solution therefore reproduces the same shortfall exactly;
+    each pass has to command past the target by what the last one missed.
+    """
+    residual = _residual(adapter, target)
+    if not args.settle:
+        print(f"residual: {residual * 1000:.1f} mm from the commanded pose")
+        return
+
+    command = np.asarray(solution, dtype=float)
+    for attempt in range(1, SETTLE_PASSES + 1):
+        if residual <= args.tolerance:
+            print(f"settled: {residual * 1000:.1f} mm after {attempt - 1} corrections")
+            return
+        actual = adapter.read_state()
+        command = command + (solution - actual)
+        # A fresh gate each pass, so the wound-up command is checked against the
+        # profile limits rather than trusted for having been safe once.
+        gate = _gate(profile, group, seed=actual)
+        points = gate.authorize_trajectory(
+            [command], start_time_sec=0.0, period_sec=args.duration
+        )
+        adapter.send_trajectory(points, period_sec=args.duration)
+        corrected = _residual(adapter, target)
+        print(f"settle {attempt}: {residual * 1000:.1f} -> {corrected * 1000:.1f} mm")
+        if corrected > residual * (1.0 - SETTLE_PROGRESS):
+            print(
+                f"settle: stopped converging at {corrected * 1000:.1f} mm; the arm "
+                "is against a limit, holding a load, or the target is unreachable"
+            )
+            return
+        residual = corrected
+
+    print(f"settle: {residual * 1000:.1f} mm after {SETTLE_PASSES} corrections")
+
+
+def _gravity_chain(adapter, profile, group):
+    """Build the kinematic chain for *group* from the running stack's URDF."""
+    from .kinematics import chain_from_urdf
+
+    source_by_canonical = {joint.canonical: joint.source for joint in profile.joints}
+    return chain_from_urdf(
+        adapter.read_robot_description(),
+        [source_by_canonical[canonical] for canonical in group.joints],
+        group.tip_link,
+    )
+
+
+def _pose_gravity(args, profile) -> int:
+    """Publish gravity feedforward, at one scale set or measured across several.
+
+    The model is only as good as the URDF's masses, and the gains it works
+    against are hard-coded in the vendor hardware rather than configured, so the
+    right scale is a measured quantity. --sweep measures it: hold at each scale,
+    read the controller's own tracking error, and print what actually happened.
+
+    Scales are per joint because the measured optima differ per joint — the
+    modelled torque's *distribution* is off, not only its magnitude — so one
+    global number can only reach a compromise between them.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if not group.compensable:
+        raise ValueError(
+            f"group {group.name!r} declares no effort_controller, so torque "
+            "cannot be published for it"
+        )
+    if group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no tip_link, so its chain cannot be built"
+        )
+    if args.scale is None and args.sweep is None:
+        raise ValueError("pose gravity needs --scale, --sweep, or both")
+    if args.sweep_joint is not None and args.sweep is None:
+        raise ValueError("--sweep-joint says which joint --sweep varies; add --sweep")
+    if args.hold_sec <= 0:
+        raise ValueError("--hold-sec must be positive")
+    if args.output is not None and not args.execute:
+        raise ValueError(
+            "--output records what the arm measured, so it needs --execute; a "
+            "dry run publishes nothing and there would be nothing to record"
+        )
+
+    base = _scale_vector(args.scale, group)
+    index = None
+    if args.sweep_joint is not None:
+        if args.sweep_joint not in group.joints:
+            raise ValueError(
+                f"{args.sweep_joint!r} is not a joint of {group.name!r}; it has "
+                f"{list(group.joints)}"
+            )
+        index = group.joints.index(args.sweep_joint)
+
+    if args.sweep is None:
+        rounds = [base]
+    else:
+        rounds = []
+        for scale in _parse_floats(args.sweep, "--sweep"):
+            step = base.copy()
+            if index is None:
+                step[:] = scale
+            else:
+                step[index] = scale
+            rounds.append(step)
+    for step in rounds:
+        _check_scales(step, group)
+
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        state = adapter.read_state()
+        modelled = chain.gravity_torque(state)
+        gate = _gate(profile, group, seed=None)
+
+        print(f"{group.name}: {len(chain)} joints, "
+              f"{sum(link.mass for link in chain.links):.3f} kg modelled")
+        _describe_torque(group, modelled, base)
+        if not args.execute:
+            print("DRY RUN: torque computed but not published; pass --execute")
+            return 0
+
+        sweep = _measure_sweep(
+            adapter, chain, gate, group, rounds, args.hold_sec, index, args.sweep_joint
+        )
+        if sweep.rounds > 1:
+            _report_sweep(group, sweep, index)
+        if args.output is not None:
+            write_sweep(args.output, sweep, profile)
+            print(f"wrote {args.output}")
+    return 0
+
+
+def _measure_sweep(
+    adapter, chain, gate, group, rounds, hold_sec, index, sweep_joint
+) -> GravitySweep:
+    """Hold each scale in turn, read what the arm did, and release the torque."""
+    poses, torques, applied, errors = [], [], [], []
+    try:
+        for scales in rounds:
+            # Recomputed each round: compensation moves the arm, and the torque
+            # that holds it depends on where it now is.
+            state = adapter.read_state()
+            torque = chain.gravity_torque(state)
+            effort = gate.authorize_effort(torque * scales)
+            _publish_for(adapter, effort, hold_sec)
+            error = adapter.read_tracking_error()
+            poses.append(state)
+            torques.append(torque)
+            applied.append(scales)
+            errors.append(error)
+            print(
+                f"scale {_scale_label(scales, index):>8}: worst joint error "
+                f"{np.max(np.abs(error)):+.4f} rad, "
+                f"mean {np.mean(np.abs(error)):.4f} rad"
+            )
+    finally:
+        # Torque left applied after this process exits would keep pushing.
+        adapter.send_effort(np.zeros(len(group.joints)))
+        print("torque released")
+    return GravitySweep(
+        group=group.name,
+        joint_names=tuple(group.joints),
+        poses=np.asarray(poses, dtype=float),
+        modelled_torque=np.asarray(torques, dtype=float),
+        scales=np.asarray(applied, dtype=float),
+        errors=np.asarray(errors, dtype=float),
+        sweep_joint=sweep_joint,
+    )
+
+
+def _scale_vector(given: str | None, group) -> np.ndarray:
+    """Read --scale as one value for every joint, or one value per joint."""
+    if given is None:
+        return np.ones(len(group.joints))
+    values = _parse_floats(given, "--scale")
+    if len(values) == 1:
+        return np.full(len(group.joints), values[0])
+    if len(values) != len(group.joints):
+        raise ValueError(
+            f"--scale needs one value or one per joint: {group.name!r} has "
+            f"{len(group.joints)} joints, got {len(values)}"
+        )
+    return np.asarray(values, dtype=float)
+
+
+def _check_scales(scales: np.ndarray, group) -> None:
+    for canonical, scale in zip(group.joints, scales):
+        if not 0.0 <= scale <= MAX_GRAVITY_SCALE:
+            raise ValueError(
+                f"gravity scale {scale:g} for {canonical} is outside 0 to "
+                f"{MAX_GRAVITY_SCALE:g}; over-compensating drives the arm away "
+                "from where it was holding"
+            )
+
+
+def _scale_label(scales: np.ndarray, index: int | None) -> str:
+    """Label a round by the number that varied, or by the shared one."""
+    if index is not None:
+        return f"{scales[index]:.2f}"
+    if np.allclose(scales, scales[0]):
+        return f"{scales[0]:.2f}"
+    return "per-joint"
+
+
+def _publish_for(adapter, effort, seconds: float) -> None:
+    """Republish *effort* at the controller rate for *seconds*.
+
+    ForwardCommandController holds its last command, so one message would do,
+    but republishing means a dropped message cannot silently leave the arm on a
+    stale torque.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        adapter.send_effort(effort)
+        time.sleep(0.01)
+
+
+def _describe_torque(group, torque, scales) -> None:
+    print("  joint            modelled (N.m)   scale   published (N.m)")
+    for canonical, value, scale in zip(group.joints, torque, scales):
+        print(f"  {canonical:<16} {value:+8.2f}   {scale:9.2f} {value * scale:+12.2f}")
+
+
+def _report_sweep(group, sweep, index: int | None) -> None:
+    """Print the sweep as a table, and name what measured best.
+
+    With one joint varying, "best" is that joint's own error: a global worst
+    would be dominated by joints this sweep never touched.
+    """
+    print()
+    print("  scale  " + "".join(f"{canonical:>10}" for canonical in group.joints))
+    rows = list(zip(sweep.scales, sweep.errors))
+    for scales, error in rows:
+        label = _scale_label(scales, index)
+        print(f"  {label:>5}  " + "".join(f"{value:+10.4f}" for value in error))
+
+    score = (
+        (lambda row: abs(float(row[1][index])))
+        if index is not None
+        else (lambda row: float(np.max(np.abs(row[1]))))
+    )
+    best = min(rows, key=score)
+    print()
+    if index is not None:
+        joint = group.joints[index]
+        print(
+            f"best measured scale for {joint}: {best[0][index]:g} "
+            f"(that joint {best[1][index]:+.4f} rad)"
+        )
+        print(
+            "  refine the next joint the same way, then hold them all at once:\n"
+            "  --scale " + ",".join(f"{value:g}" for value in best[0])
+        )
+    else:
+        print(
+            f"best measured scale: {best[0][0]:g} "
+            f"(worst joint {np.max(np.abs(best[1])):+.4f} rad)"
+        )
+        print(
+            "  refine one joint at a time from here with --sweep-joint, since "
+            "each joint's optimum differs"
+        )
+
+
+def _pose_follow(args, profile) -> int:
+    """Track the dragged marker continuously, at the controller rate.
+
+    Differential inverse kinematics rather than /compute_ik: a service round trip
+    per sample cannot keep up, and the Jacobian gives a step that is smooth and
+    local, so the arm sweeps to a nearby solution instead of jumping between
+    branches the way a fresh IK solve can.
+
+    Every sample is clamped by the gate rather than refused, since dragging
+    faster than the arm can move is normal operation, not an error.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if group.moveit_group is None or group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no planning group, so it has no "
+            "end-effector marker to follow"
+        )
+    _check_scales(_scale_vector(args.gravity, group), group)
+    if args.seconds <= 0:
+        raise ValueError("--seconds must be positive")
+
+    period = 1.0 / profile.endpoint().command_rate_hz
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        gate = _gate(profile, group, seed=None)
+        adapter.watch_marker()
+        state = adapter.read_state()
+        print(
+            f"following {group.tip_link} at {1.0 / period:g} Hz for "
+            f"{args.seconds:g} s, gravity "
+            + (
+                "off"
+                if args.gravity is None
+                else f"scale {_scale_label(_scale_vector(args.gravity, group), None)}"
+            )
+        )
+        print("drag the marker in RViz; the arm tracks it until the time runs out")
+        if not args.execute:
+            print("DRY RUN: nothing is published; pass --execute to follow")
+            return 0
+        _follow_loop(adapter, chain, gate, group, state, period, args)
+    return 0
+
+
+def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
+    from .kinematics import twist_between
+
+    scales = None if args.gravity is None else _scale_vector(args.gravity, group)
+    if scales is not None and not np.any(scales):
+        scales = None
+
+    samples = 0
+    notes: dict[str, int] = {}
+    # How far the tool centre point actually trails the marker, which is the
+    # only measure of whether following works. The clamp counts say the command
+    # moved; they say nothing about the arm.
+    lag_total = 0.0
+    lag_worst = 0.0
+    deadline = time.monotonic() + args.seconds
+    try:
+        while time.monotonic() < deadline:
+            cycle = time.monotonic()
+            adapter.pump(timeout_sec=0.0)
+            target = adapter.latest_marker_target()
+            state = adapter.read_state(timeout_sec=1.0)
+            if scales is not None:
+                adapter.send_effort(
+                    gate.authorize_effort(chain.gravity_torque(state) * scales)
+                )
+            if target is not None:
+                goal = np.eye(4)
+                goal[:3, 3] = target.position
+                goal[:3, :3] = _rotation_from_quaternion(target.orientation)
+                here = chain.pose(state)
+                lag = float(np.linalg.norm(goal[:3, 3] - here[:3, 3]))
+                lag_total += lag
+                lag_worst = max(lag_worst, lag)
+                step = chain.delta_q(state, twist_between(here, goal))
+                command, limited = gate.follow(state + step, state, period)
+                if limited is not None:
+                    notes[limited] = notes.get(limited, 0) + 1
+                adapter.stream_positions(command, period_sec=period)
+                samples += 1
+            time.sleep(max(0.0, period - (time.monotonic() - cycle)))
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+    finally:
+        # Stop commanding, and stop pushing. The trajectory controller holds its
+        # last position, which is where the arm already is, so it stays put.
+        if scales is not None:
+            adapter.send_effort(np.zeros(len(group.joints)))
+        print(f"followed {samples} samples; the arm holds its last commanded pose")
+        if samples:
+            print(
+                f"  tool centre point trailed the marker by "
+                f"{lag_total / samples * 1000:.1f} mm on average, "
+                f"{lag_worst * 1000:.1f} mm at worst"
+            )
+        for note, count in sorted(notes.items()):
+            print(f"  {note} clamped on {count} of {samples} samples")
+
+
+def _rotation_from_quaternion(orientation) -> np.ndarray:
+    """Return the 3x3 rotation of a quaternion given in x, y, z, w order."""
+    x, y, z, w = (float(value) for value in orientation)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+def _pose_rviz(args) -> int:
+    script = repository_root() / "ros_ws/pose_bringup.sh"
+    if not script.is_file():
+        raise ValueError(f"bringup wrapper not found: {script}")
+    command = [str(script)]
+    if args.real:
+        command.append("--real")
+        for flag, value in (("--right-can", args.right_can), ("--left-can", args.left_can)):
+            if value:
+                command += [flag, value]
+    print(f"launching: {' '.join(command)}")
+    return subprocess.call(command)
+
+
+def _identify(args, profile) -> int:
+    """Fit stiffness, stiction and a torque correction from measured sweeps.
+
+    Refuses rather than reports a partial answer. Least squares always returns
+    something, and a stiffness for a joint whose load never varied is that
+    something; downstream it becomes an inertia, and nothing after this point
+    could tell it from a measured one.
+    """
+    from .ros_adapter import AdapterUnavailable
+
+    reviewing = args.collect and not args.execute
+    if not args.output and not reviewing:
+        print("error: --output is required")
+        return UNUSABLE
+    if args.collect and not args.group:
+        print("error: --collect needs --group, to say which arm to drive")
+        return UNUSABLE
+    if args.collect and args.execute and not args.sweep_dir:
+        print(
+            "error: --collect --execute needs --sweep-dir; the measurements are "
+            "the only record of a run that moved the robot"
+        )
+        return UNUSABLE
+
+    collected: list[Path] = []
+    if args.collect:
+        try:
+            written = _collect_poses(args, profile)
+        except (SafetyError, Refused) as error:
+            print(f"refused: {error}")
+            return REFUSED
+        except AdapterUnavailable as error:
+            print(f"unavailable: {error}")
+            return UNUSABLE
+        except (ValueError, OSError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        if written is None:
+            return 0  # a review, which is all --collect without --execute does
+        collected = written
+
+    sweeps = list(args.sweep or []) + collected
+    if len(sweeps) < 2:
+        print(
+            f"refused: --sweep must name at least two poses, got {len(sweeps)}. "
+            "At one pose the modelled torque is a constant, so the stiffness, "
+            "the friction and the model's own error are one equation in three "
+            "unknowns."
+        )
+        return REFUSED
+
+    try:
+        measured = [read_sweep(path, profile) for path in sweeps]
+        estimate = fit_static_gravity(measured, noise_rad=args.noise)
+    except ArtifactError as error:
+        print(f"error: {error}")
+        return UNUSABLE
+    except FitError as error:
+        print(f"error: {error}")
+        return UNUSABLE
+
+    _report_static(estimate, len(measured))
+    if estimate.unidentifiable:
+        print(
+            "refused: nothing written. Add a pose that loads the joints above "
+            "differently, or free a joint sitting in its stiction band, and run "
+            "identify again over every sweep."
+        )
+        return REFUSED
+
+    write_static_estimate(
+        args.output,
+        estimate,
+        profile,
+        group=measured[0].group,
+        noise_rad=args.noise,
+        sources=[sweep_sha256(sweep) for sweep in measured],
+    )
+    print(f"identify: {args.output}")
+    return 0
+
+
+def _fit(args, profile) -> int:
+    """Fit the dynamic model, and with a static estimate, the physical parameters.
+
+    Without --static this is the three-parameter fit it always was, which is
+    right for a track with no standing load in it. With one, the modelled gravity
+    torque enters as a fourth column — otherwise the regression has nowhere to
+    put a standing load but into the stiffness — and the two fits together give
+    the inertia neither can reach alone.
+    """
+    from .kinematics import KinematicsError, chain_from_urdf
+
+    provenance: dict = {}
+    if args.manifest is not None:
+        try:
+            tracks, provenance = _fit_tracks_from_manifest(args, profile)
+        except (FitError, TrackError, ValueError, OSError, KeyError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+    else:
+        tracks = [read_hdf5(args.track)]
+    # Every run shares the excitation and the joints, so one stands in for all
+    # of them wherever only the shape or the names matter.
+    track = tracks[0]
+    gravity = None
+    static = None
+    group = None
+    if args.static is not None:
+        if not args.urdf:
+            print(
+                "error: --static needs --urdf, to work out the modelled torque at "
+                "every sample along the track. Dump it from the running stack "
+                "with: ros2 param get --hide-type /robot_state_publisher "
+                "robot_description > robot.urdf"
+            )
+            return UNUSABLE
+        try:
+            artifact = read_static_estimate(args.static, profile)
+        except ArtifactError as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        static = artifact.estimate
+        group = profile.groups[artifact.group]
+        name = artifact.group
+        source_by_canonical = {
+            joint.canonical: joint.source for joint in profile.joints
+        }
+        sources = tuple(source_by_canonical[joint] for joint in group.joints)
+        if tuple(track.joint_names) not in (tuple(group.joints), sources):
+            print(
+                f"error: the track covers {list(track.joint_names)}, but the "
+                f"static estimate is for group {name!r}, whose joints are "
+                f"{list(group.joints)} ({list(sources)} at the source)"
+            )
+            return UNUSABLE
+        try:
+            chain = chain_from_urdf(
+                Path(args.urdf).read_text(), sources, group.tip_link
+            )
+        except (KinematicsError, OSError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        # Corrected by the alpha the static fit measured, so the column is the
+        # load the arm actually carries rather than the one the URDF describes.
+        gravity = [
+            static.torque_scale
+            * np.array([chain.gravity_torque(sample) for sample in run.measured])
+            for run in tracks
+        ]
+
+    try:
+        estimate = fit_second_order_runs(
+            [
+                (
+                    run.timestamps_ns * 1e-9,
+                    run.command,
+                    run.measured,
+                    None if gravity is None else gravity[index],
+                )
+                for index, run in enumerate(tracks)
+            ]
+        )
+    except FitError as error:
+        print(f"error: {error}")
+        return UNUSABLE
+
+    payload: dict = {
+        "population": args.population,
+        "joint_names": track.joint_names,
+        "stiffness": estimate.stiffness.tolist(),
+        "damping": estimate.damping.tolist(),
+        "friction": estimate.friction.tolist(),
+        "residual_rmse": estimate.residual_rmse.tolist(),
+        "track_sha256": track_sha256(track),
+        **provenance,
+    }
+
+    if static is not None:
+        try:
+            combined = combine(static, estimate, group.joints)
+        except FitError as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        _report_combined(combined)
+        worst = float(np.nanmax(combined.disagreement))
+        if worst > MAX_INERTIA_DISAGREEMENT:
+            joint = combined.joint_names[int(np.nanargmax(combined.disagreement))]
+            print(
+                f"refused: nothing written. The two routes to {joint}'s inertia "
+                f"disagree by {worst:.0%}, over {MAX_INERTIA_DISAGREEMENT:.0%}. "
+                "kp/k and 1/g come from different columns of different "
+                "experiments, so a gap that size means one of them is measuring "
+                "something else — a static estimate from another robot, a URDF "
+                "that is not the arm on the track, or a track with a load on it."
+            )
+            return REFUSED
+        payload.update(
+            {
+                "group": group.name,
+                "stiffness_nm_per_rad": combined.stiffness.tolist(),
+                "inertia_kg_m2": combined.inertia.tolist(),
+                "damping_nm_s_per_rad": combined.damping.tolist(),
+                "friction_nm": combined.friction.tolist(),
+                "inertia_from_gravity_kg_m2": combined.inertia_from_gravity.tolist(),
+                "inertia_disagreement": combined.disagreement.tolist(),
+                "torque_scale": static.torque_scale.tolist(),
+                # Carried through so r2s bundle can cite the whole chain without
+                # being handed the static estimate a second time.
+                "sweep_sha256": list(artifact.sweep_sha256),
+            }
+        )
+
+    args.output.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"fit: {args.output}")
+    return 0
+
+
+#: What a fit output must carry to be merged into a bundle. Anything less was
+#: produced without --static, so it holds ratios rather than parameters.
+_BUNDLE_KEYS = (
+    "group",
+    "inertia_kg_m2",
+    "damping_nm_s_per_rad",
+    "friction_nm",
+    "stiffness_nm_per_rad",
+    "inertia_from_gravity_kg_m2",
+    "inertia_disagreement",
+    "torque_scale",
+    "sweep_sha256",
+    "track_sha256",
+)
+
+
+def _component_of(group, profile) -> str:
+    """Which component of the robot a group belongs to.
+
+    Read from the group's own name against the profile's declared components,
+    rather than assumed: `validate_holdout` holds arms and hands to different
+    thresholds, so putting a run's error under the wrong name would compare it
+    against the wrong bound.
+    """
+    for component in profile.components:
+        if group.name.startswith(f"{component}_"):
+            return component
+    raise ValueError(
+        f"group {group.name!r} does not name one of this profile's components "
+        f"{list(profile.components)}, so its holdout error cannot be scored "
+        "against the right threshold"
+    )
+
+
+def _score_manifest(args, profile) -> tuple[dict, dict]:
+    """Score a fitted model against the run the manifest held out."""
+    from .kinematics import KinematicsError, chain_from_urdf
+
+    if not args.fit:
+        raise ValueError(
+            "--manifest names the run to score against, so it needs --fit: the "
+            "model being scored"
+        )
+    manifest = _read_manifest(args.manifest, profile)
+    group = _group(profile, manifest["group"])
+    names = [entry["path"] for entry in manifest["runs"]]
+    holdout = [names[index] for index in manifest["holdout_runs"]]
+    if len(holdout) != 1:
+        raise ValueError(
+            f"exactly one run is held out, this manifest holds out {len(holdout)}"
+        )
+
+    rate = profile.endpoint().command_rate_hz
+    track = _load_recording(Path(args.manifest).parent / holdout[0], profile, rate)
+    estimate = _estimate_from_fit(args.fit, group)
+
+    gravity = None
+    if estimate.inverse_inertia is not None:
+        if not args.urdf:
+            raise ValueError(
+                "the fit carries a gravity term, so scoring it needs --urdf to "
+                "work out the modelled torque along the holdout"
+            )
+        source_by_canonical = {j.canonical: j.source for j in profile.joints}
+        sources = tuple(source_by_canonical[j] for j in group.joints)
+        try:
+            chain = chain_from_urdf(
+                Path(args.urdf).read_text(), sources, group.tip_link
+            )
+        except KinematicsError as error:
+            raise ValueError(str(error)) from error
+        gravity = np.array([chain.gravity_torque(q) for q in track.measured])
+
+    scored = score_holdout(
+        estimate,
+        track.timestamps_ns * 1e-9,
+        track.command,
+        track.measured,
+        gravity_torque=gravity,
+    )
+    component = _component_of(group, profile)
+    metrics = {
+        # The run says nothing about the other component, so its metric is left
+        # at a value that cannot fail rather than invented from this one.
+        "openarm_rmse_rad": 0.0,
+        "tesollo_rmse_rad": 0.0,
+        "delay_residual_sec": scored.delay_residual_sec,
+        "command_period_sec": 1.0 / rate,
+        "improvement_fraction": scored.improvement_fraction,
+    }
+    metrics[f"{component}_rmse_rad"] = scored.rmse_rad
+    return metrics, {
+        "group": group.name,
+        "fit_runs": [names[index] for index in manifest["fit_runs"]],
+        "holdout_runs": holdout,
+        "baseline_rmse_rad": scored.baseline_rmse_rad,
+    }
+
+
+def _read_manifest(path: Path, profile) -> dict:
+    manifest = json.loads(Path(path).read_text())
+    asset = manifest.get("asset") or {}
+    if (
+        manifest.get("profile") != profile.name
+        or asset.get("id") != profile.asset_id
+        or asset.get("manifest_sha256") != profile.manifest_sha256
+    ):
+        raise ValueError(
+            f"the run manifest names profile {manifest.get('profile')!r} and "
+            f"asset {asset.get('id')!r}, which are not this profile and asset"
+        )
+    return manifest
+
+
+def _fit_tracks_from_manifest(args, profile) -> tuple[list, dict]:
+    """Normalize the runs the manifest names for fitting, and cite them."""
+    manifest = _read_manifest(args.manifest, profile)
+    group = _group(profile, manifest["group"])
+    names = [entry["path"] for entry in manifest["runs"]]
+    fit_names = [names[index] for index in manifest["fit_runs"]]
+    holdout_names = [names[index] for index in manifest["holdout_runs"]]
+    overlap = sorted(set(fit_names) & set(holdout_names))
+    if overlap:
+        raise ValueError(
+            f"the manifest fits on {overlap}, which it also holds out. "
+            "Validating against a run the model was fitted on validates nothing."
+        )
+    root = Path(args.manifest).parent
+    rate = profile.endpoint().command_rate_hz
+    tracks = [_load_recording(root / name, profile, rate) for name in fit_names]
+    return tracks, {
+        "group": group.name,
+        "fit_runs": fit_names,
+        "holdout_runs": holdout_names,
+    }
+
+
+def _load_recording(path: Path, profile, rate_hz):
+    """Read one `.npz` from collect and put its two streams on a common grid."""
+    raw = np.load(path, allow_pickle=False)
+    return normalize_track(
+        raw["command_time_ns"],
+        raw["command"],
+        raw["measured_time_ns"],
+        raw["measured"],
+        list(raw["joint_names"]),
+        rate_hz,
+    )
+
+
+def _estimate_from_fit(path: Path, group) -> SecondOrderEstimate:
+    payload = json.loads(Path(path).read_text())
+    width = len(group.joints)
+
+    def column(key):
+        values = np.asarray(payload[key], dtype=float)
+        if values.shape != (width,):
+            raise ValueError(
+                f"{path}: {key} must carry one value per joint of "
+                f"{group.name!r}, {width} of them"
+            )
+        return values
+
+    inverse = None
+    if "inertia_kg_m2" in payload:
+        inverse = 1.0 / column("inertia_kg_m2")
+    return SecondOrderEstimate(
+        column("stiffness"),
+        column("damping"),
+        column("friction"),
+        column("residual_rmse"),
+        inverse,
+    )
+
+
+def _collect_track(args, profile) -> int:
+    """Publish an identification excitation and record what the arm did.
+
+    The two streams are kept apart on purpose. A loop that wrote each command
+    beside the state it read in the same cycle would be asserting that the state
+    responds to that command; it does not, it responds to one from several cycles
+    back. That lag is `ControllerCalibration.delay_sec`, a parameter being
+    measured, and pairing at record time bakes in zero and destroys it.
+    `normalize_track` puts both on a common grid afterwards, which keeps the
+    alignment a decision that can still be revised.
+    """
+    from .ros_adapter import AdapterUnavailable
+
+    if not args.group:
+        print("error: --group is required, to say which arm to excite")
+        return UNUSABLE
+    if args.execute and not args.output:
+        print(
+            "error: --execute needs --output; the recording is the only thing a "
+            "run that moved the robot leaves behind"
+        )
+        return UNUSABLE
+    if args.repetitions not in (1, REPETITIONS):
+        print(
+            f"error: --repetitions must be 1 or {REPETITIONS}, got "
+            f"{args.repetitions}. An identification run needs exactly three: "
+            "two to fit and one held out. Two would leave one of each, and a "
+            "model fitted on one run has nothing to be validated against."
+        )
+        return UNUSABLE
+    try:
+        return _collect_track_run(args, profile)
+    except (SafetyError, Refused) as error:
+        print(f"refused: {error}")
+        return REFUSED
+    except AdapterUnavailable as error:
+        print(f"unavailable: {error}")
+        return UNUSABLE
+    except (ValueError, OSError) as error:
+        print(f"error: {error}")
+        return UNUSABLE
+
+
+def _collect_track_run(args, profile) -> int:
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if group.action == PARALLEL_GRIPPER_COMMAND:
+        raise ValueError(
+            f"group {group.name!r} is driven by a gripper action, which takes a "
+            "position rather than a stream, so it cannot be excited this way"
+        )
+    rate = profile.endpoint().command_rate_hz
+    period = 1.0 / rate
+    joints = {joint.canonical: joint for joint in profile.joints}
+    limits = [joints[canonical] for canonical in group.joints]
+    amplitude = np.array(
+        [
+            (joint.upper - joint.lower) * 0.05 * args.amplitude_scale
+            for joint in limits
+        ]
+    )
+    # One period of travel at the profile's velocity limit, which is what the
+    # gate will allow between consecutive samples. Handing it to the excitation
+    # lets the phase joins be bridged rather than refused.
+    budget = np.array([joint.velocity * period for joint in limits])
+
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        # Around where the arm is, not the middle of its range: the midpoint of
+        # the arms' symmetric limits is the all-zeros pose, so starting there
+        # would mean a large unplanned move before the excitation even begins.
+        neutral = adapter.read_state()
+        clock, command, phases = build_excitation(
+            neutral, amplitude, rate, max_step=budget
+        )
+        print(
+            f"{group.name}: amplitude_scale={args.amplitude_scale:g} "
+            f"samples={len(clock)} ({len(clock) / rate:.1f} s at {rate:g} Hz) "
+            f"phases={','.join(dict.fromkeys(phases))}"
+        )
+
+        # The whole track, before any of it is published. A run that stopped
+        # partway would leave the arm mid-excitation at a velocity nobody chose.
+        _gate(profile, group, seed=neutral).authorize_trajectory(
+            list(command), start_time_sec=0.0, period_sec=period
+        )
+        if not args.execute:
+            print("DRY RUN: nothing was published; pass --execute to collect")
+            return 0
+
+        written: list[Path] = []
+        for index in range(args.repetitions):
+            if index:
+                # Back to where the first run started, or these are not
+                # repetitions of the same experiment. The excitation ends
+                # wherever its last phase left the arm, not at neutral.
+                print(f"\nrun {index}: returning to the starting pose")
+                state = adapter.read_state()
+                points = _gate(profile, group, seed=state).authorize_trajectory(
+                    [neutral], start_time_sec=0.0, period_sec=DEFAULT_DURATION_SEC
+                )
+                adapter.send_trajectory(points, period_sec=DEFAULT_DURATION_SEC)
+            stamps, recording = _publish_excitation(adapter, command, period)
+            _report_recording(len(command), recording, rate)
+            path = _repetition_path(args.output, index, args.repetitions)
+            _write_recording(
+                path,
+                profile,
+                group,
+                stamps,
+                command[: len(stamps)],
+                recording,
+            )
+            print(f"collect: {path}")
+            written.append(path)
+
+    if args.repetitions > 1:
+        # Only once every run is on disk. A manifest naming a recording that was
+        # never written is worse than no manifest.
+        manifest = _write_run_manifest(args.output, profile, group, written)
+        print(f"collect: {manifest}")
+    return 0
+
+
+def _repetition_path(output: Path, index: int, repetitions: int) -> Path:
+    if repetitions == 1:
+        return Path(output)
+    output = Path(output)
+    return output.with_name(f"{output.stem}{index}{output.suffix}")
+
+
+def _publish_excitation(adapter, command, period):
+    """Stream every sample, recording throughout, and release on any exit."""
+    stamps: list[int] = []
+    adapter.start_recording()
+    try:
+        for sample in command:
+            cycle = time.monotonic()
+            adapter.pump(timeout_sec=0.0)
+            # Stamped at publish, not from the planned clock: the planned time
+            # is the intent and this is what happened.
+            stamps.append(adapter.now_ns())
+            adapter.stream_positions(sample, period_sec=period)
+            time.sleep(max(0.0, period - (time.monotonic() - cycle)))
+        adapter.pump(timeout_sec=0.0)
+    finally:
+        recording = adapter.stop_recording()
+    return np.asarray(stamps, dtype=np.int64), recording
+
+
+def _write_run_manifest(output: Path, profile, group, written: list[Path]) -> Path:
+    """Name the recordings, and which of them is held out.
+
+    `split_repetitions` decides the split rather than this function, so the rule
+    lives in one place and the bundle's `fit_runs` and `holdout_runs` cite the
+    same one.
+    """
+    output = Path(output)
+    names = [path.name for path in written]
+    fit, holdout = split_repetitions(names)
+    manifest = output.with_suffix(".json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "excitation_runs",
+                "profile": profile.name,
+                "asset": {
+                    "id": profile.asset_id,
+                    "manifest_sha256": profile.manifest_sha256,
+                },
+                "group": group.name,
+                "runs": [{"path": name} for name in names],
+                "fit_runs": [names.index(name) for name in fit],
+                "holdout_runs": [names.index(name) for name in holdout],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return manifest
+
+
+def _report_recording(published: int, recording, rate: float) -> None:
+    period_ns = 1e9 / rate
+    print(
+        f"published {published} samples, recorded {len(recording)} "
+        f"({recording.incomplete} did not cover the group)"
+    )
+    print(
+        f"  largest gap {recording.largest_gap_ns / 1e6:.1f} ms against a "
+        f"{recording.median_period_ns / 1e6:.1f} ms median "
+        f"({recording.largest_gap_ns / period_ns:.1f} command periods)"
+    )
+    if not recording.is_monotonic:
+        print("  warning: samples arrived out of order; normalize will refuse them")
+
+
+def _write_recording(path, profile, group, stamps, command, recording) -> None:
+    """Write both streams with their own clocks, never resampled or paired."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        command_time_ns=stamps,
+        command=np.asarray(command, dtype=float),
+        measured_time_ns=recording.timestamps_ns,
+        measured=recording.values,
+        joint_names=np.array(list(group.joints)),
+        profile=np.array(profile.name),
+        asset_id=np.array(profile.asset_id),
+        manifest_sha256=np.array(profile.manifest_sha256),
+        incomplete=np.array(recording.incomplete),
+    )
+
+
+def _bundle(args, profile) -> int:
+    """Merge identified parameters from one or more fits into a v2 bundle."""
+    if not args.base or not args.fit or not args.output:
+        print("error: --base, --fit and --output are required")
+        return UNUSABLE
+    try:
+        base = load_bundle(args.base, profile)
+    except (CalibrationError, OSError) as error:
+        print(f"error: {error}")
+        return UNUSABLE
+    if base.schema_version != 2:
+        print(
+            f"error: --base is schema v{base.schema_version}; only v2 may be "
+            "written, so it cannot carry identified parameters"
+        )
+        return UNUSABLE
+
+    payload = json.loads(json.dumps(base.payload))
+    payload.pop("checksum_sha256", None)
+    for path in args.fit:
+        try:
+            fit = json.loads(Path(path).read_text())
+        except (OSError, ValueError) as error:
+            print(f"error: {path}: {error}")
+            return UNUSABLE
+        missing = [key for key in _BUNDLE_KEYS if key not in fit]
+        if missing:
+            print(
+                f"error: {path} carries no {missing[0]}, so it was fitted without "
+                "--static. Its stiffness, damping and friction are ratios to an "
+                "inertia, not parameters."
+            )
+            return UNUSABLE
+        name = fit["group"]
+        if name not in payload.get("groups", {}):
+            print(f"error: {path} is for group {name!r}, which this bundle has no entry for")
+            return UNUSABLE
+        combined = CombinedEstimate(
+            joint_names=tuple(profile.groups[name].joints),
+            inertia=np.asarray(fit["inertia_kg_m2"], dtype=float),
+            damping=np.asarray(fit["damping_nm_s_per_rad"], dtype=float),
+            friction=np.asarray(fit["friction_nm"], dtype=float),
+            stiffness=np.asarray(fit["stiffness_nm_per_rad"], dtype=float),
+            inertia_from_gravity=np.asarray(
+                fit["inertia_from_gravity_kg_m2"], dtype=float
+            ),
+            disagreement=np.asarray(fit["inertia_disagreement"], dtype=float),
+        )
+        try:
+            payload["groups"][name]["identified"] = identified_block(
+                combined,
+                profile,
+                torque_scale=fit["torque_scale"],
+                sweep_sha256=fit["sweep_sha256"],
+                track_sha256=fit["track_sha256"],
+            )
+        except CalibrationError as error:
+            print(f"error: {path}: {error}")
+            return UNUSABLE
+        if "fit_runs" in fit:
+            # Carried from the fit rather than asked for again: the fit is what
+            # knows which runs it actually used.
+            source = dict(payload.get("source") or {})
+            source.update(
+                {
+                    "track_sha256": fit["track_sha256"],
+                    "fit_runs": fit["fit_runs"],
+                    "holdout_runs": fit.get("holdout_runs", []),
+                }
+            )
+            payload["source"] = source
+
+    try:
+        written = write_bundle(args.output, payload, profile)
+    except CalibrationError as error:
+        print(f"refused: {error}")
+        return REFUSED
+    print(
+        f"bundle: {args.output}, identified "
+        + (", ".join(sorted(written.identified)) or "nothing")
+    )
+    return 0
+
+
+def _report_combined(combined) -> None:
+    print(
+        "  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   "
+        "kp (N.m/rad)   J from gravity   gap"
+    )
+    for index, name in enumerate(combined.joint_names):
+        print(
+            f"  {name:<16} {combined.inertia[index]:9.5f} "
+            f"{combined.damping[index]:11.4f} {combined.friction[index]:13.4f} "
+            f"{combined.stiffness[index]:14.2f} "
+            f"{combined.inertia_from_gravity[index]:16.5f} "
+            f"{combined.disagreement[index]:5.1%}"
+        )
+
+
+def _collect_poses(args, profile) -> list[Path] | None:
+    """Design a pose set, show it, and with --execute sweep at every pose.
+
+    Returns the sweep files written, or None when this was only a review.
+
+    The whole itinerary is authorized before the first move. A run that stopped
+    partway because the fifth pose was out of range would leave the arm somewhere
+    nobody chose, which is worse than not starting: the point of validating up
+    front is that the refusal costs nothing.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if not group.compensable:
+        raise ValueError(
+            f"group {group.name!r} declares no effort_controller, so torque "
+            "cannot be published for it"
+        )
+    if group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no tip_link, so its chain cannot be built"
+        )
+    if args.poses < 2:
+        raise ValueError(
+            f"--poses must be at least 2, got {args.poses}; one pose cannot "
+            "separate a joint's stiffness from its torque model"
+        )
+    if args.hold_sec <= 0 or args.duration <= 0:
+        raise ValueError("--hold-sec and --duration must be positive")
+    scales = _parse_floats(args.scales, "--scales")
+    _check_scales(np.asarray(scales, dtype=float), group)
+
+    joints = {joint.canonical: joint for joint in profile.joints}
+    limits = [joints[canonical] for canonical in group.joints]
+
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        design = design_pose_set(
+            chain.gravity_torque,
+            np.array([joint.lower for joint in limits]),
+            np.array([joint.upper for joint in limits]),
+            scales=scales,
+            poses=args.poses,
+            seed=args.seed,
+            reach=args.reach,
+        )
+        _report_design(group, design)
+
+        # Both checks before anything moves, cheapest first.
+        if design.worst_condition > MAX_CONDITION:
+            joint = group.joints[design.worst_joint]
+            raise Refused(
+                f"the designed poses do not vary {joint}'s load enough to tell "
+                f"its stiffness from its torque model: condition "
+                f"{design.worst_condition:.3g} over {MAX_CONDITION:g}. Raise "
+                "--poses or --reach, or try another --seed."
+            )
+        start = adapter.read_state()
+        _gate(profile, group, seed=start).authorize_trajectory(
+            list(design.poses), start_time_sec=0.0, period_sec=args.duration
+        )
+
+        if not args.execute:
+            print(
+                "DRY RUN: nothing moved and nothing was written. Nothing here "
+                "checks the arm against itself or its surroundings for "
+                "collision — the profile bounds each joint, not the arm — so "
+                "review the poses above in RViz, then run the same --seed with "
+                "--execute."
+            )
+            return None
+
+        written: list[Path] = []
+        rounds = [np.full(len(group.joints), scale) for scale in scales]
+        for index, pose in enumerate(design.poses):
+            print(f"\npose {index}: moving over {args.duration:g} s")
+            state = adapter.read_state()
+            gate = _gate(profile, group, seed=state)
+            points = gate.authorize_trajectory(
+                [pose], start_time_sec=0.0, period_sec=args.duration
+            )
+            adapter.send_trajectory(points, period_sec=args.duration)
+            sweep = _measure_sweep(
+                adapter, chain, gate, group, rounds, args.hold_sec, None, None
+            )
+            path = Path(args.sweep_dir) / f"pose{index}.json"
+            write_sweep(path, sweep, profile)
+            print(f"wrote {path}")
+            written.append(path)
+        return written
+
+
+def _report_design(group, design) -> None:
+    """Print the itinerary and how well it conditions each joint's fit."""
+    print(
+        f"{group.name}: {len(design.poses)} poses, scales "
+        + ",".join(f"{scale:g}" for scale in design.scales)
+    )
+    print("  " + " " * 7 + "".join(f"{canonical:>9}" for canonical in group.joints))
+    for index, pose in enumerate(design.poses):
+        print(f"  pose {index}" + "".join(f"{value:+9.3f}" for value in pose))
+    print("  cond  " + "".join(f"{value:9.1f}" for value in design.condition))
+    joint = group.joints[design.worst_joint]
+    print(f"  worst conditioned: {joint} at {design.worst_condition:.1f}")
+
+
+def _report_static(estimate, poses: int) -> None:
+    """Print the fit per joint, so a marginal one is visible as such."""
+    print(f"identify: {poses} poses, {estimate.used.max()} rounds at most per joint")
+    print(
+        "  joint            kp (N.m/rad)   alpha   offset (rad)  "
+        "residual (rad)   cond  rounds  frozen"
+    )
+    for index, name in enumerate(estimate.joint_names):
+        stiffness = estimate.stiffness[index]
+        if not np.isfinite(stiffness):
+            print(f"  {name:<16} {'—':>12}")
+            continue
+        print(
+            f"  {name:<16} {stiffness:12.2f} {estimate.torque_scale[index]:7.3f} "
+            f"{estimate.offset[index]:+14.5f} {estimate.residual_rmse[index]:15.5f} "
+            f"{estimate.condition[index]:6.1f} {estimate.used[index]:7d} "
+            f"{estimate.excluded[index]:7d}"
+        )
+    for name, reason in estimate.unidentifiable:
+        print(f"  {name}: not identified — {reason}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "pose":
+        return _pose(args)
     profile = load_builtin_profile(args.profile)
     if args.stage == "preflight":
         print(f"profile: {profile.name}")
@@ -55,73 +1881,101 @@ def main(argv: list[str] | None = None) -> int:
     elif args.stage == "collect":
         if args.amplitude_scale <= 0 or args.amplitude_scale > 1:
             raise SystemExit("--amplitude-scale must be in (0, 1]")
-        mode = "EXECUTE" if args.execute else "DRY RUN"
-        neutral = np.array([(joint.lower + joint.upper) / 2 for joint in profile.joints])
-        amplitude = np.array(
-            [(joint.upper - joint.lower) * 0.05 * args.amplitude_scale for joint in profile.joints]
-        )
-        time, command, phases = build_excitation(neutral, amplitude, profile.ros["jazzy"].command_rate_hz)
-        print(
-            f"{mode}: profile={profile.name} amplitude_scale={args.amplitude_scale} "
-            f"samples={len(time)} phases={','.join(dict.fromkeys(phases))}"
-        )
-        if args.execute:
-            print("ROS publisher backend is required; no command was published")
-            return 2
+        return _collect_track(args, profile)
     elif args.stage == "normalize":
         if not args.input or not args.output:
             raise SystemExit("--input and --output are required")
-        raw = np.load(args.input, allow_pickle=False)
-        track = normalize_track(
-            raw["command_time_ns"],
-            raw["command"],
-            raw["measured_time_ns"],
-            raw["measured"],
-            list(raw["joint_names"]),
-            profile.ros["jazzy"].command_rate_hz,
-        )
-        write_hdf5(args.output, track)
+        try:
+            raw = np.load(args.input, allow_pickle=False)
+            track = normalize_track(
+                raw["command_time_ns"],
+                raw["command"],
+                raw["measured_time_ns"],
+                raw["measured"],
+                list(raw["joint_names"]),
+                profile.endpoint().command_rate_hz,
+                max_gap_periods=args.max_gap_periods,
+            )
+            write_hdf5(args.output, track)
+        except (ArtifactError, TrackError, OSError, KeyError) as error:
+            # A missing optional extra and an unusable recording are both
+            # answers about the environment, not crashes.
+            print(f"error: {error}")
+            return UNUSABLE
         print(f"normalize: {args.output} sha256={track_sha256(track)}")
     elif args.stage == "fit":
-        if not args.track or not args.output:
-            raise SystemExit("--track and --output are required")
+        if not args.output:
+            raise SystemExit("--output is required")
+        if not args.track and not args.manifest:
+            print(
+                "error: fit needs --track, one normalized HDF5 track, or "
+                "--manifest, which fits across the runs it names"
+            )
+            return UNUSABLE
         if args.population <= 0:
             raise SystemExit("--population must be positive")
-        track = read_hdf5(args.track)
-        estimate = fit_second_order(track.timestamps_ns * 1e-9, track.command, track.measured)
+        return _fit(args, profile)
+    elif args.stage == "identify":
+        return _identify(args, profile)
+    elif args.stage == "bundle":
+        return _bundle(args, profile)
+    elif args.stage == "validate":
+        if not args.bundle:
+            raise SystemExit("--bundle is required")
+        # A bundle that cannot be read is a checked outcome, not a crash: the
+        # whole job of this stage is to say whether a bundle can be trusted.
+        try:
+            bundle = load_bundle(args.bundle, profile)
+        except (CalibrationError, OSError, ValueError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        if not args.output:
+            raise SystemExit("--output is required")
+        extra: dict = {}
+        if args.manifest is not None:
+            try:
+                metrics, extra = _score_manifest(args, profile)
+            except (FitError, TrackError, ValueError, OSError, KeyError) as error:
+                print(f"error: {error}")
+                return UNUSABLE
+        elif args.metrics is not None:
+            metrics = json.loads(args.metrics.read_text())
+        else:
+            print(
+                "error: validate needs either --metrics, a verdict computed "
+                "elsewhere, or --manifest with --fit, which scores the held-out "
+                "run itself"
+            )
+            return UNUSABLE
+        result = validate_holdout(**metrics)
         args.output.write_text(
             json.dumps(
                 {
-                    "population": args.population,
-                    "joint_names": track.joint_names,
-                    "stiffness": estimate.stiffness.tolist(),
-                    "damping": estimate.damping.tolist(),
-                    "friction": estimate.friction.tolist(),
-                    "residual_rmse": estimate.residual_rmse.tolist(),
-                    "track_sha256": track_sha256(track),
+                    "status": result.status,
+                    "failures": result.failures,
+                    "metrics": metrics,
+                    **extra,
                 },
                 indent=2,
             )
             + "\n"
         )
-        print(f"fit: {args.output}")
-    elif args.stage == "validate":
-        if not args.bundle:
-            raise SystemExit("--bundle is required")
-        bundle = load_bundle(args.bundle, profile)
-        if not args.metrics or not args.output:
-            raise SystemExit("--metrics and --output are required")
-        metrics = json.loads(args.metrics.read_text())
-        result = validate_holdout(**metrics)
-        args.output.write_text(
-            json.dumps({"status": result.status, "failures": result.failures}, indent=2) + "\n"
-        )
         print(f"validate: schema v{bundle.schema_version}, status={result.status}")
+        print(
+            "  identified parameters: "
+            + (", ".join(sorted(bundle.identified)) or "none")
+        )
+        for name, value in sorted(metrics.items()):
+            print(f"  {name}: {value:.5g}")
         return 0 if result.status == "validated" else 3
     elif args.stage == "export":
         if not args.bundle or not args.validation or not args.output:
             raise SystemExit("--bundle, --validation, and --output are required")
-        load_bundle(args.bundle, profile)
+        try:
+            load_bundle(args.bundle, profile)
+        except (CalibrationError, OSError, ValueError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
         validation = json.loads(args.validation.read_text())
         if validation.get("status") != "validated":
             print("export blocked: model_inadequate")
