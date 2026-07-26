@@ -100,6 +100,39 @@ def _validate(time: np.ndarray, values: np.ndarray, label: str, width: int) -> N
         raise TrackError(f"{label} contains non-finite values")
 
 
+#: How many command periods a stream may skip before the hole is treated as
+#: missing data rather than jitter. Best-effort QoS drops the odd message and a
+#: loop misses the odd deadline; neither should fail a run, and neither accounts
+#: for a fifth of a second.
+DEFAULT_MAX_GAP_PERIODS = 20
+
+
+def _check_gaps(
+    stamps: np.ndarray, label: str, period_ns: float, max_gap_periods: float
+) -> None:
+    """Refuse a stream with a hole in it, rather than interpolating across.
+
+    Judged against the *command* period rather than the stream's own median: a
+    recording that is uniformly eight times too slow has a perfectly consistent
+    median and still cannot support a fit at this rate.
+    """
+    if len(stamps) < 2:
+        return
+    gaps = np.diff(stamps)
+    worst = int(np.argmax(gaps))
+    largest = int(gaps[worst])
+    allowed = period_ns * max_gap_periods
+    if largest > allowed:
+        raise TrackError(
+            f"the {label} stream has a gap of {largest / 1e6:.1f} ms at "
+            f"{(stamps[worst] - stamps[0]) / 1e9:.2f} s, over the "
+            f"{allowed / 1e6:.1f} ms allowed ({max_gap_periods:g} command "
+            f"periods). Interpolating across it would draw a smooth line "
+            f"through data nobody measured. Raise max_gap_periods only if the "
+            f"{label} stream is genuinely meant to be that slow."
+        )
+
+
 def normalize_track(
     command_time_ns,
     command,
@@ -108,6 +141,7 @@ def normalize_track(
     joint_names,
     rate_hz,
     minimum_range_rad=1e-3,
+    max_gap_periods=DEFAULT_MAX_GAP_PERIODS,
 ) -> CanonicalTrack:
     command_time_ns = np.asarray(command_time_ns, dtype=np.int64)
     measured_time_ns = np.asarray(measured_time_ns, dtype=np.int64)
@@ -118,6 +152,11 @@ def normalize_track(
     _validate(measured_time_ns, measured, "measured", width)
     if rate_hz <= 0:
         raise TrackError("rate_hz must be positive")
+    if max_gap_periods <= 0:
+        raise TrackError("max_gap_periods must be positive")
+    period_ns = 1e9 / rate_hz
+    _check_gaps(command_time_ns, "command", period_ns, max_gap_periods)
+    _check_gaps(measured_time_ns, "measured", period_ns, max_gap_periods)
     ranges = np.ptp(command, axis=0)
     deficient = [joint_names[i] for i, value in enumerate(ranges) if value < minimum_range_rad]
     if deficient:

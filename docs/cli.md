@@ -847,6 +847,7 @@ track.
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--input` | *required* | `.npz` with `command_time_ns`, `command`, `measured_time_ns`, `measured`, `joint_names` |
 | `--output` | *required* | HDF5 track to write |
+| `--max-gap-periods` | `20` | Command periods a stream may skip before the hole counts as missing data |
 
 ```bash
 robotctl r2s normalize --input run.npz --output track.h5
@@ -857,6 +858,27 @@ normalize: track.h5 sha256=6f1c…
 ```
 
 The printed digest identifies the track and is carried into the fit result.
+
+### A gap is a hole, not a straight line
+
+`/joint_states` is subscribed best-effort, so messages drop, and interpolating
+between whatever samples arrived turns a dropped run into a smooth curve through
+data nobody measured. A fit cannot tell that curve from a measurement, so a gap
+longer than `--max-gap-periods` is refused:
+
+```text
+error: the measured stream has a gap of 410.0 ms at 0.49 s, over the 200.0 ms
+allowed (20 command periods). Interpolating across it would draw a smooth line
+through data nobody measured.
+```
+
+The gap is judged against the **command** period, not the stream's own median. A
+recording that is uniformly twenty-five times too slow has a perfectly consistent
+median and still cannot support a fit at this rate, and a median-relative check
+would pass it.
+
+Both streams are checked: our own publisher can stall, and that leaves the same
+hole.
 
 Writing HDF5 needs the optional extra (`pip install robot-control[hdf5]`); not
 having it exits `2` with that message rather than raising.

@@ -44,7 +44,7 @@ from .interface import CanonicalInterface
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .safety import CommandGate, SafetyError
 from .srdf import named_state, repository_root
-from .track import TrackError, normalize_track
+from .track import DEFAULT_MAX_GAP_PERIODS, TrackError, normalize_track
 
 
 DEFAULT_DURATION_SEC = 3.0
@@ -228,6 +228,13 @@ def _parser() -> argparse.ArgumentParser:
         if stage == "normalize":
             item.add_argument("--input", type=Path)
             item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--max-gap-periods",
+                type=float,
+                default=DEFAULT_MAX_GAP_PERIODS,
+                help="command periods a stream may skip before the hole counts "
+                "as missing data rather than jitter",
+            )
         if stage == "bundle":
             item.add_argument(
                 "--base", type=Path, help="schema v2 bundle to merge parameters into"
@@ -1671,6 +1678,7 @@ def main(argv: list[str] | None = None) -> int:
                 raw["measured"],
                 list(raw["joint_names"]),
                 profile.ros["jazzy"].command_rate_hz,
+                max_gap_periods=args.max_gap_periods,
             )
             write_hdf5(args.output, track)
         except (ArtifactError, TrackError, OSError, KeyError) as error:
