@@ -20,11 +20,21 @@ from .layout import repository_root
 
 # Where the bimanual SRDF lives, most-built first: the installed share
 # directory is what a sourced workspace actually uses.
+#
+# The `openarm_v1.0` entries are not an older layout to be cleaned up: the
+# vendored MoveIt configuration keeps its SRDF under a hardware-version
+# directory on some upstream branches and directly under `config/` on others,
+# and the two branches of this repository vendor different ones. A candidate
+# list is what that difference costs, rather than a distro check.
 _SRDF_CANDIDATES = (
     "ros_ws/install/openarm_bimanual_moveit_config/share/"
     "openarm_bimanual_moveit_config/config/openarm_bimanual.srdf",
+    "ros_ws/install/openarm_bimanual_moveit_config/share/"
+    "openarm_bimanual_moveit_config/config/openarm_v1.0/openarm_bimanual.srdf",
     "ros_ws/src/openarm_ros2/openarm_bimanual_moveit_config/config/"
     "openarm_bimanual.srdf",
+    "ros_ws/src/openarm_ros2/openarm_bimanual_moveit_config/config/"
+    "openarm_v1.0/openarm_bimanual.srdf",
 )
 
 
