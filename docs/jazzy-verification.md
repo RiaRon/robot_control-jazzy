@@ -209,6 +209,45 @@ Neither affects kinematics or control, and neither is caused by this branch:
   `moveit_ros_perception` is not installed. Depth-sensor octomap collision is
   therefore unavailable, as already recorded under Deferred in the design.
 
+## Gravity compensation, measured on the real right arm
+
+First real measurement of `robotctl pose gravity --sweep`, on the physical
+OpenArm right arm over `can0`, at a loaded pose. Errors are the trajectory
+controller's own `error.positions`, in radians.
+
+| scale | r_aj_1 | r_aj_2 | r_aj_3 | r_aj_4 | r_aj_5 | r_aj_6 | r_aj_7 | worst | mean |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.00 | +0.0428 | +0.2977 | +0.1509 | +0.1242 | −0.0029 | +0.0121 | −0.0433 | 0.2977 | 0.0963 |
+| 0.25 | +0.0428 | +0.2424 | +0.1204 | +0.1120 | −0.0029 | +0.0121 | −0.0425 | 0.2424 | 0.0822 |
+| 0.50 | +0.0428 | +0.1783 | +0.0922 | +0.0784 | −0.0029 | +0.0121 | −0.0391 | 0.1783 | 0.0637 |
+| 0.75 | +0.0378 | +0.1142 | +0.0678 | +0.0513 | −0.0029 | +0.0125 | −0.0391 | 0.1142 | 0.0465 |
+| 1.00 | +0.0344 | +0.0429 | +0.0331 | +0.0334 | −0.0014 | +0.0125 | −0.0395 | 0.0429 | 0.0282 |
+
+**PASS**: compensation reduces the worst joint error sevenfold, 0.2977 to 0.0429
+rad, and the mean by 3.4 times. The modelled torque at this pose was +1.09,
++5.27, +2.38, +1.55, −0.06, −0.06, −0.01 N·m over a 5.035 kg chain.
+
+Two findings the numbers make plain.
+
+**The model under-predicts the load.** Error falls monotonically all the way to
+scale 1.0 with no sign of over-compensation, so the optimum lies above 1.0.
+Extrapolating each joint's slope to zero puts it at about 1.17 for `r_aj_2`, 1.28
+for `r_aj_3`, and 1.37 for `r_aj_4` — all inside the 1.5 ceiling. That those
+three differ also means one global scale can only reach a compromise; the
+distribution of modelled torque is slightly off, not just its magnitude.
+
+**Three joints are limited by something other than gravity.** `r_aj_1`, `r_aj_6`
+and `r_aj_7` barely move across the whole sweep, and `r_aj_6` ends fractionally
+worse. Their modelled torques are −0.06 to +1.09 N·m, near nothing, yet they hold
+0.03 to 0.04 rad of error at every scale. A scale-independent residual against a
+near-zero modelled load is the signature of Coulomb friction: roughly constant in
+magnitude, opposing motion, and therefore untouched by any gravity scale. On
+`r_aj_7`, whose `kp` is 5, 0.2 N·m of stiction alone accounts for 0.04 rad.
+
+Gravity compensation cannot remove that component. A friction feedforward would
+need the sign of motion, which a stationary joint does not have, so standing
+accuracy stays the business of `pose ee --settle`.
+
 ## Defects found and fixed during this run
 
 Three defects were exposed only once the build blocker was cleared. Each was
