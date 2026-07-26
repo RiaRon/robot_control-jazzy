@@ -205,9 +205,12 @@ def test_a_static_estimate_round_trips_through_a_file(profile, tmp_path):
     write_static_estimate(
         path, original, profile, group=GROUP, noise_rad=4e-4, sources=["a" * 64]
     )
-    group, loaded = read_static_estimate(path, profile)
+    artifact = read_static_estimate(path, profile)
+    loaded = artifact.estimate
 
-    assert group == GROUP
+    assert artifact.group == GROUP
+    assert artifact.sweep_sha256 == ("a" * 64,)
+    assert artifact.noise_rad == pytest.approx(4e-4)
     assert loaded.joint_names == original.joint_names
     np.testing.assert_allclose(loaded.stiffness, original.stiffness)
     np.testing.assert_allclose(loaded.torque_scale, original.torque_scale)

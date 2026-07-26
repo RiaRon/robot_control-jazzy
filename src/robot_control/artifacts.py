@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -216,10 +217,18 @@ def write_static_estimate(
     _sign_and_write(path, payload)
 
 
-def read_static_estimate(
-    path: str | Path, profile: RobotProfile
-) -> tuple[str, StaticEstimate]:
-    """Read an identified stiffness set, returning its group and the estimate."""
+@dataclass(frozen=True)
+class StaticArtifact:
+    """A static estimate as it was stored: the numbers plus their provenance."""
+
+    group: str
+    estimate: StaticEstimate
+    noise_rad: float
+    sweep_sha256: tuple[str, ...]
+
+
+def read_static_estimate(path: str | Path, profile: RobotProfile) -> StaticArtifact:
+    """Read an identified stiffness set with the sweeps it was measured from."""
     payload = _verify(path, profile, STATIC_KIND, STATIC_SCHEMA_VERSION)
     name, names = _group_joints(payload, profile, STATIC_KIND)
 
@@ -248,7 +257,13 @@ def read_static_estimate(
         raise ArtifactError(f"malformed static estimate: {error}") from error
     if not np.all(estimate.stiffness > 0):
         raise ArtifactError("static estimate carries a stiffness that is not positive")
-    return name, estimate
+    sources = (payload.get("sources") or {}).get("sweep_sha256") or []
+    return StaticArtifact(
+        group=name,
+        estimate=estimate,
+        noise_rad=float(payload.get("noise_rad", 0.0)),
+        sweep_sha256=tuple(str(item) for item in sources),
+    )
 
 
 def write_hdf5(path: str | Path, track: CanonicalTrack) -> None:

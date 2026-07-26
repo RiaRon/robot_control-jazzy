@@ -19,13 +19,19 @@ from .artifacts import (
     write_static_estimate,
     write_sweep,
 )
-from .calibration import load_bundle
+from .calibration import (
+    CalibrationError,
+    identified_block,
+    load_bundle,
+    write_bundle,
+)
 from .identification import (
     DEFAULT_NOISE_RAD,
     MAX_CONDITION,
     MAX_INERTIA_DISAGREEMENT,
     FitError,
     GravitySweep,
+    CombinedEstimate,
     build_excitation,
     combine,
     design_pose_set,
@@ -105,6 +111,7 @@ def _parser() -> argparse.ArgumentParser:
         "normalize",
         "fit",
         "identify",
+        "bundle",
         "validate",
         "export",
     ):
@@ -202,6 +209,17 @@ def _parser() -> argparse.ArgumentParser:
             )
         if stage == "normalize":
             item.add_argument("--input", type=Path)
+            item.add_argument("--output", type=Path)
+        if stage == "bundle":
+            item.add_argument(
+                "--base", type=Path, help="schema v2 bundle to merge parameters into"
+            )
+            item.add_argument(
+                "--fit",
+                type=Path,
+                action="append",
+                help="output of r2s fit --static; pass it once per group",
+            )
             item.add_argument("--output", type=Path)
         if stage in {"validate", "export"}:
             item.add_argument("--bundle", type=Path)
@@ -1070,11 +1088,13 @@ def _fit(args, profile) -> int:
             )
             return UNUSABLE
         try:
-            name, static = read_static_estimate(args.static, profile)
+            artifact = read_static_estimate(args.static, profile)
         except ArtifactError as error:
             print(f"error: {error}")
             return UNUSABLE
-        group = profile.groups[name]
+        static = artifact.estimate
+        group = profile.groups[artifact.group]
+        name = artifact.group
         source_by_canonical = {
             joint.canonical: joint.source for joint in profile.joints
         }
@@ -1149,11 +1169,102 @@ def _fit(args, profile) -> int:
                 "inertia_from_gravity_kg_m2": combined.inertia_from_gravity.tolist(),
                 "inertia_disagreement": combined.disagreement.tolist(),
                 "torque_scale": static.torque_scale.tolist(),
+                # Carried through so r2s bundle can cite the whole chain without
+                # being handed the static estimate a second time.
+                "sweep_sha256": list(artifact.sweep_sha256),
             }
         )
 
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"fit: {args.output}")
+    return 0
+
+
+#: What a fit output must carry to be merged into a bundle. Anything less was
+#: produced without --static, so it holds ratios rather than parameters.
+_BUNDLE_KEYS = (
+    "group",
+    "inertia_kg_m2",
+    "damping_nm_s_per_rad",
+    "friction_nm",
+    "stiffness_nm_per_rad",
+    "inertia_from_gravity_kg_m2",
+    "inertia_disagreement",
+    "torque_scale",
+    "sweep_sha256",
+    "track_sha256",
+)
+
+
+def _bundle(args, profile) -> int:
+    """Merge identified parameters from one or more fits into a v2 bundle."""
+    if not args.base or not args.fit or not args.output:
+        print("error: --base, --fit and --output are required")
+        return UNUSABLE
+    try:
+        base = load_bundle(args.base, profile)
+    except (CalibrationError, OSError) as error:
+        print(f"error: {error}")
+        return UNUSABLE
+    if base.schema_version != 2:
+        print(
+            f"error: --base is schema v{base.schema_version}; only v2 may be "
+            "written, so it cannot carry identified parameters"
+        )
+        return UNUSABLE
+
+    payload = json.loads(json.dumps(base.payload))
+    payload.pop("checksum_sha256", None)
+    for path in args.fit:
+        try:
+            fit = json.loads(Path(path).read_text())
+        except (OSError, ValueError) as error:
+            print(f"error: {path}: {error}")
+            return UNUSABLE
+        missing = [key for key in _BUNDLE_KEYS if key not in fit]
+        if missing:
+            print(
+                f"error: {path} carries no {missing[0]}, so it was fitted without "
+                "--static. Its stiffness, damping and friction are ratios to an "
+                "inertia, not parameters."
+            )
+            return UNUSABLE
+        name = fit["group"]
+        if name not in payload.get("groups", {}):
+            print(f"error: {path} is for group {name!r}, which this bundle has no entry for")
+            return UNUSABLE
+        combined = CombinedEstimate(
+            joint_names=tuple(profile.groups[name].joints),
+            inertia=np.asarray(fit["inertia_kg_m2"], dtype=float),
+            damping=np.asarray(fit["damping_nm_s_per_rad"], dtype=float),
+            friction=np.asarray(fit["friction_nm"], dtype=float),
+            stiffness=np.asarray(fit["stiffness_nm_per_rad"], dtype=float),
+            inertia_from_gravity=np.asarray(
+                fit["inertia_from_gravity_kg_m2"], dtype=float
+            ),
+            disagreement=np.asarray(fit["inertia_disagreement"], dtype=float),
+        )
+        try:
+            payload["groups"][name]["identified"] = identified_block(
+                combined,
+                profile,
+                torque_scale=fit["torque_scale"],
+                sweep_sha256=fit["sweep_sha256"],
+                track_sha256=fit["track_sha256"],
+            )
+        except CalibrationError as error:
+            print(f"error: {path}: {error}")
+            return UNUSABLE
+
+    try:
+        written = write_bundle(args.output, payload, profile)
+    except CalibrationError as error:
+        print(f"refused: {error}")
+        return REFUSED
+    print(
+        f"bundle: {args.output}, identified "
+        + (", ".join(sorted(written.identified)) or "nothing")
+    )
     return 0
 
 
@@ -1348,10 +1459,18 @@ def main(argv: list[str] | None = None) -> int:
         return _fit(args, profile)
     elif args.stage == "identify":
         return _identify(args, profile)
+    elif args.stage == "bundle":
+        return _bundle(args, profile)
     elif args.stage == "validate":
         if not args.bundle:
             raise SystemExit("--bundle is required")
-        bundle = load_bundle(args.bundle, profile)
+        # A bundle that cannot be read is a checked outcome, not a crash: the
+        # whole job of this stage is to say whether a bundle can be trusted.
+        try:
+            bundle = load_bundle(args.bundle, profile)
+        except (CalibrationError, OSError, ValueError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
         if not args.metrics or not args.output:
             raise SystemExit("--metrics and --output are required")
         metrics = json.loads(args.metrics.read_text())
@@ -1360,11 +1479,19 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps({"status": result.status, "failures": result.failures}, indent=2) + "\n"
         )
         print(f"validate: schema v{bundle.schema_version}, status={result.status}")
+        print(
+            "  identified parameters: "
+            + (", ".join(sorted(bundle.identified)) or "none")
+        )
         return 0 if result.status == "validated" else 3
     elif args.stage == "export":
         if not args.bundle or not args.validation or not args.output:
             raise SystemExit("--bundle, --validation, and --output are required")
-        load_bundle(args.bundle, profile)
+        try:
+            load_bundle(args.bundle, profile)
+        except (CalibrationError, OSError, ValueError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
         validation = json.loads(args.validation.read_text())
         if validation.get("status") != "validated":
             print("export blocked: model_inadequate")

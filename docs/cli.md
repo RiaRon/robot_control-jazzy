@@ -972,6 +972,48 @@ is what says whether to add a pose or to free a stuck joint.
 asset, a tampered file, or sweeps covering different groups; `3` fewer than two
 `--sweep` files, or at least one joint could not be identified.
 
+## `robotctl r2s bundle`
+
+Merge identified parameters into a schema v2 calibration bundle.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--profile` | `openarm_tesollo` | Built-in profile to load |
+| `--base` | *required* | Schema v2 bundle to merge into |
+| `--fit` | *required* | Output of `r2s fit --static`; pass it once per group |
+| `--output` | *required* | Bundle to write |
+
+```bash
+robotctl r2s bundle --base bundle.json --fit right.json --fit left.json --output identified.json
+```
+
+Each group gains an `identified` block beside its `nominal` one. They are
+different kinds of number: `nominal` is one guess per group, `identified` is one
+measured value per joint, so it carries the sweeps and the track it came from and
+the cross-check it survived.
+
+A fit produced without `--static` is refused. Its stiffness, damping and friction
+are ratios to an inertia rather than parameters, and nothing downstream would be
+able to tell.
+
+### `fitted_against`, and why it is not redundant
+
+The block records the profile, asset and manifest hash it was **measured on**,
+beside the header saying what the bundle **claims to be**. That looks like the
+same information twice, and it is exactly the check a checksum cannot do: the
+checksum is recomputed on write, so it signs a block pasted from another robot's
+bundle just as happily. `load_bundle` refuses a mismatch, so `validate` and
+`export` both refuse it.
+
+Also refused: a block whose joint names are not the group's, an array that is not
+one finite value per joint, a non-positive inertia or stiffness, a negative
+damping or friction, and a block with no provenance — a number with no source is
+not a measurement.
+
+**Exit codes:** `0` written; `2` a missing path, a base bundle that cannot be
+read, a base that is not schema v2, a fit without `--static`, or a fit for a
+group the bundle has no entry for; `3` a parameter the bundle refuses to carry.
+
 ## `robotctl r2s validate`
 
 Check holdout metrics against the acceptance thresholds.
@@ -989,10 +1031,15 @@ robotctl r2s validate --bundle bundle.json --metrics holdout.json --output verdi
 
 ```text
 validate: schema v2, status=validated
+  identified parameters: openarm_left_arm, openarm_right_arm
 ```
 
-**Exit codes:** `0` validated; `3` the model is inadequate; `SystemExit` for a
-missing path.
+Loading the bundle is itself part of the verdict, so a bundle that cannot be read
+— a bad checksum, the wrong asset, or identified parameters fitted against
+another robot — exits `2` with the reason rather than raising.
+
+**Exit codes:** `0` validated; `2` the bundle could not be read; `3` the model is
+inadequate; `SystemExit` for a missing path.
 
 ## `robotctl r2s export`
 
@@ -1009,8 +1056,12 @@ Export a validated bundle. Refuses anything not already validated.
 robotctl r2s export --bundle bundle.json --validation verdict.json --output release.json
 ```
 
-**Exit codes:** `0` exported; `3` the verdict is not `validated`; `SystemExit`
-for a missing path.
+The bundle is copied byte for byte, so anything `load_bundle` accepted travels
+with it — including a group's `identified` block and its provenance. The bundle is
+re-read before the copy, so the same refusals that stop `validate` stop an export.
+
+**Exit codes:** `0` exported; `2` the bundle could not be read; `3` the verdict is
+not `validated`; `SystemExit` for a missing path.
 
 ---
 
