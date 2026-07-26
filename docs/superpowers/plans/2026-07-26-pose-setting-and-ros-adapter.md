@@ -32,7 +32,7 @@
 - Produces: `Group.controller: str | None` and `Group.moveit_group: str | None`
 - Produces: `RobotProfile.executable_groups() -> dict[str, Group]`
 
-- [ ] **Step 1: Write failing group-contract tests**
+- [x] **Step 1: Write failing group-contract tests**
 
 Assert that `openarm_right_arm` resolves to controller
 `right_joint_trajectory_controller` and MoveIt group `right_arm`, that
@@ -41,19 +41,19 @@ controller but no `moveit_group`, and that a group with neither is absent from
 `executable_groups()`. Assert that every declared controller joint set is a
 subset of the group's canonical joints.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_profile.py -k group_contract`
 
 Expected: FAIL because `Group` has no `controller` or `moveit_group` field.
 
-- [ ] **Step 3: Add the optional fields and accessor**
+- [x] **Step 3: Add the optional fields and accessor**
 
 Extend `Group` with the two optional fields, parse them in `load_profile`, and
 add `executable_groups()` returning only groups that declare a controller.
 Reject a profile that names a `moveit_group` without a `controller`.
 
-- [ ] **Step 4: Declare the mapping for OpenArm and Tesollo**
+- [x] **Step 4: Declare the mapping for OpenArm and Tesollo**
 
 In `openarm_tesollo.yaml`, give `openarm_right_arm` controller
 `right_joint_trajectory_controller` and MoveIt group `right_arm`,
@@ -61,13 +61,13 @@ In `openarm_tesollo.yaml`, give `openarm_right_arm` controller
 `left_gripper_controller`, and each Tesollo group controller
 `joint_trajectory_controller` with no `moveit_group`.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_profile.py tests/test_interface.py`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/robot_control/profile.py src/robot_control/profiles/openarm_tesollo.yaml tests/test_profile.py
@@ -83,7 +83,7 @@ git commit -m "feat: declare executable group contract in the profile"
 **Interfaces:**
 - Produces: `CommandGate.authorize_trajectory(points: Sequence[np.ndarray], start_time_sec: float, period_sec: float) -> list[np.ndarray]`
 
-- [ ] **Step 1: Write failing trajectory-authorization tests**
+- [x] **Step 1: Write failing trajectory-authorization tests**
 
 Assert that a trajectory whose every waypoint is in bounds returns all
 waypoints; that a trajectory with one out-of-bounds waypoint raises
@@ -92,26 +92,26 @@ waypoints; that a trajectory with one out-of-bounds waypoint raises
 violating the velocity limit between two adjacent waypoints is rejected; and
 that an empty trajectory is rejected.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_safety.py -k trajectory`
 
 Expected: FAIL because `authorize_trajectory` does not exist.
 
-- [ ] **Step 3: Implement all-or-nothing authorization**
+- [x] **Step 3: Implement all-or-nothing authorization**
 
 Validate every waypoint against position and velocity limits on a copy of the
 gate state, and commit `_last` and `_last_time` only after the whole trajectory
 passes. Preserve the existing `execute` and E-stop refusals. Reject an empty
 trajectory.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_safety.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/robot_control/safety.py tests/test_safety.py
@@ -131,7 +131,7 @@ git commit -m "feat: authorize whole trajectories all-or-nothing"
 - Produces: `RosAdapter.send_trajectory(points, period_sec) -> None`
 - Produces: `AdapterUnavailable(RuntimeError)`
 
-- [ ] **Step 1: Write failing adapter tests with an injected ROS backend**
+- [x] **Step 1: Write failing adapter tests with an injected ROS backend**
 
 Design `RosAdapter` to take an injected backend object so the tests need no
 running ROS. Assert that constructing with `execute=False` raises
@@ -141,13 +141,13 @@ order and sign; that `solve_ik` converts an IK solution keyed by source names
 into canonical order; that `solve_ik` raises when the service reports a failure
 code; and that `send_trajectory` targets the controller declared by the group.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_ros_adapter.py`
 
 Expected: FAIL because `robot_control.ros_adapter` does not exist.
 
-- [ ] **Step 3: Implement the adapter**
+- [x] **Step 3: Implement the adapter**
 
 Import `rclpy` and the message packages inside the constructor, raising
 `AdapterUnavailable` on `ImportError`. Resolve the controller and MoveIt group
@@ -156,7 +156,7 @@ from the profile. Convert through `CanonicalInterface` in both directions. Use
 `/compute_fk`; a synchronous `call` from an unspun node deadlocks. Send
 trajectories through the `FollowJointTrajectory` action.
 
-- [ ] **Step 4: Confirm the core package still imports without rclpy**
+- [x] **Step 4: Confirm the core package still imports without rclpy**
 
 Run:
 
@@ -167,7 +167,7 @@ PYTHONPATH=src:. pytest -q tests/test_ros_adapter.py
 
 Expected: both PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/robot_control/ros_adapter.py tests/test_ros_adapter.py
@@ -183,7 +183,7 @@ git commit -m "feat: add optional ROS adapter for canonical execution"
 **Interfaces:**
 - Produces: `robotctl pose show|joints|ee|rviz`
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Assert that `pose joints --group openarm_right_arm --values ...` without
 `--execute` prints the resolved canonical target and exits 0 without importing
@@ -193,13 +193,13 @@ exits 2; that `--named` rejects a state absent from the SRDF; that `pose ee`
 requires `--xyz`; and that `--relative` is rejected when no current pose can be
 read.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_cli.py -k pose`
 
 Expected: FAIL because the `pose` subcommand does not exist.
 
-- [ ] **Step 3: Implement the subcommand**
+- [x] **Step 3: Implement the subcommand**
 
 Add `pose` with the four sub-stages. Keep `--dry-run` the default and require
 `--execute` to publish. Import `ros_adapter` lazily and only when the command
@@ -207,13 +207,13 @@ needs ROS, so dry-run paths stay importable without `rclpy`. Map exit codes to
 the existing convention: `2` for a missing backend or an unusable request, `3`
 for an IK failure or a gate rejection.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_cli.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/robot_control/cli.py tests/test_cli.py
@@ -230,7 +230,7 @@ git commit -m "feat: add robotctl pose command surface"
 **Interfaces:**
 - Produces: `ros_ws/pose_bringup.sh` launching the bimanual MoveIt stack with `use_fake_hardware:=true`
 
-- [ ] **Step 1: Write failing bringup tests**
+- [x] **Step 1: Write failing bringup tests**
 
 Using a fake `ros2` executable that records its arguments, assert that the
 wrapper passes `use_fake_hardware:=true` by default; that `--real` is required
@@ -239,25 +239,25 @@ to pass `use_fake_hardware:=false` and additionally requires explicit
 before invoking `ros2`; and that a missing workspace `install/setup.bash` exits
 2.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_pose_bringup.py`
 
 Expected: FAIL because `ros_ws/pose_bringup.sh` does not exist.
 
-- [ ] **Step 3: Implement the wrapper**
+- [x] **Step 3: Implement the wrapper**
 
 Use Bash strict mode. Clear `set -eu` only across the workspace `source`, as
 `ros_ws/smoke_harness.sh` already does, because colcon and ament setup files
 read `COLCON_TRACE` and `AMENT_TRACE_SETUP_FILES` with no default. Invert the
 vendor default so fake hardware is what an operator gets by omission.
 
-- [ ] **Step 4: Document the operator flow**
+- [x] **Step 4: Document the operator flow**
 
 Add a README section covering launch, dragging the RViz end-effector marker,
 reading the pose back, and committing it, with a pointer to `docs/cli.md`.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 PYTHONPATH=src:. pytest -q tests/test_pose_bringup.py
@@ -266,7 +266,7 @@ bash -n ros_ws/pose_bringup.sh
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add ros_ws/pose_bringup.sh tests/test_pose_bringup.py README.md
@@ -283,20 +283,20 @@ git commit -m "build: add fake-by-default pose bringup wrapper"
 - Produces: `docs/cli.md` covering every `robotctl` command
 - Produces: a test that fails when the parser and the document diverge
 
-- [ ] **Step 1: Write the failing documentation test**
+- [x] **Step 1: Write the failing documentation test**
 
 Walk the `argparse` parser built by `robot_control.cli._parser()`, collect
 every subcommand path and every option string, and assert each appears in
 `docs/cli.md`. Assert the document contains an exit-code table and that no
 example uses `--execute` without an accompanying safety note.
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_cli_documentation.py`
 
 Expected: FAIL because `docs/cli.md` does not exist.
 
-- [ ] **Step 3: Write the document**
+- [x] **Step 3: Write the document**
 
 Open with the interactive operator flow end to end. Then document `pose show`,
 `pose joints`, `pose ee`, `pose rviz`, and each existing `r2s` stage
@@ -307,13 +307,13 @@ section covering the missing-adapter error, IK failure, gate rejection, and the
 stale-process symptom in which a leftover launch makes a validator report
 another robot's joints as extra joints.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `PYTHONPATH=src:. pytest -q tests/test_cli_documentation.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/cli.md tests/test_cli_documentation.py
@@ -331,19 +331,19 @@ git commit -m "docs: document every robotctl command"
 - Consumes: `ros_ws/pose_bringup.sh` and `robotctl pose`
 - Produces: a recorded pose-setting verification result
 
-- [ ] **Step 1: Add the pose smoke script**
+- [x] **Step 1: Add the pose smoke script**
 
 Reuse `ros_ws/smoke_harness.sh`. Launch the bimanual stack with fake hardware,
 run `robotctl pose ee --group openarm_right_arm --relative --xyz 0,0,0.03
 --execute`, and assert the measured end-effector pose converges within
 tolerance. Keep the displacement bounded exactly as the existing smoke plans do.
 
-- [ ] **Step 2: Extend the harness tests**
+- [x] **Step 2: Extend the harness tests**
 
 Add the new script to `SMOKE_SCRIPTS` so it inherits the existing non-Jazzy
 rejection, signal-teardown, and setup-sourcing regression coverage.
 
-- [ ] **Step 3: Run the full static suite**
+- [x] **Step 3: Run the full static suite**
 
 ```bash
 PYTHONPATH=src:. pytest -q
@@ -353,7 +353,7 @@ bash -n ros_ws/pose_bringup.sh ros_ws/smoke_pose_openarm.sh
 
 Expected: PASS.
 
-- [ ] **Step 4: Run every smoke test from a clean process table**
+- [x] **Step 4: Run every smoke test from a clean process table**
 
 Run the four smoke scripts one at a time, killing leftover `ros2 launch`,
 `gz sim`, `robot_state_publisher`, and `parameter_bridge` processes between
@@ -362,13 +362,13 @@ validator report the other robot's joints as extra joints.
 
 Expected: four `smoke test passed` results.
 
-- [ ] **Step 5: Re-verify vendor provenance**
+- [x] **Step 5: Re-verify vendor provenance**
 
 Run the four pinned verification commands from `docs/jazzy-verification.md`.
 
 Expected: four `snapshot verified` results.
 
-- [ ] **Step 6: Record and commit**
+- [x] **Step 6: Record and commit**
 
 Append a pose-setting section to `docs/jazzy-verification.md` with the exact
 commands, statuses, and evidence.
