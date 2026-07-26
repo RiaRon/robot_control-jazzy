@@ -78,7 +78,13 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     end_effector = stages.add_parser("ee", help="set a group by end-effector pose")
     end_effector.add_argument("--profile", default="openarm_tesollo")
     end_effector.add_argument("--group", required=True)
-    end_effector.add_argument("--xyz", required=True, help="x,y,z in metres")
+    where = end_effector.add_mutually_exclusive_group(required=True)
+    where.add_argument("--xyz", help="x,y,z in metres")
+    where.add_argument(
+        "--from-marker",
+        action="store_true",
+        help="take the target from the RViz end-effector marker you dragged",
+    )
     end_effector.add_argument("--rpy", help="roll,pitch,yaw in radians")
     end_effector.add_argument(
         "--relative",
@@ -270,20 +276,29 @@ def _pose_ee(args, profile) -> int:
             "end-effector pose; set it with pose joints --values instead"
         )
     interface = CanonicalInterface(profile)
-    xyz = _parse_floats(args.xyz, "--xyz")
-    if len(xyz) != 3:
-        raise ValueError(f"--xyz needs exactly three values, got {len(xyz)}")
-    rpy = None
-    if args.rpy is not None:
-        rpy = _parse_floats(args.rpy, "--rpy")
-        if len(rpy) != 3:
-            raise ValueError(f"--rpy needs exactly three values, got {len(rpy)}")
+    xyz, rpy = None, None
+    if args.from_marker:
+        # The marker carries a full pose already, so anything that modifies a
+        # typed one would move the arm somewhere the operator never saw.
+        for name, given in (("--relative", args.relative), ("--rpy", args.rpy)):
+            if given:
+                raise ValueError(f"{name} cannot be combined with --from-marker")
+    else:
+        xyz = _parse_floats(args.xyz, "--xyz")
+        if len(xyz) != 3:
+            raise ValueError(f"--xyz needs exactly three values, got {len(xyz)}")
+        if args.rpy is not None:
+            rpy = _parse_floats(args.rpy, "--rpy")
+            if len(rpy) != 3:
+                raise ValueError(f"--rpy needs exactly three values, got {len(rpy)}")
 
     # Even a dry run needs move_group: IK is a service, with no offline form.
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         current = adapter.read_pose()
         seed = adapter.read_state()
-        if args.relative:
+        if args.from_marker:
+            target = adapter.read_marker_pose()
+        elif args.relative:
             target = current.translated(xyz)
             if rpy is not None:
                 roll, pitch, yaw = (a + b for a, b in zip(current.rpy, rpy))

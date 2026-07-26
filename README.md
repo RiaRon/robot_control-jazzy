@@ -60,9 +60,22 @@ source ros_ws/install/setup.bash
 export PYTHONPATH="src:.:$PYTHONPATH"       # append; assigning hides rclpy
 
 robotctl pose show  --group openarm_right_arm
-robotctl pose ee    --group openarm_right_arm --relative --xyz 0,0,0.03
+robotctl pose ee    --group openarm_right_arm --from-marker            # dry run
+robotctl pose ee    --group openarm_right_arm --from-marker --execute  # arm moves
 robotctl pose ee    --group openarm_right_arm --relative --xyz 0,0,0.03 --execute
 robotctl pose joints --group openarm_right_arm --named home --execute
+```
+
+`--from-marker` reads the goal straight out of RViz, which is what makes
+dragging usable: RViz's own Execute button cannot drive this robot, because
+the vendored `joint_limits.yaml` declares no acceleration limits and Jazzy's
+default planning pipeline requires them.
+
+`robotctl` only exists once the package is installed. Running it from a source
+checkout without installing is simpler, and avoids a virtualenv hiding `rclpy`:
+
+```bash
+alias robotctl='python3 -m robot_control.cli'
 ```
 
 `pose_bringup.sh` inverts the vendor default: `demo.launch.py` defaults

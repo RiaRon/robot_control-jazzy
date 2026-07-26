@@ -66,12 +66,14 @@ ros:
 class RecordingBackend:
     """Stands in for rclpy, recording what the adapter would put on the wire."""
 
-    def __init__(self, states=None, ik=None, fk=None):
+    def __init__(self, states=None, ik=None, fk=None, marker=None):
         self.states = dict(states or {"arm_1": 0.1, "arm_2": -0.2, "hand_1": 0.3})
         self._ik = ik if ik is not None else (MOVEIT_SUCCESS, {})
         self._fk = fk if fk is not None else (MOVEIT_SUCCESS, Pose((1.0, 2.0, 3.0), NEUTRAL))
+        self._marker = marker
         self.ik_requests = []
         self.fk_requests = []
+        self.marker_requests = []
         self.trajectories = []
         self.gripper_goals = []
         self.closed = False
@@ -82,6 +84,10 @@ class RecordingBackend:
     def compute_fk(self, link, seed, frame_id, timeout_sec):
         self.fk_requests.append((link, dict(seed), frame_id))
         return self._fk
+
+    def marker_pose(self, name, timeout_sec):
+        self.marker_requests.append(name)
+        return self._marker
 
     def compute_ik(self, group, link, pose, seed, timeout_sec):
         self.ik_requests.append((group, link, pose, dict(seed)))
@@ -117,6 +123,40 @@ def test_adapter_reads_without_execute_but_refuses_to_send(profile):
     with pytest.raises(SafetyError, match="--execute"):
         adapter.send_trajectory([np.array([0.1, 0.2])], period_sec=0.5)
     assert backend.trajectories == []
+
+
+def test_marker_pose_reads_the_goal_the_operator_dragged(profile):
+    """The RViz goal marker is a pose source like any other.
+
+    MoveIt names the interactive marker after the end effector's parent link,
+    so the adapter asks for the marker belonging to this group's tip rather
+    than taking whichever marker the panel happens to be showing.
+    """
+    dragged = Pose((0.4, 0.1, 0.2), NEUTRAL, "world")
+    backend = RecordingBackend(marker=dragged)
+
+    pose = RosAdapter(profile, "arm", execute=False, backend=backend).read_marker_pose()
+
+    assert pose == dragged
+    assert backend.marker_requests == ["EE:goal_arm_tip"]
+
+
+def test_marker_pose_says_which_marker_is_missing(profile):
+    """A missing marker is a live RViz showing a different planning group.
+
+    The panel only publishes a marker for the group it is set to, so the fix
+    is a change in RViz, and the error has to say so.
+    """
+    backend = RecordingBackend(marker=None)
+
+    with pytest.raises(AdapterUnavailable, match="EE:goal_arm_tip"):
+        RosAdapter(profile, "arm", execute=False, backend=backend).read_marker_pose()
+
+
+def test_marker_pose_refuses_a_group_with_no_planning_group(profile):
+    """No tip link means no end-effector marker to read."""
+    with pytest.raises(ValueError, match="no planning group"):
+        RosAdapter(profile, "hand", execute=False, backend=RecordingBackend()).read_marker_pose()
 
 
 def test_gripper_send_also_requires_execute(profile):

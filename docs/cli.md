@@ -272,7 +272,8 @@ Move a group so its end-effector reaches a pose, solving IK through
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--group` | *required* | Group to move; must have a planning group |
-| `--xyz` | *required* | `x,y,z` in metres |
+| `--xyz` | *one of these two* | `x,y,z` in metres |
+| `--from-marker` | *one of these two* | Take the target from the RViz marker you dragged |
 | `--rpy` | keep current | `roll,pitch,yaw` in radians |
 | `--relative` | off | Treat `--xyz` and `--rpy` as an offset from the current pose |
 | `--duration` | `3.0` | Seconds allowed for the move |
@@ -309,9 +310,42 @@ IK runs with collision avoidance on. The solution is then checked against the
 profile limits as a whole trajectory: if any waypoint is out of bounds the
 entire motion is discarded rather than truncated.
 
+### Reaching the pose you dragged in RViz
+
+`--from-marker` reads the goal marker straight out of RViz, which is what makes
+dragging usable given that RViz's own Execute button cannot drive this robot.
+Drag the marker to where you want the tool centre point, then:
+
+```bash
+robotctl pose ee --group openarm_right_arm --from-marker
+# --execute publishes the trajectory and the arm moves to the dragged pose:
+robotctl pose ee --group openarm_right_arm --from-marker --execute
+```
+
+The pose comes from `get_interactive_markers` on the MotionPlanning display's
+own marker server, asking for the marker MoveIt names after this group's tip
+link — `EE:goal_openarm_right_hand_tcp`. Querying the server rather than
+listening to the marker's `feedback` topic matters: feedback is published only
+while a drag is in progress, so a listener would be racing the operator's
+mouse, while the server holds the pose after the drag ends.
+
+The marker is an absolute pose in `world`, so `--from-marker` refuses `--rpy`
+and `--relative`; modifying it would move the arm somewhere that was never on
+screen.
+
+RViz publishes a marker only for the planning group the panel is currently set
+to. Asking for a group it is not showing reports which marker was missing:
+
+```text
+unavailable: RViz is running but holds no marker named
+'EE:goal_openarm_right_hand_tcp'; set the MotionPlanning panel's planning group
+to 'right_arm' so it publishes one
+```
+
 **Exit codes:** `0` solved and sent or printed; `2` unknown group, group with
-no planning group, malformed `--xyz` or `--rpy`, or no adapter; `3` no IK
-solution, or refused by the safety gate.
+no planning group, malformed `--xyz` or `--rpy`, `--from-marker` combined with
+`--rpy` or `--relative`, no adapter, or no marker to read; `3` no IK solution,
+or refused by the safety gate.
 
 ## `robotctl pose rviz`
 

@@ -100,10 +100,34 @@ def test_pose_joints_named_state_can_violate_the_profile_limits(capsys):
     assert "position limit" in capsys.readouterr().out
 
 
-def test_pose_ee_requires_xyz():
+def test_pose_ee_requires_a_target():
     with pytest.raises(SystemExit) as exit_info:
         main(["pose", "ee", *RIGHT_ARM])
     assert exit_info.value.code == 2
+
+
+def test_pose_ee_rejects_both_a_typed_and_a_dragged_target():
+    """--from-marker is a whole pose, so it cannot be combined with --xyz."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["pose", "ee", *RIGHT_ARM, "--xyz", "0,0,0.03", "--from-marker"])
+    assert exit_info.value.code == 2
+
+
+def test_pose_ee_from_marker_rejects_relative(no_ros, capsys):
+    """The marker already carries an absolute pose; an offset from it is a
+    request for something the operator cannot see on screen."""
+    assert main(["pose", "ee", *RIGHT_ARM, "--from-marker", "--relative"]) == 2
+    assert "--relative" in capsys.readouterr().out
+
+
+def test_pose_ee_from_marker_rejects_rpy(no_ros, capsys):
+    assert main(["pose", "ee", *RIGHT_ARM, "--from-marker", "--rpy", "0,0,0"]) == 2
+    assert "--rpy" in capsys.readouterr().out
+
+
+def test_pose_ee_from_marker_needs_ros(no_ros, capsys):
+    assert main(["pose", "ee", *RIGHT_ARM, "--from-marker"]) == 2
+    assert "rclpy" in capsys.readouterr().out
 
 
 def test_pose_ee_needs_ros_even_for_a_dry_run(no_ros, capsys):

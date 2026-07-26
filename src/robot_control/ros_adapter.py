@@ -31,6 +31,15 @@ from .safety import SafetyError
 MOVEIT_SUCCESS = 1
 DEFAULT_TIMEOUT_SEC = 10.0
 
+# MoveIt's RobotInteraction names each end-effector marker after the parent
+# link of the SRDF end effector, which is why tip_link has to be that same link.
+MARKER_PREFIX = "EE:goal_"
+# The interactive marker server lives inside the RViz MotionPlanning display.
+MARKER_SERVICE = (
+    "/rviz_moveit_motion_planning_display"
+    "/robot_interaction_interactive_marker_topic/get_interactive_markers"
+)
+
 
 class AdapterUnavailable(RuntimeError):
     """ROS is not installed, not running, or not answering."""
@@ -188,6 +197,25 @@ class RosAdapter:
             )
         return pose
 
+    def read_marker_pose(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Pose:
+        """Return the pose of the RViz goal marker for this group's tip link.
+
+        RViz's own Plan & Execute cannot drive this robot, so the marker is a
+        way to *choose* a pose rather than to reach one. Reading it here lets
+        an operator aim by dragging and commit through the same gate as every
+        other command.
+        """
+        tip = self._require_planning_group()
+        name = f"{MARKER_PREFIX}{tip}"
+        pose = self._backend.marker_pose(name, timeout_sec)
+        if pose is None:
+            raise AdapterUnavailable(
+                f"RViz is running but holds no marker named {name!r}; set the "
+                f"MotionPlanning panel's planning group to "
+                f"{self.group.moveit_group!r} so it publishes one"
+            )
+        return pose
+
     def solve_ik(
         self,
         pose: Pose,
@@ -278,6 +306,7 @@ class _RclpyBackend:
             from sensor_msgs.msg import JointState
             from std_msgs.msg import Header
             from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+            from visualization_msgs.srv import GetInteractiveMarkers
         except ImportError as error:
             raise AdapterUnavailable(
                 "the ROS adapter needs rclpy and the MoveIt message packages; "
@@ -294,6 +323,7 @@ class _RclpyBackend:
         self._PoseMsg, self._PoseStamped = PoseMsg, PoseStamped
         self._Quaternion, self._Point = Quaternion, Point
         self._GetPositionFK, self._GetPositionIK = GetPositionFK, GetPositionIK
+        self._GetInteractiveMarkers = GetInteractiveMarkers
         self._JointState, self._Header = JointState, Header
         self._JointTrajectory = JointTrajectory
         self._JointTrajectoryPoint = JointTrajectoryPoint
@@ -308,6 +338,7 @@ class _RclpyBackend:
         self._latest: dict[str, float] | None = None
         self._fk_client = None
         self._ik_client = None
+        self._marker_client = None
 
     def close(self) -> None:
         self._node.destroy_node()
@@ -407,6 +438,35 @@ class _RclpyBackend:
             zip(response.solution.joint_state.name, response.solution.joint_state.position)
         )
         return (response.error_code.val, solution)
+
+    def marker_pose(self, name: str, timeout_sec: float) -> Pose | None:
+        if self._marker_client is None:
+            self._marker_client = self._node.create_client(
+                self._GetInteractiveMarkers, MARKER_SERVICE
+            )
+        if not self._marker_client.wait_for_service(timeout_sec=timeout_sec):
+            raise AdapterUnavailable(
+                f"{MARKER_SERVICE} is not available; the marker lives in RViz, "
+                "so start the bringup with RViz (ros_ws/pose_bringup.sh)"
+            )
+        # Asking the server beats listening for feedback: feedback is published
+        # only while a drag is in progress, so a poll would have to be racing
+        # the operator's mouse. The server holds the pose after the drag ends.
+        response = self._resolve(
+            self._marker_client.call_async(self._GetInteractiveMarkers.Request()),
+            timeout_sec,
+            MARKER_SERVICE,
+        )
+        for marker in response.markers:
+            if marker.name != name:
+                continue
+            position, orientation = marker.pose.position, marker.pose.orientation
+            return Pose(
+                (position.x, position.y, position.z),
+                (orientation.x, orientation.y, orientation.z, orientation.w),
+                marker.header.frame_id,
+            )
+        return None
 
     def follow_joint_trajectory(
         self,
