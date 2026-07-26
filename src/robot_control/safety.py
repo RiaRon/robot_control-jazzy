@@ -12,11 +12,31 @@ class SafetyError(RuntimeError):
 
 @dataclass
 class CommandGate:
+    """Bounds every command that reaches a controller.
+
+    Two contracts, deliberately different, because discrete commands and a
+    servo stream want opposite failure modes:
+
+    ``authorize`` and ``authorize_trajectory`` **refuse**. A discrete command
+    that breaks a limit was a mistake, and silently moving the robot somewhere
+    adjacent to what was asked hides it.
+
+    ``follow`` **clamps and reports**. An operator dragging a marker faster than
+    the arm can move is not making a mistake, and aborting the session on the
+    first quick flick would make servoing unusable. The step is limited, and
+    what limited it is returned so the caller can say so.
+
+    ``effort`` is optional: a gate built for position commands has no torque to
+    bound, and asking it to authorize one is a programming error rather than a
+    limit violation.
+    """
+
     execute: bool
     lower: np.ndarray
     upper: np.ndarray
     velocity: np.ndarray
     command_period_sec: float
+    effort: np.ndarray | None = None
     watchdog_sec: float = 0.25
     _last: np.ndarray | None = field(default=None, init=False)
     _last_time: float | None = field(default=None, init=False)
@@ -84,6 +104,68 @@ class CommandGate:
         self._last = points[-1].copy()
         self._last_time = start_time_sec + len(points) * period_sec
         return points
+
+    def follow(
+        self,
+        target: np.ndarray,
+        measured: np.ndarray,
+        elapsed_sec: float,
+    ) -> tuple[np.ndarray, str | None]:
+        """Step from *measured* towards *target*, within the limits.
+
+        Returns the command and, if anything bounded it, a phrase naming what.
+        The step is budgeted from the *measured* pose rather than from the last
+        command on purpose: these arms sit behind their command by the droop
+        their impedance control needs to hold position, so budgeting from the
+        command would let the real movement exceed the velocity limit by that
+        standing error.
+        """
+        self._refuse_if_closed()
+        target = np.asarray(target, dtype=float)
+        measured = np.asarray(measured, dtype=float)
+        for values, name in ((target, "target"), (measured, "measured pose")):
+            if values.shape != self.lower.shape or not np.isfinite(values).all():
+                raise SafetyError(f"invalid {name} shape or value")
+        if not np.isfinite(elapsed_sec) or elapsed_sec < 0:
+            raise SafetyError("elapsed time must be finite and not negative")
+
+        limited: list[str] = []
+        permitted = self.velocity * max(elapsed_sec, self.command_period_sec)
+        step = np.clip(target - measured, -permitted, permitted)
+        if np.any(np.abs(target - measured) > permitted + 1e-12):
+            limited.append("velocity")
+
+        command = measured + step
+        clamped = np.clip(command, self.lower, self.upper)
+        if np.any(clamped != command):
+            limited.append("position")
+        command = clamped
+
+        # _last is updated so hold_pose still names something safe, but not
+        # _last_time: follow is given an interval, not a clock, and feeding the
+        # watchdog from here would let a stalled stream look alive.
+        self._last = command.copy()
+        return command, (" and ".join(limited) + " limit" if limited else None)
+
+    def authorize_effort(self, effort: np.ndarray) -> np.ndarray:
+        """Authorize feedforward torque against the profile's effort limits.
+
+        Refused rather than clamped, unlike a servo step. Torque is not a
+        request to be somewhere, it is a force: too much does not put the arm in
+        the wrong place, it accelerates it out of the place it was holding.
+        """
+        self._refuse_if_closed()
+        if self.effort is None:
+            raise SafetyError(
+                "no effort limit is configured for this gate; build it with "
+                "the profile's effort bounds before commanding torque"
+            )
+        effort = np.asarray(effort, dtype=float)
+        if effort.shape != self.effort.shape or not np.isfinite(effort).all():
+            raise SafetyError("invalid effort shape or value")
+        if np.any(np.abs(effort) > self.effort + 1e-12):
+            raise SafetyError("effort limit exceeded")
+        return effort
 
     def _refuse_if_closed(self) -> None:
         if not self.execute:

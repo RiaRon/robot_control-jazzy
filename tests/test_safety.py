@@ -170,3 +170,128 @@ def test_estop_returns_last_safe_pose_hold():
     assert gate.hold_pose().tolist() == [0.25]
     with pytest.raises(SafetyError, match="E-stop"):
         gate.authorize(np.array([0.0]), now_sec=0.1)
+
+
+def _streaming_gate(**overrides) -> CommandGate:
+    """A two-joint gate for the streaming tests."""
+    settings = dict(
+        execute=True,
+        lower=np.array([-1.0, -1.0]),
+        upper=np.array([1.0, 1.0]),
+        velocity=np.array([2.0, 2.0]),
+        effort=np.array([10.0, 10.0]),
+        command_period_sec=0.01,
+    )
+    settings.update(overrides)
+    return CommandGate(**settings)
+
+
+def test_follow_clamps_a_fast_target_instead_of_refusing_it():
+    """Servoing cannot refuse: an operator flicking the marker faster than the
+    arm can move would abort the session on the first quick drag. So follow()
+    steps as far as the velocity limit allows and says that it did."""
+    gate = _streaming_gate()
+    gate.follow(np.array([0.0, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01)
+
+    command, limited = gate.follow(
+        np.array([1.0, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01
+    )
+
+    # 2 rad/s for 10 ms is 0.02 rad, not the whole 1.0 asked for.
+    np.testing.assert_allclose(command, [0.02, 0.0])
+    assert limited is not None and "velocity" in limited
+
+
+def test_follow_passes_a_reachable_target_through_unchanged():
+    gate = _streaming_gate()
+    gate.follow(np.array([0.0, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01)
+
+    command, limited = gate.follow(
+        np.array([0.01, -0.01]), np.array([0.0, 0.0]), elapsed_sec=0.01
+    )
+
+    np.testing.assert_allclose(command, [0.01, -0.01])
+    assert limited is None
+
+
+def test_follow_clamps_into_the_position_limits():
+    """Stopping at the limit is what an operator dragging past it should see;
+    refusing would end the session mid-drag instead."""
+    gate = _streaming_gate()
+
+    command, limited = gate.follow(
+        np.array([5.0, 0.0]), np.array([0.99, 0.0]), elapsed_sec=1.0
+    )
+
+    np.testing.assert_allclose(command, [1.0, 0.0])
+    assert limited is not None and "position" in limited
+
+
+def test_follow_still_refuses_without_execute_and_after_estop():
+    gate = _streaming_gate(execute=False)
+    with pytest.raises(SafetyError, match="--execute"):
+        gate.follow(np.array([0.0, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01)
+
+    gate = _streaming_gate()
+    gate.estop()
+    with pytest.raises(SafetyError, match="E-stop"):
+        gate.follow(np.array([0.0, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01)
+
+
+def test_follow_rejects_a_target_that_is_not_a_number():
+    gate = _streaming_gate()
+
+    with pytest.raises(SafetyError, match="invalid"):
+        gate.follow(np.array([np.nan, 0.0]), np.array([0.0, 0.0]), elapsed_sec=0.01)
+
+
+def test_follow_measures_velocity_from_where_the_arm_is():
+    """The step has to be bounded against the measured pose, not the last
+    command. A drooping arm sits behind its command, so budgeting from the
+    command would let the real step exceed the limit."""
+    gate = _streaming_gate()
+
+    command, _limited = gate.follow(
+        np.array([1.0, 0.0]), np.array([0.5, 0.0]), elapsed_sec=0.01
+    )
+
+    np.testing.assert_allclose(command, [0.52, 0.0])
+
+
+def test_authorize_effort_bounds_torque_by_the_profile():
+    """Effort is feedforward torque: too much accelerates the arm rather than
+    misposing it, so it is refused rather than clamped."""
+    gate = _streaming_gate()
+
+    np.testing.assert_allclose(
+        gate.authorize_effort(np.array([9.0, -9.0])), [9.0, -9.0]
+    )
+    with pytest.raises(SafetyError, match="effort limit exceeded"):
+        gate.authorize_effort(np.array([11.0, 0.0]))
+    with pytest.raises(SafetyError, match="effort limit exceeded"):
+        gate.authorize_effort(np.array([0.0, -11.0]))
+
+
+def test_authorize_effort_refuses_without_execute_and_after_estop():
+    with pytest.raises(SafetyError, match="--execute"):
+        _streaming_gate(execute=False).authorize_effort(np.array([1.0, 1.0]))
+
+    gate = _streaming_gate()
+    gate.estop()
+    with pytest.raises(SafetyError, match="E-stop"):
+        gate.authorize_effort(np.array([1.0, 1.0]))
+
+
+def test_effort_limits_are_optional_so_existing_gates_keep_working():
+    """Position-only callers build a gate with no effort bound at all."""
+    gate = CommandGate(
+        execute=True,
+        lower=np.array([-1.0]),
+        upper=np.array([1.0]),
+        velocity=np.array([2.0]),
+        command_period_sec=0.01,
+    )
+
+    assert gate.authorize(np.array([0.0]), now_sec=0.0).tolist() == [0.0]
+    with pytest.raises(SafetyError, match="no effort limit"):
+        gate.authorize_effort(np.array([1.0]))
