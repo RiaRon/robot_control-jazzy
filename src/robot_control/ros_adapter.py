@@ -26,6 +26,7 @@ import numpy as np
 from .interface import CanonicalInterface, InterfaceError
 from .profile import FOLLOW_JOINT_TRAJECTORY, PARALLEL_GRIPPER_COMMAND, RobotProfile
 from .safety import SafetyError
+from .track import Recording
 
 # moveit_msgs/MoveItErrorCodes.SUCCESS
 MOVEIT_SUCCESS = 1
@@ -164,6 +165,7 @@ class RosAdapter:
         self.execute = execute
         self.interface = CanonicalInterface(profile)
         self._backend = backend if backend is not None else _RclpyBackend(node_name)
+        self._recording = False
 
     def __enter__(self) -> RosAdapter:
         return self
@@ -286,6 +288,68 @@ class RosAdapter:
     def pump(self, timeout_sec: float = 0.0) -> None:
         """Let subscriptions deliver. A servo loop must call this every cycle."""
         self._backend.pump(timeout_sec)
+
+    def now_ns(self) -> int:
+        """The node's clock, which is what a published command is stamped with.
+
+        Not wall time and not a monotonic counter. ``normalize_track`` overlaps a
+        command stream with a measured one by comparing their stamps, and the
+        measured stamps come from the publisher's ROS clock — so ours has to be
+        the same kind of clock or the two are on different epochs. Under
+        ``use_sim_time`` this follows the simulation, which is the only reading
+        that stays comparable there.
+        """
+        return self._backend.now_ns()
+
+    def start_recording(self) -> None:
+        """Begin keeping every ``/joint_states`` message, with its own stamp.
+
+        Separate from :meth:`read_state`, which discards what arrived before it
+        was called so a caller never reads a pose from before the motion it just
+        commanded. That is right for reading a pose and fatal for recording a
+        stream, so the two do not share a path.
+        """
+        self._backend.start_recording()
+        self._recording = True
+
+    def stop_recording(self) -> Recording:
+        """Return what arrived, in this group's canonical order.
+
+        A message that does not cover the whole group is counted rather than
+        raised on: during bringup, or if a controller drops out mid-run, some
+        messages legitimately do not carry every joint, and losing the rest of
+        the run over it would be worse than recording the gap.
+        """
+        if not self._recording:
+            raise AdapterUnavailable(
+                "not recording; call start_recording() before stop_recording()"
+            )
+        self._recording = False
+        samples = self._backend.stop_recording()
+        stamps: list[int] = []
+        rows: list[np.ndarray] = []
+        incomplete = 0
+        for stamp_ns, source in samples:
+            try:
+                rows.append(
+                    self.interface.group_state_to_canonical(self.group.name, source)
+                )
+            except InterfaceError:
+                incomplete += 1
+                continue
+            stamps.append(int(stamp_ns))
+        if not rows:
+            raise AdapterUnavailable(
+                f"no /joint_states covering group {self.group.name!r} was "
+                f"recorded ({incomplete} message(s) arrived without it); is the "
+                "bringup running, and is the loop calling pump()?"
+            )
+        return Recording(
+            np.asarray(stamps, dtype=np.int64),
+            np.vstack(rows),
+            tuple(self.group.joints),
+            incomplete=incomplete,
+        )
 
     def read_marker_pose(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Pose:
         """Return the pose of the RViz goal marker for this group's tip link.
@@ -440,6 +504,9 @@ class _RclpyBackend:
         self._node = rclpy.create_node(node_name)
         self._joint_subscription = None
         self._latest: dict[str, float] | None = None
+        # None until start_recording: the same callback serves read_state, and
+        # a list here is what tells it to keep rather than only cache.
+        self._recorded: list[tuple[int, dict[str, float]]] | None = None
         self._fk_client = None
         self._ik_client = None
         self._marker_client = None
@@ -474,6 +541,33 @@ class _RclpyBackend:
 
     def _record(self, message: Any) -> None:
         self._latest = dict(zip(message.name, message.position))
+        if self._recorded is not None:
+            # header.stamp, not the time this callback ran: it is when the
+            # hardware read was taken, which is the quantity the controller
+            # delay is measured against. The callback time carries the queueing
+            # this recording exists to characterise.
+            stamp = message.header.stamp
+            self._recorded.append(
+                (
+                    int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec),
+                    dict(zip(message.name, message.position)),
+                )
+            )
+
+    def now_ns(self) -> int:
+        """The node clock, so a command's stamp is comparable to header.stamp."""
+        return int(self._node.get_clock().now().nanoseconds)
+
+    def start_recording(self) -> None:
+        if self._joint_subscription is None:
+            self._joint_subscription = self._node.create_subscription(
+                self._JointState, "/joint_states", self._record, self._sensor_qos
+            )
+        self._recorded = []
+
+    def stop_recording(self) -> list[tuple[int, dict[str, float]]]:
+        recorded, self._recorded = self._recorded, None
+        return recorded or []
 
     def compute_fk(
         self,

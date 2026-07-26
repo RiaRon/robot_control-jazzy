@@ -77,9 +77,36 @@ class RecordingBackend:
         self.trajectories = []
         self.gripper_goals = []
         self.closed = False
+        #: What this backend will deliver on the next pump, as
+        #: (stamp_ns, {source: position}). A test sets it to stand in for
+        #: whatever arrives on /joint_states.
+        self.incoming: list = []
+        self.recording = False
+        self.clock_reads = 0
+        self._recorded: list = []
 
     def joint_states(self, timeout_sec):
         return dict(self.states)
+
+    # --- recording -------------------------------------------------------
+    def start_recording(self):
+        self.recording = True
+        self._recorded = []
+
+    def pump(self, timeout_sec=0.0):
+        # A real subscription delivers while the node spins, so the fake does
+        # its delivering here too: a recorder that forgets to pump gets nothing.
+        if self.recording:
+            self._recorded.extend(self.incoming)
+            self.incoming = []
+
+    def stop_recording(self):
+        self.recording = False
+        return list(self._recorded)
+
+    def now_ns(self):
+        self.clock_reads += 1
+        return 1_000_000_000 + self.clock_reads
 
     def compute_fk(self, link, seed, frame_id, timeout_sec):
         self.fk_requests.append((link, dict(seed), frame_id))
@@ -356,6 +383,91 @@ def test_action_results_are_judged_by_their_own_fields():
     # A parallel gripper reports closing on an object by stalling.
     assert gripper_failure(_GripperResult(reached_goal=False, stalled=True)) is None
     assert gripper_failure(_GripperResult(reached_goal=False)) is not None
+
+
+def test_recording_keeps_every_message_with_its_own_stamp(profile):
+    """A stream, not a latest value. read_state discards on purpose; this cannot."""
+    backend = RecordingBackend()
+    adapter = _adapter(profile, execute=False, backend=backend)
+    adapter.start_recording()
+    backend.incoming = [
+        (100, {"arm_1": 0.1, "arm_2": -0.2, "hand_1": 0.0}),
+        (200, {"arm_1": 0.3, "arm_2": -0.4, "hand_1": 0.0}),
+    ]
+    adapter.pump()
+    backend.incoming = [(300, {"arm_1": 0.5, "arm_2": -0.6, "hand_1": 0.0})]
+    adapter.pump()
+
+    recording = adapter.stop_recording()
+
+    np.testing.assert_array_equal(recording.timestamps_ns, [100, 200, 300])
+    # Canonical, so a2's opposing sign is applied the same way read_state does.
+    np.testing.assert_allclose(recording.values, [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+    assert recording.joint_names == ("a1", "a2")
+
+
+def test_a_recorder_that_never_pumps_gets_nothing(profile):
+    """Subscriptions deliver while the node spins, so the loop must pump."""
+    backend = RecordingBackend()
+    adapter = _adapter(profile, execute=False, backend=backend)
+    adapter.start_recording()
+    backend.incoming = [(100, {"arm_1": 0.1, "arm_2": -0.2, "hand_1": 0.0})]
+
+    with pytest.raises(AdapterUnavailable, match="no /joint_states"):
+        adapter.stop_recording()
+
+
+def test_a_message_missing_the_group_is_counted_not_fatal(profile):
+    """During bringup a message may not cover the group yet; that is a gap."""
+    backend = RecordingBackend()
+    adapter = _adapter(profile, execute=False, backend=backend)
+    adapter.start_recording()
+    backend.incoming = [
+        (100, {"arm_1": 0.1}),  # arm_2 absent
+        (200, {"arm_1": 0.3, "arm_2": -0.4}),
+    ]
+    adapter.pump()
+
+    recording = adapter.stop_recording()
+
+    np.testing.assert_array_equal(recording.timestamps_ns, [200])
+    assert recording.incomplete == 1
+
+
+def test_recording_does_not_disturb_read_state(profile):
+    """read_state nulls its cache and waits; recording must not depend on that."""
+    backend = RecordingBackend()
+    adapter = _adapter(profile, execute=False, backend=backend)
+    adapter.start_recording()
+    backend.incoming = [(100, {"arm_1": 0.1, "arm_2": -0.2, "hand_1": 0.0})]
+    adapter.pump()
+
+    np.testing.assert_allclose(adapter.read_state(), [0.1, 0.2])
+    assert len(adapter.stop_recording()) == 1
+
+
+def test_the_clock_a_command_is_stamped_with_is_the_node_s(profile):
+    """Commands and measurements have to land on one epoch or normalize is junk.
+
+    The measurement's stamp comes from the publisher's clock and the command's
+    from ours, so the only thing this side can guarantee is that ours is the
+    node clock — never wall time, which would be a different epoch under
+    simulation time and a different one again after a reboot.
+    """
+    backend = RecordingBackend()
+    adapter = _adapter(profile, execute=False, backend=backend)
+
+    first, second = adapter.now_ns(), adapter.now_ns()
+
+    assert backend.clock_reads == 2
+    assert second > first
+
+
+def test_stopping_without_starting_is_refused(profile):
+    adapter = _adapter(profile, execute=False)
+
+    with pytest.raises(AdapterUnavailable, match="not recording"):
+        adapter.stop_recording()
 
 
 def test_core_package_imports_without_rclpy():
