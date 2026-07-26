@@ -711,33 +711,98 @@ load.
 
 ## `robotctl r2s collect`
 
-Build the excitation trajectory used for identification and report its shape.
+Publish an identification excitation and record what the arm did.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
-| `--dry-run` | on | Print the plan without publishing |
-| `--execute` | off | Publish the excitation; needs a ROS adapter |
+| `--group` | *required* | Group to excite; must have a trajectory controller |
+| `--output` | *required with `--execute`* | `.npz` recording to write |
+| `--dry-run` | on | Build and authorize the track without publishing |
+| `--execute` | off | Publish it and record the response |
 | `--amplitude-scale` | `0.3` | Fraction of the per-joint range to excite, in `(0, 1]` |
 
 ```bash
-robotctl r2s collect
+robotctl r2s collect --group openarm_right_arm
 ```
 
 ```text
-DRY RUN: profile=openarm_tesollo amplitude_scale=0.3 samples=600 phases=hold,step,ramp,multisine
+openarm_right_arm: amplitude_scale=0.3 samples=611 (6.1 s at 100 Hz) phases=hold,bridge,step,ramp,multisine
+DRY RUN: nothing was published; pass --execute to collect
 ```
 
 Amplitudes are 5 % of each joint's range scaled by `--amplitude-scale`, so the
 default excites 1.5 % of range.
 
 ```bash
-# --execute would publish the excitation to the real command topic:
-robotctl r2s collect --execute
+# --execute publishes position commands at 100 Hz and the arm moves through the
+# whole excitation. Keep the E-stop within reach.
+robotctl r2s collect --group openarm_right_arm --output run.npz --execute
 ```
 
-**Exit codes:** `0` planned; `2` `--execute` without a publisher backend;
-`SystemExit` for `--amplitude-scale` outside `(0, 1]`.
+```text
+published 611 samples, recorded 612 (0 did not cover the group)
+  largest gap 10.0 ms against a 10.0 ms median (1.0 command periods)
+collect: run.npz
+```
+
+### The excitation starts where the arm is
+
+`neutral` is the arm's **current measured pose**, not the midpoint of its range.
+The arms' limits are symmetric, so the midpoint is the all-zeros pose — a large
+unplanned move before the excitation even begins, and the pose where the arm is
+straight out and most loaded.
+
+That is also why a dry run needs the robot. Building the review track around the
+midpoint while `--execute` used the current pose would mean reviewing a track
+that never runs.
+
+The whole track is authorized before the first sample is published — every sample
+against the position limits, every step against the velocity limits. A run that
+stopped partway would leave the arm mid-excitation at a velocity nobody chose.
+
+### `bridge` in the phase list
+
+The phases are shapes, and the joins between them are discontinuities. Measured
+against the real profile, the join from the ramp into the multisine asks for
+**seven times** the arms' 2.0 rad/s at 100 Hz. Published as position commands the
+gate refuses the whole track, and shrinking the amplitude until every
+discontinuity fits in one sample would shrink it by that same factor of seven.
+
+So the joins are bridged at the velocity limit instead: 11 extra samples at the
+default scale, and the amplitude is kept.
+
+A multisine too fast to slew is refused rather than bridged, and the refusal says
+by how much to scale. Its peak slew is frequency times amplitude, so extra time
+changes neither — on this profile `--amplitude-scale 0.6` is refused for that
+reason.
+
+### What the recording holds
+
+Two streams, each with its own clock, never resampled and never paired:
+
+| Key | Meaning |
+| --- | --- |
+| `command_time_ns`, `command` | Stamped from the node clock when published |
+| `measured_time_ns`, `measured` | One row per `/joint_states` message, stamped with its `header.stamp` |
+| `joint_names` | Canonical, the group's, in the group's order |
+| `profile`, `asset_id`, `manifest_sha256` | What it was recorded on |
+
+**Not paired into one row.** A loop that wrote each command beside the state it
+read in the same cycle would be asserting that the state responds to that
+command. It does not — it responds to one from several cycles back, and that lag
+is `delay_sec`, a parameter being measured. Pairing at record time bakes in zero
+and destroys it. `r2s normalize` puts both on a common grid afterwards, which
+keeps the alignment a decision that can still be revised.
+
+The reported gap is what says whether the recording can be trusted:
+`/joint_states` is subscribed best-effort, so messages can be dropped, and
+`normalize` interpolates across a gap without knowing it was one.
+
+**Exit codes:** `0` published or planned; `2` no `--group`, `--execute` without
+`--output`, a gripper group, an amplitude too fast to slew, or no adapter;
+`3` the excitation leaves the profile's envelope; `SystemExit` for
+`--amplitude-scale` outside `(0, 1]`.
 
 ## `robotctl r2s normalize`
 
@@ -760,7 +825,12 @@ normalize: track.h5 sha256=6f1c…
 
 The printed digest identifies the track and is carried into the fit result.
 
-**Exit codes:** `0` written; `SystemExit` if either path is missing.
+Writing HDF5 needs the optional extra (`pip install robot-control[hdf5]`); not
+having it exits `2` with that message rather than raising.
+
+**Exit codes:** `0` written; `2` an unreadable recording, streams that do not
+overlap, a joint the command never moved, or no HDF5 support; `SystemExit` if
+either path is missing.
 
 ## `robotctl r2s fit`
 

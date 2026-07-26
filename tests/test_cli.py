@@ -21,9 +21,27 @@ def test_preflight_reports_profile(capsys):
     assert "publish_enabled: false" in output
 
 
-def test_collect_defaults_to_dry_run(capsys):
-    assert main(["r2s", "collect", "--profile", "openarm_tesollo"]) == 0
-    assert "DRY RUN" in capsys.readouterr().out
+def test_collect_needs_to_be_told_which_group(capsys):
+    """Group-scoped like everything else that reaches a controller.
+
+    It used to build an excitation over all 43 profile joints — both arms plus
+    the whole hand — which no single controller could have accepted.
+    """
+    assert main(["r2s", "collect", "--profile", "openarm_tesollo"]) == 2
+    assert "--group" in capsys.readouterr().out
+
+
+def test_collect_dry_run_still_needs_the_robot(no_ros, capsys):
+    """The excitation is built around the arm's current pose, so a dry run has
+    to read it. Building one around the midpoint of the range instead would
+    review a track that --execute would not publish."""
+    code = main(
+        ["r2s", "collect", "--profile", "openarm_tesollo",
+         "--group", "openarm_right_arm"]
+    )
+
+    assert code == 2
+    assert "rclpy" in capsys.readouterr().out
 
 
 def test_pose_joints_dry_run_prints_the_target_without_touching_ros(no_ros, capsys):

@@ -43,7 +43,7 @@ from .interface import CanonicalInterface
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .safety import CommandGate, SafetyError
 from .srdf import named_state, repository_root
-from .track import normalize_track
+from .track import TrackError, normalize_track
 
 
 DEFAULT_DURATION_SEC = 3.0
@@ -191,6 +191,12 @@ def _parser() -> argparse.ArgumentParser:
             mode.add_argument("--dry-run", action="store_true")
             mode.add_argument("--execute", action="store_true")
             item.add_argument("--amplitude-scale", type=float, default=0.3)
+            item.add_argument(
+                "--group", help="group to excite; needs a trajectory controller"
+            )
+            item.add_argument(
+                "--output", type=Path, help="`.npz` recording to write"
+            )
         if stage == "fit":
             item.add_argument("--population", type=int, default=128)
             item.add_argument("--track", type=Path)
@@ -1196,6 +1202,149 @@ _BUNDLE_KEYS = (
 )
 
 
+def _collect_track(args, profile) -> int:
+    """Publish an identification excitation and record what the arm did.
+
+    The two streams are kept apart on purpose. A loop that wrote each command
+    beside the state it read in the same cycle would be asserting that the state
+    responds to that command; it does not, it responds to one from several cycles
+    back. That lag is `ControllerCalibration.delay_sec`, a parameter being
+    measured, and pairing at record time bakes in zero and destroys it.
+    `normalize_track` puts both on a common grid afterwards, which keeps the
+    alignment a decision that can still be revised.
+    """
+    from .ros_adapter import AdapterUnavailable
+
+    if not args.group:
+        print("error: --group is required, to say which arm to excite")
+        return UNUSABLE
+    if args.execute and not args.output:
+        print(
+            "error: --execute needs --output; the recording is the only thing a "
+            "run that moved the robot leaves behind"
+        )
+        return UNUSABLE
+    try:
+        return _collect_track_run(args, profile)
+    except (SafetyError, Refused) as error:
+        print(f"refused: {error}")
+        return REFUSED
+    except AdapterUnavailable as error:
+        print(f"unavailable: {error}")
+        return UNUSABLE
+    except (ValueError, OSError) as error:
+        print(f"error: {error}")
+        return UNUSABLE
+
+
+def _collect_track_run(args, profile) -> int:
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if group.action == PARALLEL_GRIPPER_COMMAND:
+        raise ValueError(
+            f"group {group.name!r} is driven by a gripper action, which takes a "
+            "position rather than a stream, so it cannot be excited this way"
+        )
+    rate = profile.ros["jazzy"].command_rate_hz
+    period = 1.0 / rate
+    joints = {joint.canonical: joint for joint in profile.joints}
+    limits = [joints[canonical] for canonical in group.joints]
+    amplitude = np.array(
+        [
+            (joint.upper - joint.lower) * 0.05 * args.amplitude_scale
+            for joint in limits
+        ]
+    )
+    # One period of travel at the profile's velocity limit, which is what the
+    # gate will allow between consecutive samples. Handing it to the excitation
+    # lets the phase joins be bridged rather than refused.
+    budget = np.array([joint.velocity * period for joint in limits])
+
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        # Around where the arm is, not the middle of its range: the midpoint of
+        # the arms' symmetric limits is the all-zeros pose, so starting there
+        # would mean a large unplanned move before the excitation even begins.
+        neutral = adapter.read_state()
+        clock, command, phases = build_excitation(
+            neutral, amplitude, rate, max_step=budget
+        )
+        print(
+            f"{group.name}: amplitude_scale={args.amplitude_scale:g} "
+            f"samples={len(clock)} ({len(clock) / rate:.1f} s at {rate:g} Hz) "
+            f"phases={','.join(dict.fromkeys(phases))}"
+        )
+
+        # The whole track, before any of it is published. A run that stopped
+        # partway would leave the arm mid-excitation at a velocity nobody chose.
+        _gate(profile, group, seed=neutral).authorize_trajectory(
+            list(command), start_time_sec=0.0, period_sec=period
+        )
+        if not args.execute:
+            print("DRY RUN: nothing was published; pass --execute to collect")
+            return 0
+
+        stamps: list[int] = []
+        adapter.start_recording()
+        try:
+            for sample in command:
+                cycle = time.monotonic()
+                adapter.pump(timeout_sec=0.0)
+                # Stamped at publish, not from the planned clock: the planned
+                # time is the intent and this is what happened.
+                stamps.append(adapter.now_ns())
+                adapter.stream_positions(sample, period_sec=period)
+                time.sleep(max(0.0, period - (time.monotonic() - cycle)))
+            adapter.pump(timeout_sec=0.0)
+        finally:
+            recording = adapter.stop_recording()
+
+    _report_recording(len(command), recording, rate)
+    _write_recording(
+        args.output,
+        profile,
+        group,
+        np.asarray(stamps, dtype=np.int64),
+        command[: len(stamps)],
+        recording,
+    )
+    print(f"collect: {args.output}")
+    return 0
+
+
+def _report_recording(published: int, recording, rate: float) -> None:
+    period_ns = 1e9 / rate
+    print(
+        f"published {published} samples, recorded {len(recording)} "
+        f"({recording.incomplete} did not cover the group)"
+    )
+    print(
+        f"  largest gap {recording.largest_gap_ns / 1e6:.1f} ms against a "
+        f"{recording.median_period_ns / 1e6:.1f} ms median "
+        f"({recording.largest_gap_ns / period_ns:.1f} command periods)"
+    )
+    if not recording.is_monotonic:
+        print("  warning: samples arrived out of order; normalize will refuse them")
+
+
+def _write_recording(path, profile, group, stamps, command, recording) -> None:
+    """Write both streams with their own clocks, never resampled or paired."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        command_time_ns=stamps,
+        command=np.asarray(command, dtype=float),
+        measured_time_ns=recording.timestamps_ns,
+        measured=recording.values,
+        joint_names=np.array(list(group.joints)),
+        profile=np.array(profile.name),
+        asset_id=np.array(profile.asset_id),
+        manifest_sha256=np.array(profile.manifest_sha256),
+        incomplete=np.array(recording.incomplete),
+    )
+
+
 def _bundle(args, profile) -> int:
     """Merge identified parameters from one or more fits into a v2 bundle."""
     if not args.base or not args.fit or not args.output:
@@ -1424,32 +1573,26 @@ def main(argv: list[str] | None = None) -> int:
     elif args.stage == "collect":
         if args.amplitude_scale <= 0 or args.amplitude_scale > 1:
             raise SystemExit("--amplitude-scale must be in (0, 1]")
-        mode = "EXECUTE" if args.execute else "DRY RUN"
-        neutral = np.array([(joint.lower + joint.upper) / 2 for joint in profile.joints])
-        amplitude = np.array(
-            [(joint.upper - joint.lower) * 0.05 * args.amplitude_scale for joint in profile.joints]
-        )
-        time, command, phases = build_excitation(neutral, amplitude, profile.ros["jazzy"].command_rate_hz)
-        print(
-            f"{mode}: profile={profile.name} amplitude_scale={args.amplitude_scale} "
-            f"samples={len(time)} phases={','.join(dict.fromkeys(phases))}"
-        )
-        if args.execute:
-            print("ROS publisher backend is required; no command was published")
-            return 2
+        return _collect_track(args, profile)
     elif args.stage == "normalize":
         if not args.input or not args.output:
             raise SystemExit("--input and --output are required")
-        raw = np.load(args.input, allow_pickle=False)
-        track = normalize_track(
-            raw["command_time_ns"],
-            raw["command"],
-            raw["measured_time_ns"],
-            raw["measured"],
-            list(raw["joint_names"]),
-            profile.ros["jazzy"].command_rate_hz,
-        )
-        write_hdf5(args.output, track)
+        try:
+            raw = np.load(args.input, allow_pickle=False)
+            track = normalize_track(
+                raw["command_time_ns"],
+                raw["command"],
+                raw["measured_time_ns"],
+                raw["measured"],
+                list(raw["joint_names"]),
+                profile.ros["jazzy"].command_rate_hz,
+            )
+            write_hdf5(args.output, track)
+        except (ArtifactError, TrackError, OSError, KeyError) as error:
+            # A missing optional extra and an unusable recording are both
+            # answers about the environment, not crashes.
+            print(f"error: {error}")
+            return UNUSABLE
         print(f"normalize: {args.output} sha256={track_sha256(track)}")
     elif args.stage == "fit":
         if not args.track or not args.output:
