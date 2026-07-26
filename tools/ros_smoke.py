@@ -109,12 +109,20 @@ _DG5F_JOINTS = tuple(
 )
 _OPENARM_ARM_JOINTS = tuple(f"openarm_joint{joint}" for joint in range(1, 8))
 _OPENARM_FINGER_JOINT = "openarm_finger_joint1"
+# rj_dg_1_2 is limited to [-pi, 0.0] by the DG5F description, so the shared
+# +0.05 target is unreachable there. Simulated joints clamp at their limits
+# while fake hardware echoes any command back, so the sign must be flipped to
+# keep one plan valid for both.
+_DG5F_NEGATIVE_ONLY_JOINTS = ("rj_dg_1_2",)
 
 
 def smoke_plan(robot: str) -> SmokePlan:
     """Return the fixed, neutral-relative targets for a supported smoke test."""
     if robot == "dg5f":
-        targets = dict.fromkeys(_DG5F_JOINTS, 0.05)
+        targets = {
+            joint: -0.05 if joint in _DG5F_NEGATIVE_ONLY_JOINTS else 0.05
+            for joint in _DG5F_JOINTS
+        }
         return SmokePlan(command_targets=targets, state_targets=targets)
     if robot == "openarm":
         command_targets = dict.fromkeys(_OPENARM_ARM_JOINTS, 0.05)

@@ -1,6 +1,7 @@
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -189,6 +190,34 @@ def test_smoke_plan_never_commands_more_than_point_zero_five_radians(robot):
     assert plan.command_targets.keys() <= plan.state_targets.keys()
 
 
+def test_dg5f_smoke_plan_respects_urdf_joint_limits():
+    """Simulated joints clamp at their limits, so a target outside the URDF
+    range can never be reached. Fake hardware echoes commands back and hides
+    this, but Gazebo physics does not."""
+    description = (
+        ROOT / "ros_ws/src/delto_m_ros2/dg_description/urdf/dg5f_right.xacro"
+    ).read_text()
+    limits = {
+        name: (float(lower), float(upper))
+        for name, lower, upper in re.findall(
+            r'<joint name="(rj_dg_\d+_\d+)" type="revolute">.*?'
+            r'<limit lower="([-\d.e]+)" upper="([-\d.e]+)"',
+            description,
+            re.S,
+        )
+    }
+    plan = smoke_plan("dg5f")
+    assert limits, "no revolute joint limits parsed from the DG5F description"
+    assert set(plan.command_targets) <= set(limits)
+
+    out_of_range = {
+        joint: (target, limits[joint])
+        for joint, target in plan.command_targets.items()
+        if not limits[joint][0] <= target <= limits[joint][1]
+    }
+    assert out_of_range == {}
+
+
 @pytest.mark.parametrize("script", SMOKE_SCRIPTS)
 def test_smoke_script_rejects_non_jazzy_before_starting_ros(script):
     result = subprocess.run(
@@ -200,6 +229,56 @@ def test_smoke_script_rejects_non_jazzy_before_starting_ros(script):
 
     assert result.returncode == 2
     assert "ROS 2 Jazzy" in result.stderr
+
+
+@pytest.mark.parametrize("script", SMOKE_SCRIPTS)
+def test_smoke_script_sources_colcon_setup_that_reads_unset_variables(
+    tmp_path,
+    script,
+):
+    workspace = tmp_path / "ros_ws"
+    workspace.mkdir()
+    (workspace / "install").mkdir()
+    # Real colcon and ament setup files dereference COLCON_TRACE and
+    # AMENT_TRACE_SETUP_FILES without a default, which aborts under `set -u`.
+    (workspace / "install/setup.bash").write_text(
+        'if [ -n "$COLCON_TRACE" ]; then echo "# trace"; fi\n'
+        'if [ -n "$AMENT_TRACE_SETUP_FILES" ]; then echo "# trace"; fi\n'
+        "export ROBOT_CONTROL_SMOKE_SETUP_SOURCED=1\n"
+    )
+    shutil.copy2(script, workspace)
+    shutil.copy2(SMOKE_HARNESS, workspace)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ros2 = fake_bin / "ros2"
+    fake_ros2.write_text(
+        "#!/usr/bin/env bash\n"
+        'test -n "${ROBOT_CONTROL_SMOKE_SETUP_SOURCED:-}" || exit 3\n'
+        "while true; do sleep 0.1; done\n"
+    )
+    fake_ros2.chmod(0o755)
+    fake_python = fake_bin / "python3"
+    # A real validator runs for several seconds; exiting instantly would race
+    # the harness process-group check rather than exercise the sourcing path.
+    fake_python.write_text("#!/usr/bin/env bash\nsleep 2\nexit 0\n")
+    fake_python.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(workspace / script.name)],
+        env=dict(
+            os.environ,
+            ROS_DISTRO="jazzy",
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+        ),
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+    assert "unbound variable" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "smoke test passed" in result.stdout
 
 
 @pytest.mark.parametrize(

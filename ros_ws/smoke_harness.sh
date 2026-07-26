@@ -100,6 +100,10 @@ run_smoke_harness() {
         exit 2
     fi
 
+    # Colcon and ament setup files read COLCON_TRACE and
+    # AMENT_TRACE_SETUP_FILES without a default, so `set -u` must be off while
+    # sourcing. Strict mode is restored immediately afterwards.
+    set +eu
     # shellcheck disable=SC1090
     source "$setup"
     set -euo pipefail

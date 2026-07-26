@@ -135,6 +135,18 @@ def generate_launch_description():
         output="screen",
         parameters=[robot_description1],
     )
+    # gz_ros2_control drives controllers from simulation time, so /clock must be
+    # bridged out of Gazebo. Without it ROS time stays at zero and no trajectory
+    # ever advances.
+    gz_clock_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="gz_clock_bridge",
+        arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+        output="screen",
+        condition=UnlessCondition(use_fake_hardware),
+    )
+
     gz_spawn_entity = Node(
         package="ros_gz_sim",
         executable="create",
@@ -229,6 +241,7 @@ def generate_launch_description():
         node_robot_state_publisher,
         control_node,
         gazebo,
+        gz_clock_bridge,
         gz_spawn_entity,
     ]
 

@@ -17,9 +17,9 @@ excluded:
 patches:
   - patches/0001-dg5f-gz-ros2-control-jazzy.patch
 post_patch_sha256:
-  dg5f_gz/launch/dg5f_both_gz.launch.py: 486d9d9a79b73e9dc76710cf066a0a1c69a5f961182ed49217384cfa7b06644e
-  dg5f_gz/launch/dg5f_left_gz.launch.py: b05a129b6c1eb55e57a26d33d3bd13c4e7f992e611473181d50bd2156a73d68f
-  dg5f_gz/launch/dg5f_right_gz.launch.py: 8c79e9c4e74e4127c515a071279a16e290f6eb5c69f41ad91666dd652ae03e1d
+  dg5f_gz/launch/dg5f_both_gz.launch.py: b727eae89fd00ff9cb8dde82a1054186230384c894940a0283cb1e3ac2eefdde
+  dg5f_gz/launch/dg5f_left_gz.launch.py: 213d3ec7c8a63d55f519c6cee0d8c7d880f70f30ccc3911e309653bf3ae835c9
+  dg5f_gz/launch/dg5f_right_gz.launch.py: 5a3bddebb2b4b2edb366beee72a9071bdfafc37b35b6bf02a0d0c6003aacb56f
   dg5f_gz/package.xml: ce08ef4588a1f97b4a29e5b9aa7996c94c9ff24e0e15d672b2e9371b3f314c9f
   dg5f_gz/urdf/dg5f_both_gz.xacro: 1ebb3f117ffc5e24b84416a50c5278710d65b789ac3d29604e904546ddf6b680
   dg5f_gz/urdf/dg5f_left_gz.xacro: fb3b20d5871d0dc01d5967f986377788b787da8d897121ba80facbd201057cc9
