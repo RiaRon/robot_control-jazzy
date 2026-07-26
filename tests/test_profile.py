@@ -9,7 +9,17 @@ from robot_control.profile import ProfileError, load_profile
 
 ROOT = Path(__file__).parents[1]
 PROFILE = ROOT / "src/robot_control/profiles/openarm_tesollo.yaml"
-MOVEIT_CONFIG = ROOT / "ros_ws/src/openarm_ros2/openarm_bimanual_moveit_config/config"
+
+
+def _moveit_config():
+    """Wherever the vendored SRDF lives is the configuration directory.
+
+    Derived rather than written out: the two branches vendor upstream trees that
+    keep it in different places, and `find_srdf` already knows both.
+    """
+    from robot_control.srdf import find_srdf
+
+    return find_srdf().parent
 
 
 def test_openarm_tesollo_profile_has_complete_canonical_contract():
@@ -76,10 +86,12 @@ def test_group_contract_matches_vendored_moveit_configuration():
     profile = load_profile(PROFILE)
     source_by_canonical = {joint.canonical: joint.source for joint in profile.joints}
 
-    srdf = (MOVEIT_CONFIG / "openarm_bimanual.srdf").read_text()
+    srdf = _moveit_config().joinpath("openarm_bimanual.srdf").read_text()
     srdf_groups = set(re.findall(r'<group name="([^"]+)"', srdf))
     srdf_tips = set(re.findall(r'<end_effector [^>]*parent_link="([^"]+)"', srdf))
-    controllers = yaml.safe_load((MOVEIT_CONFIG / "moveit_controllers.yaml").read_text())
+    controllers = yaml.safe_load(
+        _moveit_config().joinpath("moveit_controllers.yaml").read_text()
+    )
     controllers = controllers["moveit_simple_controller_manager"]
 
     openarm = {
@@ -112,7 +124,7 @@ def test_tip_link_is_the_tool_centre_point_rviz_anchors_its_marker_to():
     one frame while robotctl commanded another.
     """
     profile = load_profile(PROFILE)
-    srdf = (MOVEIT_CONFIG / "openarm_bimanual.srdf").read_text()
+    srdf = _moveit_config().joinpath("openarm_bimanual.srdf").read_text()
 
     end_effectors = dict(
         re.findall(
