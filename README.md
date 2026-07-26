@@ -291,12 +291,39 @@ robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.25,0.5,0.7
 best measured scale: 0.75 (worst joint +0.0121 rad)
 ```
 
+### 관절별로 다듬기
+
+배율 하나로는 타협점까지입니다. 관절마다 최적값이 다릅니다 — 실측 외삽으로
+`r_aj_2` ≈ 1.14, `r_aj_1` ≈ 1.23, `r_aj_3` ≈ 1.31. 모델 토크의 **분포**가
+어긋난 것이지 크기만의 문제가 아닙니다.
+
+전역 최적값을 먼저 찾고, 거기서 관절 하나씩 다듬으십시오. `--sweep-joint`가
+지정한 관절의 배율만 바꾸고 나머지는 `--scale`로 고정합니다:
+
+```bash
+# --execute가 배율마다 토크를 발행합니다. r_aj_2의 몫만 바뀝니다.
+robotctl pose gravity --group openarm_right_arm --execute --scale 1.1 --sweep-joint r_aj_2 --sweep 1.05,1.1,1.15,1.2
+```
+
+보고는 **그 관절 자신의 오차**로 채점합니다 — 전체 최악값을 쓰면 이번 sweep이
+건드리지도 않은 관절이 지배합니다 — 그리고 다음 라운드에 그대로 쓸 벡터를
+출력합니다:
+
+```text
+best measured scale for r_aj_2: 1.15 (that joint +0.0031 rad)
+  refine the next joint the same way, then hold them all at once:
+  --scale 1.1,1.15,1.1,1.1,1.1,1.1,1.1
+```
+
 찾은 배율로 유지합니다:
 
 ```bash
 # --execute가 토크를 발행합니다. 명령을 멈출 때까지 팔이 스스로 버팁니다.
-robotctl pose gravity --group openarm_right_arm --scale 0.75 --execute
+robotctl pose gravity --group openarm_right_arm --scale 1.1,1.15,1.1,1.1,1.1,1.1,1.1 --execute
 ```
+
+`pose follow --gravity`도 같은 형식(하나 또는 관절별)을 받으므로, 튜닝한 벡터를
+그대로 넘기면 됩니다.
 
 ### 안전장치
 

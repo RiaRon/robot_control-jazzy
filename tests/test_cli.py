@@ -317,9 +317,10 @@ def stiff(monkeypatch):
     from robot_control import ros_adapter
 
     arm = StiffArm()
-    # One 2 kg link a metre out on the last joint only, so the modelled torque
-    # is unambiguous and well inside the profile's 50 N.m effort limit.
-    chain = _stub_chain([0.0] * 6 + [2.0])
+    # One light link a metre out on the last joint only, so the modelled torque
+    # is unambiguous and stays inside the 20 N.m the profile allows the wrist
+    # joints even at the largest scale a sweep can ask for.
+    chain = _stub_chain([0.0] * 6 + [0.5])
     arm.load = chain.gravity_torque(np.zeros(7))
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
     monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
@@ -554,3 +555,71 @@ def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
     output = capsys.readouterr().out
     assert "trailed the marker by" in output
     assert "mm on average" in output
+
+
+def test_pose_gravity_accepts_one_scale_per_joint(stiff, capsys):
+    """The measured optima differ per joint, so one number is a compromise."""
+    assert (
+        main(
+            ["pose", "gravity", *RIGHT_ARM, "--execute", "--hold-sec", "0.02",
+             "--scale", "1.23,1.14,1.31,1.1,1.0,1.0,1.0"]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "1.23" in output and "1.14" in output
+
+
+def test_pose_gravity_rejects_a_scale_count_that_is_not_one_or_per_joint(stiff, capsys):
+    assert main(["pose", "gravity", *RIGHT_ARM, "--scale", "1.0,1.1"]) == 2
+    assert "one value or one per joint" in capsys.readouterr().out
+
+
+def test_pose_gravity_sweeps_a_single_joint_holding_the_others(stiff, capsys):
+    """Refining one joint at a time is what per-joint tuning actually is."""
+    assert (
+        main(
+            ["pose", "gravity", *RIGHT_ARM, "--execute", "--hold-sec", "0.02",
+             "--scale", "1.1", "--sweep", "0.9,1.0,1.1", "--sweep-joint", "r_aj_7"]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "best measured scale for r_aj_7" in output
+    # The suggested next command carries every joint's scale, not just this one.
+    assert "--scale 1.1,1.1,1.1,1.1,1.1,1.1," in output
+
+
+def test_pose_gravity_rejects_sweeping_a_joint_outside_the_group(stiff, capsys):
+    code = main(
+        ["pose", "gravity", *RIGHT_ARM, "--sweep", "1.0", "--sweep-joint", "l_aj_1"]
+    )
+
+    assert code == 2
+    assert "not a joint of" in capsys.readouterr().out
+
+
+def test_pose_gravity_requires_a_scale_or_a_sweep(stiff, capsys):
+    assert main(["pose", "gravity", *RIGHT_ARM]) == 2
+    assert "--scale, --sweep, or both" in capsys.readouterr().out
+
+
+def test_pose_follow_accepts_one_gravity_scale_per_joint(draggable, capsys):
+    assert (
+        main(
+            ["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2",
+             "--gravity", "1.23,1.14,1.31,1.1,1.0,1.0,1.0"]
+        )
+        == 0
+    )
+
+    np.testing.assert_allclose(draggable.published[-1], np.zeros(7))
+
+
+def test_pose_follow_without_gravity_publishes_no_torque(draggable, capsys):
+    assert main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2"]) == 0
+
+    assert draggable.published == [], "torque was published with --gravity absent"
+    assert "gravity off" in capsys.readouterr().out

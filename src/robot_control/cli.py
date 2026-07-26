@@ -137,15 +137,19 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     )
     gravity.add_argument("--profile", default="openarm_tesollo")
     gravity.add_argument("--group", required=True)
-    how = gravity.add_mutually_exclusive_group(required=True)
-    how.add_argument(
+    gravity.add_argument(
         "--scale",
-        type=float,
-        help="fraction of the modelled gravity torque to publish",
+        help="fraction of the modelled torque to publish: one value, or one "
+        "per joint",
     )
-    how.add_argument(
+    gravity.add_argument(
         "--sweep",
         help="comma-separated scales to measure in turn, for tuning",
+    )
+    gravity.add_argument(
+        "--sweep-joint",
+        help="canonical joint whose scale --sweep varies, holding the rest at "
+        "--scale",
     )
     gravity.add_argument(
         "--hold-sec",
@@ -162,9 +166,8 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     follow.add_argument("--group", required=True)
     follow.add_argument(
         "--gravity",
-        type=float,
-        default=0.0,
-        help="gravity feedforward scale to hold while following",
+        help="gravity feedforward scale to hold while following: one value, or "
+        "one per joint",
     )
     follow.add_argument(
         "--seconds",
@@ -480,13 +483,16 @@ def _gravity_chain(adapter, profile, group):
 
 
 def _pose_gravity(args, profile) -> int:
-    """Publish gravity feedforward, at one scale or measured across several.
+    """Publish gravity feedforward, at one scale set or measured across several.
 
     The model is only as good as the URDF's masses, and the gains it works
     against are hard-coded in the vendor hardware rather than configured, so the
-    right scale is a measured quantity rather than a derived one. --sweep exists
-    to measure it: hold at each scale, read the controller's own tracking error,
-    and print what actually happened.
+    right scale is a measured quantity. --sweep measures it: hold at each scale,
+    read the controller's own tracking error, and print what actually happened.
+
+    Scales are per joint because the measured optima differ per joint — the
+    modelled torque's *distribution* is off, not only its magnitude — so one
+    global number can only reach a compromise between them.
     """
     from .ros_adapter import RosAdapter
 
@@ -500,17 +506,36 @@ def _pose_gravity(args, profile) -> int:
         raise ValueError(
             f"group {group.name!r} has no tip_link, so its chain cannot be built"
         )
-    scales = (
-        [args.scale] if args.sweep is None else _parse_floats(args.sweep, "--sweep")
-    )
-    for scale in scales:
-        if not 0.0 <= scale <= MAX_GRAVITY_SCALE:
-            raise ValueError(
-                f"gravity scale {scale:g} is outside 0 to {MAX_GRAVITY_SCALE:g}; "
-                "over-compensating drives the arm away from where it was holding"
-            )
+    if args.scale is None and args.sweep is None:
+        raise ValueError("pose gravity needs --scale, --sweep, or both")
+    if args.sweep_joint is not None and args.sweep is None:
+        raise ValueError("--sweep-joint says which joint --sweep varies; add --sweep")
     if args.hold_sec <= 0:
         raise ValueError("--hold-sec must be positive")
+
+    base = _scale_vector(args.scale, group)
+    index = None
+    if args.sweep_joint is not None:
+        if args.sweep_joint not in group.joints:
+            raise ValueError(
+                f"{args.sweep_joint!r} is not a joint of {group.name!r}; it has "
+                f"{list(group.joints)}"
+            )
+        index = group.joints.index(args.sweep_joint)
+
+    if args.sweep is None:
+        rounds = [base]
+    else:
+        rounds = []
+        for scale in _parse_floats(args.sweep, "--sweep"):
+            step = base.copy()
+            if index is None:
+                step[:] = scale
+            else:
+                step[index] = scale
+            rounds.append(step)
+    for step in rounds:
+        _check_scales(step, group)
 
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group)
@@ -520,33 +545,67 @@ def _pose_gravity(args, profile) -> int:
 
         print(f"{group.name}: {len(chain)} joints, "
               f"{sum(link.mass for link in chain.links):.3f} kg modelled")
-        _describe_torque(group, modelled)
+        _describe_torque(group, modelled, base)
         if not args.execute:
             print("DRY RUN: torque computed but not published; pass --execute")
             return 0
 
         try:
             rows = []
-            for scale in scales:
+            for scales in rounds:
                 # Recomputed each round: compensation moves the arm, and the
                 # torque that holds it depends on where it now is.
                 state = adapter.read_state()
-                effort = gate.authorize_effort(chain.gravity_torque(state) * scale)
+                effort = gate.authorize_effort(chain.gravity_torque(state) * scales)
                 _publish_for(adapter, effort, args.hold_sec)
                 error = adapter.read_tracking_error()
-                rows.append((scale, error))
+                rows.append((scales, error))
                 print(
-                    f"scale {scale:4.2f}: worst joint error "
+                    f"scale {_scale_label(scales, index):>8}: worst joint error "
                     f"{np.max(np.abs(error)):+.4f} rad, "
                     f"mean {np.mean(np.abs(error)):.4f} rad"
                 )
             if len(rows) > 1:
-                _report_sweep(group, rows)
+                _report_sweep(group, rows, index)
         finally:
             # Torque left applied after this process exits would keep pushing.
             adapter.send_effort(np.zeros(len(group.joints)))
             print("torque released")
     return 0
+
+
+def _scale_vector(given: str | None, group) -> np.ndarray:
+    """Read --scale as one value for every joint, or one value per joint."""
+    if given is None:
+        return np.ones(len(group.joints))
+    values = _parse_floats(given, "--scale")
+    if len(values) == 1:
+        return np.full(len(group.joints), values[0])
+    if len(values) != len(group.joints):
+        raise ValueError(
+            f"--scale needs one value or one per joint: {group.name!r} has "
+            f"{len(group.joints)} joints, got {len(values)}"
+        )
+    return np.asarray(values, dtype=float)
+
+
+def _check_scales(scales: np.ndarray, group) -> None:
+    for canonical, scale in zip(group.joints, scales):
+        if not 0.0 <= scale <= MAX_GRAVITY_SCALE:
+            raise ValueError(
+                f"gravity scale {scale:g} for {canonical} is outside 0 to "
+                f"{MAX_GRAVITY_SCALE:g}; over-compensating drives the arm away "
+                "from where it was holding"
+            )
+
+
+def _scale_label(scales: np.ndarray, index: int | None) -> str:
+    """Label a round by the number that varied, or by the shared one."""
+    if index is not None:
+        return f"{scales[index]:.2f}"
+    if np.allclose(scales, scales[0]):
+        return f"{scales[0]:.2f}"
+    return "per-joint"
 
 
 def _publish_for(adapter, effort, seconds: float) -> None:
@@ -562,26 +621,50 @@ def _publish_for(adapter, effort, seconds: float) -> None:
         time.sleep(0.01)
 
 
-def _describe_torque(group, torque) -> None:
-    print("  joint            modelled gravity torque (N.m)")
-    for canonical, value in zip(group.joints, torque):
-        print(f"  {canonical:<16} {value:+8.2f}")
+def _describe_torque(group, torque, scales) -> None:
+    print("  joint            modelled (N.m)   scale   published (N.m)")
+    for canonical, value, scale in zip(group.joints, torque, scales):
+        print(f"  {canonical:<16} {value:+8.2f}   {scale:9.2f} {value * scale:+12.2f}")
 
 
-def _report_sweep(group, rows) -> None:
-    """Print the sweep as a table, and name the scale that measured best."""
+def _report_sweep(group, rows, index: int | None) -> None:
+    """Print the sweep as a table, and name what measured best.
+
+    With one joint varying, "best" is that joint's own error: a global worst
+    would be dominated by joints this sweep never touched.
+    """
     print()
-    header = "  scale  " + "".join(f"{canonical:>10}" for canonical in group.joints)
-    print(header)
-    for scale, error in rows:
-        print(f"  {scale:5.2f}  " + "".join(f"{value:+10.4f}" for value in error))
-    best = min(rows, key=lambda row: float(np.max(np.abs(row[1]))))
-    print()
-    print(
-        f"best measured scale: {best[0]:g} "
-        f"(worst joint {np.max(np.abs(best[1])):+.4f} rad)"
+    print("  scale  " + "".join(f"{canonical:>10}" for canonical in group.joints))
+    for scales, error in rows:
+        label = _scale_label(scales, index)
+        print(f"  {label:>5}  " + "".join(f"{value:+10.4f}" for value in error))
+
+    score = (
+        (lambda row: abs(float(row[1][index])))
+        if index is not None
+        else (lambda row: float(np.max(np.abs(row[1]))))
     )
-    print("re-run with --scale to hold there, and record it in the profile notes")
+    best = min(rows, key=score)
+    print()
+    if index is not None:
+        joint = group.joints[index]
+        print(
+            f"best measured scale for {joint}: {best[0][index]:g} "
+            f"(that joint {best[1][index]:+.4f} rad)"
+        )
+        print(
+            "  refine the next joint the same way, then hold them all at once:\n"
+            "  --scale " + ",".join(f"{value:g}" for value in best[0])
+        )
+    else:
+        print(
+            f"best measured scale: {best[0][0]:g} "
+            f"(worst joint {np.max(np.abs(best[1])):+.4f} rad)"
+        )
+        print(
+            "  refine one joint at a time from here with --sweep-joint, since "
+            "each joint's optimum differs"
+        )
 
 
 def _pose_follow(args, profile) -> int:
@@ -603,10 +686,7 @@ def _pose_follow(args, profile) -> int:
             f"group {group.name!r} has no planning group, so it has no "
             "end-effector marker to follow"
         )
-    if not 0.0 <= args.gravity <= MAX_GRAVITY_SCALE:
-        raise ValueError(
-            f"gravity scale {args.gravity:g} is outside 0 to {MAX_GRAVITY_SCALE:g}"
-        )
+    _check_scales(_scale_vector(args.gravity, group), group)
     if args.seconds <= 0:
         raise ValueError("--seconds must be positive")
 
@@ -618,7 +698,12 @@ def _pose_follow(args, profile) -> int:
         state = adapter.read_state()
         print(
             f"following {group.tip_link} at {1.0 / period:g} Hz for "
-            f"{args.seconds:g} s, gravity scale {args.gravity:g}"
+            f"{args.seconds:g} s, gravity "
+            + (
+                "off"
+                if args.gravity is None
+                else f"scale {_scale_label(_scale_vector(args.gravity, group), None)}"
+            )
         )
         print("drag the marker in RViz; the arm tracks it until the time runs out")
         if not args.execute:
@@ -630,6 +715,10 @@ def _pose_follow(args, profile) -> int:
 
 def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
     from .kinematics import twist_between
+
+    scales = None if args.gravity is None else _scale_vector(args.gravity, group)
+    if scales is not None and not np.any(scales):
+        scales = None
 
     samples = 0
     notes: dict[str, int] = {}
@@ -645,9 +734,9 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
             adapter.pump(timeout_sec=0.0)
             target = adapter.latest_marker_target()
             state = adapter.read_state(timeout_sec=1.0)
-            if args.gravity > 0.0:
+            if scales is not None:
                 adapter.send_effort(
-                    gate.authorize_effort(chain.gravity_torque(state) * args.gravity)
+                    gate.authorize_effort(chain.gravity_torque(state) * scales)
                 )
             if target is not None:
                 goal = np.eye(4)
@@ -669,7 +758,7 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
     finally:
         # Stop commanding, and stop pushing. The trajectory controller holds its
         # last position, which is where the arm already is, so it stays put.
-        if args.gravity > 0.0:
+        if scales is not None:
             adapter.send_effort(np.zeros(len(group.joints)))
         print(f"followed {samples} samples; the arm holds its last commanded pose")
         if samples:

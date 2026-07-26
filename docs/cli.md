@@ -401,8 +401,9 @@ Publish gravity feedforward torque, and measure the scale that works.
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--group` | *required* | Group to compensate; must declare an `effort_controller` |
-| `--scale` | *one of these two* | Fraction of the modelled gravity torque to publish |
-| `--sweep` | *one of these two* | Comma-separated scales to measure in turn |
+| `--scale` | `1.0` | Fraction of the modelled torque: one value, or one per joint |
+| `--sweep` | — | Comma-separated scales to measure in turn |
+| `--sweep-joint` | all joints | Canonical joint whose scale `--sweep` varies, holding the rest at `--scale` |
 | `--hold-sec` | `2.0` | Seconds to publish at each scale before measuring |
 | `--execute` | off | Publish; without it the torque is only computed and printed |
 
@@ -443,12 +444,40 @@ robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.25,0.5,0.7
 best measured scale: 0.75 (worst joint +0.0121 rad)
 ```
 
+### Refining one joint at a time
+
+A single number can only reach a compromise, because each joint's optimum is
+different: measured on the real right arm, extrapolating each joint's error to
+zero puts `r_aj_2` at about 1.14, `r_aj_1` at 1.23 and `r_aj_3` at 1.31. The
+modelled torque's *distribution* is off, not only its magnitude.
+
+So find the global optimum first, then refine each joint against it.
+`--sweep-joint` varies one joint's scale and holds the rest at `--scale`:
+
+```bash
+# --execute publishes torque at each scale; only r_aj_2's share changes.
+robotctl pose gravity --group openarm_right_arm --execute --scale 1.1 --sweep-joint r_aj_2 --sweep 1.05,1.1,1.15,1.2
+```
+
+The report scores that joint's own error rather than the worst across the arm —
+a global worst would be dominated by joints this sweep never touched — and
+prints the full vector to carry into the next round:
+
+```text
+best measured scale for r_aj_2: 1.15 (that joint +0.0031 rad)
+  refine the next joint the same way, then hold them all at once:
+  --scale 1.1,1.15,1.1,1.1,1.1,1.1,1.1
+```
+
 Then hold there:
 
 ```bash
 # --execute publishes torque; the arm holds itself up until you stop the command:
-robotctl pose gravity --group openarm_right_arm --scale 0.75 --execute
+robotctl pose gravity --group openarm_right_arm --scale 1.1,1.15,1.1,1.1,1.1,1.1,1.1 --execute
 ```
+
+`pose follow --gravity` takes the same one-or-per-joint form, so a tuned vector
+carries straight over.
 
 Scales above `1.5` are refused. Over-compensating does not mispose the arm, it
 drives it away from the pose it was holding. The torque is also checked against
@@ -472,7 +501,7 @@ time.
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--group` | *required* | Group to move; must have a planning group |
-| `--gravity` | `0.0` | Gravity feedforward scale to hold while following |
+| `--gravity` | off | Gravity feedforward scale: one value, or one per joint |
 | `--seconds` | `60.0` | How long to follow before stopping on its own |
 | `--execute` | off | Publish; without it the command only reports what it would do |
 
