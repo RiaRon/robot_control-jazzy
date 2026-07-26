@@ -718,6 +718,7 @@ Publish an identification excitation and record what the arm did.
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--group` | *required* | Group to excite; must have a trajectory controller |
 | `--output` | *required with `--execute`* | `.npz` recording to write |
+| `--repetitions` | `1` | `3` runs the same excitation three times and writes a manifest |
 | `--dry-run` | on | Build and authorize the track without publishing |
 | `--execute` | off | Publish it and record the response |
 | `--amplitude-scale` | `0.3` | Fraction of the per-joint range to excite, in `(0, 1]` |
@@ -798,6 +799,38 @@ keeps the alignment a decision that can still be revised.
 The reported gap is what says whether the recording can be trusted:
 `/joint_states` is subscribed best-effort, so messages can be dropped, and
 `normalize` interpolates across a gap without knowing it was one.
+
+### Three repetitions, and the one that is held out
+
+```bash
+# --execute publishes the excitation three times and the arm moves through all
+# of it, returning to the start between runs. Keep the E-stop within reach.
+robotctl r2s collect --group openarm_right_arm --output run.npz --repetitions 3 --execute
+```
+
+Writes `run0.npz`, `run1.npz`, `run2.npz` and a manifest `run.json`:
+
+```json
+{
+  "group": "openarm_right_arm",
+  "runs": [{"path": "run0.npz"}, {"path": "run1.npz"}, {"path": "run2.npz"}],
+  "fit_runs": [0, 1],
+  "holdout_runs": [2]
+}
+```
+
+Exactly three, or one. `split_repetitions` has always required three — two to fit
+and one held out — and the v2 bundle's `source` block has always carried
+`fit_runs` and `holdout_runs`. Two repetitions would leave one of each, and a
+model fitted on a single run has nothing to be validated against, so `2` is
+refused.
+
+The arm returns to the starting pose between runs. The excitation ends wherever
+its last phase left it, not at neutral, so without that the second run would be a
+different experiment.
+
+The manifest is written only after every recording is on disk. One naming a file
+that was never written would be worse than none.
 
 **Exit codes:** `0` published or planned; `2` no `--group`, `--execute` without
 `--output`, a gripper group, an amplitude too fast to slew, or no adapter;

@@ -37,6 +37,7 @@ from .identification import (
     design_pose_set,
     fit_second_order,
     fit_static_gravity,
+    split_repetitions,
     validate_holdout,
 )
 from .interface import CanonicalInterface
@@ -79,6 +80,10 @@ DEFAULT_COLLECT_SCALES = "0,0.5,1.0"
 # Half of each joint's range, about its middle. A pose against a hard stop cannot
 # droop, and a joint that cannot droop looks exactly like one held by stiction.
 DEFAULT_REACH = 0.5
+# Two to fit and one held out, which is what split_repetitions has always
+# required. Two runs would leave one of each, and a model fitted on one run has
+# nothing to be validated against.
+REPETITIONS = 3
 # Below this fraction of improvement the loop has stopped converging: the arm
 # is against a hard stop, or holding something, and more passes would only wind
 # the command further past a target it cannot reach.
@@ -196,6 +201,13 @@ def _parser() -> argparse.ArgumentParser:
             )
             item.add_argument(
                 "--output", type=Path, help="`.npz` recording to write"
+            )
+            item.add_argument(
+                "--repetitions",
+                type=int,
+                default=1,
+                help="run the same excitation this many times; 3 writes a "
+                "manifest naming two to fit and one to hold out",
             )
         if stage == "fit":
             item.add_argument("--population", type=int, default=128)
@@ -1224,6 +1236,14 @@ def _collect_track(args, profile) -> int:
             "run that moved the robot leaves behind"
         )
         return UNUSABLE
+    if args.repetitions not in (1, REPETITIONS):
+        print(
+            f"error: --repetitions must be 1 or {REPETITIONS}, got "
+            f"{args.repetitions}. An identification run needs exactly three: "
+            "two to fit and one held out. Two would leave one of each, and a "
+            "model fitted on one run has nothing to be validated against."
+        )
+        return UNUSABLE
     try:
         return _collect_track_run(args, profile)
     except (SafetyError, Refused) as error:
@@ -1284,32 +1304,97 @@ def _collect_track_run(args, profile) -> int:
             print("DRY RUN: nothing was published; pass --execute to collect")
             return 0
 
-        stamps: list[int] = []
-        adapter.start_recording()
-        try:
-            for sample in command:
-                cycle = time.monotonic()
-                adapter.pump(timeout_sec=0.0)
-                # Stamped at publish, not from the planned clock: the planned
-                # time is the intent and this is what happened.
-                stamps.append(adapter.now_ns())
-                adapter.stream_positions(sample, period_sec=period)
-                time.sleep(max(0.0, period - (time.monotonic() - cycle)))
-            adapter.pump(timeout_sec=0.0)
-        finally:
-            recording = adapter.stop_recording()
+        written: list[Path] = []
+        for index in range(args.repetitions):
+            if index:
+                # Back to where the first run started, or these are not
+                # repetitions of the same experiment. The excitation ends
+                # wherever its last phase left the arm, not at neutral.
+                print(f"\nrun {index}: returning to the starting pose")
+                state = adapter.read_state()
+                points = _gate(profile, group, seed=state).authorize_trajectory(
+                    [neutral], start_time_sec=0.0, period_sec=DEFAULT_DURATION_SEC
+                )
+                adapter.send_trajectory(points, period_sec=DEFAULT_DURATION_SEC)
+            stamps, recording = _publish_excitation(adapter, command, period)
+            _report_recording(len(command), recording, rate)
+            path = _repetition_path(args.output, index, args.repetitions)
+            _write_recording(
+                path,
+                profile,
+                group,
+                stamps,
+                command[: len(stamps)],
+                recording,
+            )
+            print(f"collect: {path}")
+            written.append(path)
 
-    _report_recording(len(command), recording, rate)
-    _write_recording(
-        args.output,
-        profile,
-        group,
-        np.asarray(stamps, dtype=np.int64),
-        command[: len(stamps)],
-        recording,
-    )
-    print(f"collect: {args.output}")
+    if args.repetitions > 1:
+        # Only once every run is on disk. A manifest naming a recording that was
+        # never written is worse than no manifest.
+        manifest = _write_run_manifest(args.output, profile, group, written)
+        print(f"collect: {manifest}")
     return 0
+
+
+def _repetition_path(output: Path, index: int, repetitions: int) -> Path:
+    if repetitions == 1:
+        return Path(output)
+    output = Path(output)
+    return output.with_name(f"{output.stem}{index}{output.suffix}")
+
+
+def _publish_excitation(adapter, command, period):
+    """Stream every sample, recording throughout, and release on any exit."""
+    stamps: list[int] = []
+    adapter.start_recording()
+    try:
+        for sample in command:
+            cycle = time.monotonic()
+            adapter.pump(timeout_sec=0.0)
+            # Stamped at publish, not from the planned clock: the planned time
+            # is the intent and this is what happened.
+            stamps.append(adapter.now_ns())
+            adapter.stream_positions(sample, period_sec=period)
+            time.sleep(max(0.0, period - (time.monotonic() - cycle)))
+        adapter.pump(timeout_sec=0.0)
+    finally:
+        recording = adapter.stop_recording()
+    return np.asarray(stamps, dtype=np.int64), recording
+
+
+def _write_run_manifest(output: Path, profile, group, written: list[Path]) -> Path:
+    """Name the recordings, and which of them is held out.
+
+    `split_repetitions` decides the split rather than this function, so the rule
+    lives in one place and the bundle's `fit_runs` and `holdout_runs` cite the
+    same one.
+    """
+    output = Path(output)
+    names = [path.name for path in written]
+    fit, holdout = split_repetitions(names)
+    manifest = output.with_suffix(".json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "excitation_runs",
+                "profile": profile.name,
+                "asset": {
+                    "id": profile.asset_id,
+                    "manifest_sha256": profile.manifest_sha256,
+                },
+                "group": group.name,
+                "runs": [{"path": name} for name in names],
+                "fit_runs": [names.index(name) for name in fit],
+                "holdout_runs": [names.index(name) for name in holdout],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return manifest
 
 
 def _report_recording(published: int, recording, rate: float) -> None:
