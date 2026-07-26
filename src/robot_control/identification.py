@@ -10,6 +10,24 @@ class FitError(ValueError):
     pass
 
 
+#: One count of a 14-bit absolute encoder over a full turn is 2*pi/16384, about
+#: 3.8e-4 rad. Below that a joint has not measurably moved, whatever the torque
+#: did, so the pair of samples says nothing about its stiffness.
+DEFAULT_NOISE_RAD = 4e-4
+
+#: Two samples count as distinct torque levels when they differ by this fraction
+#: of the sweep's own torque span. Scale-free on purpose: the absolute torques
+#: differ by an order of magnitude between a shoulder and a wrist.
+DISTINCT_TORQUE_FRACTION = 0.05
+
+#: Condition number of a joint's normalised regression above which its
+#: parameters are not considered separated. A single pose sits above 1e5 however
+#: many scales it holds, because the modelled torque is then a constant column
+#: and cannot be told from the offset; two poses whose modelled torque differs
+#: by 10% sit near 50.
+MAX_CONDITION = 200.0
+
+
 @dataclass(frozen=True)
 class SecondOrderEstimate:
     stiffness: np.ndarray
@@ -85,6 +103,183 @@ class GravitySweep:
     @property
     def rounds(self) -> int:
         return int(self.poses.shape[0])
+
+
+@dataclass(frozen=True)
+class StaticEstimate:
+    """Per joint, what the sweeps say about how it holds a load.
+
+    ``stiffness`` is in N.m/rad and carries no inertia, which is what makes it
+    worth measuring: the dynamic fit returns every parameter divided by an
+    inertia it cannot separate, and this is the second equation that separates
+    it.
+
+    A joint the sweeps could not identify is ``nan`` here and named in
+    ``unidentifiable`` with the reason. Least squares always returns something;
+    a number for a joint whose load never varied would be that something.
+    """
+
+    joint_names: tuple[str, ...]
+    #: kp, N.m/rad.
+    stiffness: np.ndarray
+    #: alpha: the factor the modelled gravity torque was wrong by.
+    torque_scale: np.ndarray
+    #: c, rad: the scale-independent standing error, which is where stiction is.
+    offset: np.ndarray
+    residual_rmse: np.ndarray
+    #: Conditioning of each joint's regression, so a marginal fit is visible.
+    condition: np.ndarray
+    #: Rounds that entered each joint's fit, and rounds dropped as frozen.
+    used: np.ndarray
+    excluded: np.ndarray
+    unidentifiable: tuple[tuple[str, str], ...]
+
+
+def _frozen_rounds(sweep: GravitySweep, joint: int, noise_rad: float) -> set[int]:
+    """Rounds where the applied torque changed and the joint did not move.
+
+    Inside its stiction band a joint is held by friction rather than by the
+    position error, so its standing error stops responding to torque. Those
+    samples do not merely add noise, they pull the fitted stiffness towards
+    infinity, and they have to go. Both members of such a pair are dropped: the
+    first one is where the joint stopped, and nothing says whether that was its
+    equilibrium or the edge of the band.
+    """
+    applied = sweep.scales[:, joint] * sweep.modelled_torque[:, joint]
+    span = float(np.max(applied) - np.min(applied))
+    distinct = span * DISTINCT_TORQUE_FRACTION
+    order = np.argsort(applied)
+    frozen: set[int] = set()
+    for first, second in zip(order, order[1:]):
+        commanded = abs(float(applied[second] - applied[first]))
+        moved = abs(float(sweep.errors[second, joint] - sweep.errors[first, joint]))
+        if commanded > distinct and moved <= noise_rad:
+            frozen.update((int(first), int(second)))
+    return frozen
+
+
+def fit_static_gravity(
+    sweeps: Sequence[GravitySweep],
+    *,
+    noise_rad: float = DEFAULT_NOISE_RAD,
+    max_condition: float = MAX_CONDITION,
+) -> StaticEstimate:
+    """Fit stiffness, a torque-model correction and an offset from held poses.
+
+    At equilibrium the impedance controller balances the load with a standing
+    position error, so with a fraction *s* of the modelled torque fed forward:
+
+        kp (q_cmd - q) = alpha tau_model - s tau_model
+
+    which, with an offset for what friction holds without any error at all, is
+
+        error = (alpha - s) tau_model / kp + c
+
+    Linear in ``alpha/kp``, ``1/kp`` and ``c``, so it is least squares — but
+    only once ``tau_model`` itself varies. At a single pose it is a constant
+    column, indistinguishable from the offset, and the fit is under-determined
+    however many scales the sweep held. Varying it is what several poses buys.
+    """
+    sweeps = list(sweeps)
+    if not sweeps:
+        raise FitError("a static fit needs at least one gravity sweep")
+    names = sweeps[0].joint_names
+    group = sweeps[0].group
+    for sweep in sweeps[1:]:
+        # Group first: it is the identity the operator chose, and a group
+        # mismatch always drags a joint mismatch along behind it.
+        if sweep.group != group:
+            raise FitError(
+                f"sweeps cover different groups: {group!r} and {sweep.group!r}"
+            )
+        if sweep.joint_names != names:
+            raise FitError(
+                f"sweeps cover different joints: {list(names)} against "
+                f"{list(sweep.joint_names)}"
+            )
+
+    width = len(names)
+    stiffness = np.full(width, np.nan)
+    torque_scale = np.full(width, np.nan)
+    offset = np.full(width, np.nan)
+    residual = np.full(width, np.nan)
+    condition = np.full(width, np.inf)
+    used = np.zeros(width, dtype=int)
+    excluded = np.zeros(width, dtype=int)
+    unidentifiable: list[tuple[str, str]] = []
+
+    for joint, name in enumerate(names):
+        rows: list[tuple[float, float, float]] = []
+        targets: list[float] = []
+        for sweep in sweeps:
+            frozen = _frozen_rounds(sweep, joint, noise_rad)
+            excluded[joint] += len(frozen)
+            for index in range(sweep.rounds):
+                if index in frozen:
+                    continue
+                torque = float(sweep.modelled_torque[index, joint])
+                scale = float(sweep.scales[index, joint])
+                rows.append((torque, -scale * torque, 1.0))
+                targets.append(float(sweep.errors[index, joint]))
+        used[joint] = len(rows)
+
+        if len(rows) < 3:
+            unidentifiable.append(
+                (
+                    name,
+                    f"{len(rows)} usable rounds against three parameters"
+                    + (f", {excluded[joint]} dropped as frozen" if excluded[joint] else ""),
+                )
+            )
+            continue
+        design = np.asarray(rows, dtype=float)
+        norms = np.linalg.norm(design, axis=0)
+        if not np.all(norms > 0):
+            unidentifiable.append(
+                (name, "no torque was ever fed forward to this joint")
+            )
+            continue
+        condition[joint] = float(np.linalg.cond(design / norms))
+        if condition[joint] > max_condition:
+            unidentifiable.append(
+                (
+                    name,
+                    f"condition {condition[joint]:.3g} over {max_condition:g}: "
+                    "the poses do not vary this joint's load enough to tell its "
+                    "stiffness from its torque model",
+                )
+            )
+            continue
+
+        target = np.asarray(targets, dtype=float)
+        params, _, _, _ = np.linalg.lstsq(design, target, rcond=None)
+        by_stiffness, inverse_stiffness, constant = (float(value) for value in params)
+        if inverse_stiffness <= 0:
+            unidentifiable.append(
+                (
+                    name,
+                    f"fitted stiffness {1.0 / inverse_stiffness:.3g} N.m/rad is "
+                    "not positive, so the joint did not respond to torque the "
+                    "way a spring does",
+                )
+            )
+            continue
+        stiffness[joint] = 1.0 / inverse_stiffness
+        torque_scale[joint] = by_stiffness / inverse_stiffness
+        offset[joint] = constant
+        residual[joint] = float(np.sqrt(np.mean((design @ params - target) ** 2)))
+
+    return StaticEstimate(
+        joint_names=names,
+        stiffness=stiffness,
+        torque_scale=torque_scale,
+        offset=offset,
+        residual_rmse=residual,
+        condition=condition,
+        used=used,
+        excluded=excluded,
+        unidentifiable=tuple(unidentifiable),
+    )
 
 
 def build_excitation(

@@ -404,6 +404,7 @@ Publish gravity feedforward torque, and measure the scale that works.
 | `--scale` | `1.0` | Fraction of the modelled torque: one value, or one per joint |
 | `--sweep` | — | Comma-separated scales to measure in turn |
 | `--sweep-joint` | all joints | Canonical joint whose scale `--sweep` varies, holding the rest at `--scale` |
+| `--output` | — | Write what the run measured, for `r2s identify` to fit |
 | `--hold-sec` | `2.0` | Seconds to publish at each scale before measuring |
 | `--execute` | off | Publish; without it the torque is only computed and printed |
 
@@ -488,9 +489,28 @@ allowed" is still a force in the wrong amount.
 Whatever happens, the command publishes zeros before it exits. Torque left
 applied after the process is gone would keep pushing.
 
+### Keeping the measurement: `--output`
+
+A sweep is already an identification experiment — a known torque published, a
+standing error measured — and `--output` keeps it instead of leaving it in the
+terminal:
+
+```bash
+# --execute publishes torque at each scale, and the run is recorded to disk:
+robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.5,1.0 --output sweeps/pose0.json
+```
+
+Each round in the file carries **its own** pose and its own modelled torque, not
+one for the whole sweep. Compensation moves the arm, so the load a joint holds at
+scale 1.0 is not the load it held at 0.0.
+
+The file records the profile, the asset id and the asset manifest hash, and
+`r2s identify` refuses it against anything else. `--output` needs `--execute`: a
+dry run publishes nothing, so there would be nothing measured to record.
+
 **Exit codes:** `0` published or printed; `2` unknown group, group with no
-`effort_controller` or no `tip_link`, a scale outside range, or no adapter;
-`3` torque over the profile's effort limit.
+`effort_controller` or no `tip_link`, a scale outside range, `--output` without
+`--execute`, or no adapter; `3` torque over the profile's effort limit.
 
 ## `robotctl pose follow`
 
@@ -762,6 +782,76 @@ along with the source track's SHA-256.
 
 **Exit codes:** `0` written; `SystemExit` for a missing path or a
 non-positive `--population`.
+
+## `robotctl r2s identify`
+
+Fit joint stiffness, stiction and a torque-model correction from gravity sweeps
+measured at several poses.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--profile` | `openarm_tesollo` | Built-in profile to load |
+| `--sweep` | *required, twice or more* | A file from `pose gravity --output`; pass it once per pose |
+| `--output` | *required* | JSON stiffness set to write |
+| `--noise` | `0.0004` | Radians below which a joint counts as not having moved |
+
+```bash
+robotctl r2s identify --sweep sweeps/pose0.json --sweep sweeps/pose1.json --sweep sweeps/pose2.json --output static.json
+```
+
+```text
+identify: 3 poses, 12 rounds at most per joint
+  joint            kp (N.m/rad)   alpha   offset (rad)  residual (rad)   cond  rounds  frozen
+  r_aj_1                  7.52   1.083       +0.00210         0.00021    4.8      12       0
+  ...
+```
+
+### Why several poses, and what each column means
+
+At equilibrium the impedance controller balances the load with a standing
+position error, so with a fraction `s` of the modelled torque fed forward:
+
+```
+error = (alpha - s) * tau_model / kp + c
+```
+
+`kp` is the stiffness the hardware applies, `alpha` is the factor the modelled
+torque was wrong by — masses the URDF does not know about, cabling, anything
+bolted on — and `c` is the scale-independent offset, which is where stiction
+lives.
+
+At **one** pose `tau_model` is a constant column, indistinguishable from the
+offset, so `kp`, the friction and the model's own error are one equation in three
+unknowns. That is why fitting the first real sweeps joint by joint gave `kp`
+values of 7.5, 15.4 and 28.4 against the vendor header's 20 — scattered in both
+directions, the signature of an under-determined fit rather than a surprising
+robot. Several poses vary `tau_model` while the friction stays put, and the pair
+separates.
+
+`cond` is the conditioning of that joint's regression. Two poses whose modelled
+torque differs by 10% sit near 50; nearly the same pose twice sits in the
+hundreds. Above 200 the joint is reported as not identified rather than given a
+number.
+
+`frozen` counts rounds dropped because the torque changed and the joint did not
+move — it was inside its stiction band, held by friction rather than by the
+position error, and those samples pull the fitted stiffness towards infinity
+rather than merely adding noise. Both members of such a pair go: the first is
+where the joint stopped, and nothing says whether that was its equilibrium or the
+edge of the band. Measured on the real right arm, `r_aj_4` sat at exactly
+`+0.0075` rad across six consecutive scales.
+
+### Why it refuses rather than reporting a partial answer
+
+Nothing written unless every joint identified. Least squares always returns
+something, and a stiffness for a joint whose load never varied is that something;
+`r2s fit` turns it into an inertia, and after that nothing could tell it from a
+measured one. The report still prints, naming which joints failed and why, which
+is what says whether to add a pose or to free a stuck joint.
+
+**Exit codes:** `0` written; `2` no `--output`, a sweep from another profile or
+asset, a tampered file, or sweeps covering different groups; `3` fewer than two
+`--sweep` files, or at least one joint could not be identified.
 
 ## `robotctl r2s validate`
 

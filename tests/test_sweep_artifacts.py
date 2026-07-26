@@ -166,3 +166,90 @@ def test_a_sweep_with_no_rounds_is_refused(profile):
 def test_a_sweep_joint_outside_the_sweep_is_refused(profile):
     with pytest.raises(FitError, match="sweep_joint"):
         _sweep(profile, sweep_joint="l_aj_1")
+
+
+def test_a_sweep_digest_changes_with_what_it_measured(profile):
+    from robot_control.artifacts import sweep_sha256
+
+    original = _sweep(profile)
+    nudged = dataclasses.replace(original, errors=original.errors + 1e-9)
+
+    assert sweep_sha256(original) == sweep_sha256(_sweep(profile))
+    assert sweep_sha256(original) != sweep_sha256(nudged)
+
+
+def _estimate(profile, group=GROUP):
+    from robot_control.identification import StaticEstimate
+
+    joints = profile.groups[group].joints
+    width = len(joints)
+    return StaticEstimate(
+        joint_names=joints,
+        stiffness=np.linspace(7.5, 28.0, width),
+        torque_scale=np.linspace(0.9, 1.2, width),
+        offset=np.full(width, 0.0015),
+        residual_rmse=np.full(width, 3e-4),
+        condition=np.full(width, 12.0),
+        used=np.full(width, 12, dtype=int),
+        excluded=np.zeros(width, dtype=int),
+        unidentifiable=(),
+    )
+
+
+def test_a_static_estimate_round_trips_through_a_file(profile, tmp_path):
+    from robot_control.artifacts import read_static_estimate, write_static_estimate
+
+    original = _estimate(profile)
+    path = tmp_path / "static.json"
+
+    write_static_estimate(
+        path, original, profile, group=GROUP, noise_rad=4e-4, sources=["a" * 64]
+    )
+    group, loaded = read_static_estimate(path, profile)
+
+    assert group == GROUP
+    assert loaded.joint_names == original.joint_names
+    np.testing.assert_allclose(loaded.stiffness, original.stiffness)
+    np.testing.assert_allclose(loaded.torque_scale, original.torque_scale)
+    np.testing.assert_allclose(loaded.offset, original.offset)
+    assert json.loads(path.read_text())["sources"]["sweep_sha256"] == ["a" * 64]
+
+
+def test_an_incomplete_static_estimate_is_never_written(profile, tmp_path):
+    """A hole in the file reads back as an answer for the joints it does have."""
+    from robot_control.artifacts import write_static_estimate
+
+    partial = dataclasses.replace(
+        _estimate(profile), unidentifiable=(("r_aj_4", "frozen"),)
+    )
+    path = tmp_path / "static.json"
+
+    with pytest.raises(ArtifactError, match="r_aj_4"):
+        write_static_estimate(
+            path, partial, profile, group=GROUP, noise_rad=4e-4, sources=[]
+        )
+    assert not path.exists()
+
+
+def test_a_static_estimate_is_refused_against_another_asset(profile, tmp_path):
+    from robot_control.artifacts import read_static_estimate, write_static_estimate
+
+    path = tmp_path / "static.json"
+    write_static_estimate(
+        path, _estimate(profile), profile, group=GROUP, noise_rad=4e-4, sources=[]
+    )
+    other = dataclasses.replace(profile, asset_id="something-else")
+
+    with pytest.raises(ArtifactError, match="profile or asset"):
+        read_static_estimate(path, other)
+
+
+def test_a_sweep_cannot_be_read_as_a_static_estimate(profile, tmp_path):
+    """The two files share a header; nothing else about them is interchangeable."""
+    from robot_control.artifacts import read_static_estimate
+
+    path = tmp_path / "sweep.json"
+    write_sweep(path, _sweep(profile), profile)
+
+    with pytest.raises(ArtifactError, match="expected a static_gravity_estimate"):
+        read_static_estimate(path, profile)

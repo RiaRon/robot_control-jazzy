@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
-from .identification import FitError, GravitySweep
+from .identification import FitError, GravitySweep, StaticEstimate
 from .profile import RobotProfile
 from .track import CanonicalTrack
 
@@ -16,9 +17,13 @@ class ArtifactError(RuntimeError):
     pass
 
 
-#: Bumped when the sweep payload's meaning changes, not when a field is added
-#: that older readers can ignore — there are none, so it never has been.
+#: Bumped when a payload's meaning changes, not when a field is added that older
+#: readers can ignore — there are none, so it never has been.
 SWEEP_SCHEMA_VERSION = 1
+STATIC_SCHEMA_VERSION = 1
+
+SWEEP_KIND = "gravity_sweep"
+STATIC_KIND = "static_gravity_estimate"
 
 
 def track_sha256(track: CanonicalTrack) -> str:
@@ -30,60 +35,79 @@ def track_sha256(track: CanonicalTrack) -> str:
     return digest.hexdigest()
 
 
+def sweep_sha256(sweep: GravitySweep) -> str:
+    """A digest of what a sweep measured, for citing it as a fit's source."""
+    digest = hashlib.sha256()
+    for grid in (sweep.poses, sweep.modelled_torque, sweep.scales, sweep.errors):
+        digest.update(np.ascontiguousarray(grid, dtype="<f8").tobytes())
+    digest.update(
+        json.dumps(
+            [sweep.group, list(sweep.joint_names), sweep.sweep_joint],
+            separators=(",", ":"),
+        ).encode()
+    )
+    return digest.hexdigest()
+
+
 def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    # allow_nan=False on purpose: a nan reaching a file would read back as a
+    # number in Python and as a syntax error everywhere else.
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
 
 
-def write_sweep(
-    path: str | Path, sweep: GravitySweep, profile: RobotProfile
-) -> None:
-    """Write a measured sweep, tied to the robot it was measured on.
+def _header(kind: str, version: int, profile: RobotProfile) -> dict[str, Any]:
+    """The provenance every measured artifact carries.
 
     The profile name, the asset id and the manifest hash go in the file rather
-    than being supplied at read time, because a sweep is a set of numbers about
-    one physical arm: read against a different one it is not merely stale, it
-    is wrong in a way nothing downstream could detect.
+    than being supplied at read time, because these are numbers about one
+    physical arm: read against a different one they are not merely stale, they
+    are wrong in a way nothing downstream could detect.
     """
-    payload: dict[str, Any] = {
-        "schema_version": SWEEP_SCHEMA_VERSION,
-        "kind": "gravity_sweep",
+    return {
+        "schema_version": version,
+        "kind": kind,
         "profile": profile.name,
         "asset": {
             "id": profile.asset_id,
             "manifest_sha256": profile.manifest_sha256,
         },
-        "group": sweep.group,
-        "joint_names": list(sweep.joint_names),
-        "sweep_joint": sweep.sweep_joint,
-        "rounds": [
-            {
-                "pose": sweep.poses[index].tolist(),
-                "modelled_torque": sweep.modelled_torque[index].tolist(),
-                "scale": sweep.scales[index].tolist(),
-                "error": sweep.errors[index].tolist(),
-            }
-            for index in range(sweep.rounds)
-        ],
     }
+
+
+def _sign_and_write(path: str | Path, payload: dict[str, Any]) -> None:
     payload["checksum_sha256"] = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
 
 
-def read_sweep(path: str | Path, profile: RobotProfile) -> GravitySweep:
+def _verify(
+    path: str | Path, profile: RobotProfile, kind: str, version: int
+) -> dict[str, Any]:
+    """Read a signed artifact, refusing anything it was not measured against.
+
+    Unlike a calibration bundle, an unsigned file is refused outright rather
+    than trusted: this tool is the only thing that writes these.
+    """
     payload = json.loads(Path(path).read_text())
-    version = payload.get("schema_version")
-    if version != SWEEP_SCHEMA_VERSION:
+    if not isinstance(payload, dict):
+        raise ArtifactError(f"{kind} is not an object")
+    if payload.get("kind") != kind:
+        raise ArtifactError(f"expected a {kind}, found {payload.get('kind')!r}")
+    if payload.get("schema_version") != version:
         raise ArtifactError(
-            f"unsupported sweep schema_version: {version!r}, expected "
-            f"{SWEEP_SCHEMA_VERSION}"
+            f"unsupported {kind} schema_version: "
+            f"{payload.get('schema_version')!r}, expected {version}"
         )
 
     checksum = payload.get("checksum_sha256")
     unsigned = {key: value for key, value in payload.items() if key != "checksum_sha256"}
     if checksum != hashlib.sha256(_canonical_bytes(unsigned)).hexdigest():
-        raise ArtifactError("sweep checksum mismatch")
+        raise ArtifactError(f"{kind} checksum mismatch")
 
     asset = payload.get("asset") or {}
     if (
@@ -92,20 +116,49 @@ def read_sweep(path: str | Path, profile: RobotProfile) -> GravitySweep:
         or asset.get("manifest_sha256") != profile.manifest_sha256
     ):
         raise ArtifactError("profile or asset manifest mismatch")
+    return payload
 
+
+def _group_joints(payload: Mapping[str, Any], profile: RobotProfile, kind: str):
     name = payload.get("group")
     group = profile.groups.get(name)
     if group is None:
         raise ArtifactError(
-            f"sweep names group {name!r}, which this profile does not have"
+            f"{kind} names group {name!r}, which this profile does not have"
         )
     names = tuple(payload.get("joint_names") or ())
     if names != group.joints:
         raise ArtifactError(
-            f"sweep joint names do not match group {name!r}: {list(names)} "
+            f"{kind} joint names do not match group {name!r}: {list(names)} "
             f"against {list(group.joints)}"
         )
+    return name, names
 
+
+def write_sweep(path: str | Path, sweep: GravitySweep, profile: RobotProfile) -> None:
+    payload = _header(SWEEP_KIND, SWEEP_SCHEMA_VERSION, profile)
+    payload.update(
+        {
+            "group": sweep.group,
+            "joint_names": list(sweep.joint_names),
+            "sweep_joint": sweep.sweep_joint,
+            "rounds": [
+                {
+                    "pose": sweep.poses[index].tolist(),
+                    "modelled_torque": sweep.modelled_torque[index].tolist(),
+                    "scale": sweep.scales[index].tolist(),
+                    "error": sweep.errors[index].tolist(),
+                }
+                for index in range(sweep.rounds)
+            ],
+        }
+    )
+    _sign_and_write(path, payload)
+
+
+def read_sweep(path: str | Path, profile: RobotProfile) -> GravitySweep:
+    payload = _verify(path, profile, SWEEP_KIND, SWEEP_SCHEMA_VERSION)
+    name, names = _group_joints(payload, profile, SWEEP_KIND)
     rounds = payload.get("rounds") or []
     try:
         return GravitySweep(
@@ -121,6 +174,81 @@ def read_sweep(path: str | Path, profile: RobotProfile) -> GravitySweep:
         )
     except (FitError, KeyError, TypeError, ValueError) as error:
         raise ArtifactError(f"malformed sweep: {error}") from error
+
+
+def write_static_estimate(
+    path: str | Path,
+    estimate: StaticEstimate,
+    profile: RobotProfile,
+    *,
+    group: str,
+    noise_rad: float,
+    sources: Sequence[str],
+) -> None:
+    """Write an identified stiffness set, citing the sweeps it came from.
+
+    Only a complete estimate is written. A file with a hole in it would read
+    back as an authoritative answer for the joints it does have, and Task 4's
+    inertia is a product of the two fits: a missing stiffness there becomes a
+    missing inertia, silently.
+    """
+    if estimate.unidentifiable:
+        raise ArtifactError(
+            "refusing to write an incomplete estimate; unidentified: "
+            + ", ".join(name for name, _reason in estimate.unidentifiable)
+        )
+    payload = _header(STATIC_KIND, STATIC_SCHEMA_VERSION, profile)
+    payload.update(
+        {
+            "group": group,
+            "joint_names": list(estimate.joint_names),
+            "noise_rad": float(noise_rad),
+            "sources": {"sweep_sha256": list(sources)},
+            "stiffness_nm_per_rad": estimate.stiffness.tolist(),
+            "torque_scale": estimate.torque_scale.tolist(),
+            "offset_rad": estimate.offset.tolist(),
+            "residual_rmse_rad": estimate.residual_rmse.tolist(),
+            "condition": estimate.condition.tolist(),
+            "rounds_used": estimate.used.tolist(),
+            "rounds_excluded": estimate.excluded.tolist(),
+        }
+    )
+    _sign_and_write(path, payload)
+
+
+def read_static_estimate(
+    path: str | Path, profile: RobotProfile
+) -> tuple[str, StaticEstimate]:
+    """Read an identified stiffness set, returning its group and the estimate."""
+    payload = _verify(path, profile, STATIC_KIND, STATIC_SCHEMA_VERSION)
+    name, names = _group_joints(payload, profile, STATIC_KIND)
+
+    def grid(key: str, dtype=float) -> np.ndarray:
+        values = np.asarray(payload.get(key), dtype=dtype)
+        if values.shape != (len(names),):
+            raise ArtifactError(
+                f"{key} must carry one value per joint: expected {len(names)}, "
+                f"got {values.shape}"
+            )
+        return values
+
+    try:
+        estimate = StaticEstimate(
+            joint_names=names,
+            stiffness=grid("stiffness_nm_per_rad"),
+            torque_scale=grid("torque_scale"),
+            offset=grid("offset_rad"),
+            residual_rmse=grid("residual_rmse_rad"),
+            condition=grid("condition"),
+            used=grid("rounds_used", int),
+            excluded=grid("rounds_excluded", int),
+            unidentifiable=(),
+        )
+    except (TypeError, ValueError) as error:
+        raise ArtifactError(f"malformed static estimate: {error}") from error
+    if not np.all(estimate.stiffness > 0):
+        raise ArtifactError("static estimate carries a stiffness that is not positive")
+    return name, estimate
 
 
 def write_hdf5(path: str | Path, track: CanonicalTrack) -> None:

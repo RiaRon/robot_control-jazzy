@@ -8,12 +8,24 @@ import time
 
 import numpy as np
 
-from .artifacts import read_hdf5, track_sha256, write_hdf5, write_sweep
+from .artifacts import (
+    ArtifactError,
+    read_hdf5,
+    read_sweep,
+    sweep_sha256,
+    track_sha256,
+    write_hdf5,
+    write_static_estimate,
+    write_sweep,
+)
 from .calibration import load_bundle
 from .identification import (
+    DEFAULT_NOISE_RAD,
+    FitError,
     GravitySweep,
     build_excitation,
     fit_second_order,
+    fit_static_gravity,
     validate_holdout,
 )
 from .interface import CanonicalInterface
@@ -63,9 +75,34 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     r2s = commands.add_parser("r2s")
     stages = r2s.add_subparsers(dest="stage", required=True)
-    for stage in ("preflight", "collect", "normalize", "fit", "validate", "export"):
+    for stage in (
+        "preflight",
+        "collect",
+        "normalize",
+        "fit",
+        "identify",
+        "validate",
+        "export",
+    ):
         item = stages.add_parser(stage)
         item.add_argument("--profile", default="openarm_tesollo")
+        if stage == "identify":
+            item.add_argument(
+                "--sweep",
+                type=Path,
+                action="append",
+                help="a file written by pose gravity --output; pass it once per "
+                "pose, since one pose cannot separate stiffness from the "
+                "torque model",
+            )
+            item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--noise",
+                type=float,
+                default=DEFAULT_NOISE_RAD,
+                help="radians below which a joint counts as not having moved, "
+                "so its samples are dropped as frozen by stiction",
+            )
         if stage == "collect":
             mode = item.add_mutually_exclusive_group()
             mode.add_argument("--dry-run", action="store_true")
@@ -829,6 +866,80 @@ def _pose_rviz(args) -> int:
     return subprocess.call(command)
 
 
+def _identify(args, profile) -> int:
+    """Fit stiffness, stiction and a torque correction from measured sweeps.
+
+    Refuses rather than reports a partial answer. Least squares always returns
+    something, and a stiffness for a joint whose load never varied is that
+    something; downstream it becomes an inertia, and nothing after this point
+    could tell it from a measured one.
+    """
+    if not args.output:
+        print("error: --output is required")
+        return UNUSABLE
+    sweeps = args.sweep or []
+    if len(sweeps) < 2:
+        print(
+            f"refused: --sweep must name at least two poses, got {len(sweeps)}. "
+            "At one pose the modelled torque is a constant, so the stiffness, "
+            "the friction and the model's own error are one equation in three "
+            "unknowns."
+        )
+        return REFUSED
+
+    try:
+        measured = [read_sweep(path, profile) for path in sweeps]
+        estimate = fit_static_gravity(measured, noise_rad=args.noise)
+    except ArtifactError as error:
+        print(f"error: {error}")
+        return UNUSABLE
+    except FitError as error:
+        print(f"error: {error}")
+        return UNUSABLE
+
+    _report_static(estimate, len(measured))
+    if estimate.unidentifiable:
+        print(
+            "refused: nothing written. Add a pose that loads the joints above "
+            "differently, or free a joint sitting in its stiction band, and run "
+            "identify again over every sweep."
+        )
+        return REFUSED
+
+    write_static_estimate(
+        args.output,
+        estimate,
+        profile,
+        group=measured[0].group,
+        noise_rad=args.noise,
+        sources=[sweep_sha256(sweep) for sweep in measured],
+    )
+    print(f"identify: {args.output}")
+    return 0
+
+
+def _report_static(estimate, poses: int) -> None:
+    """Print the fit per joint, so a marginal one is visible as such."""
+    print(f"identify: {poses} poses, {estimate.used.max()} rounds at most per joint")
+    print(
+        "  joint            kp (N.m/rad)   alpha   offset (rad)  "
+        "residual (rad)   cond  rounds  frozen"
+    )
+    for index, name in enumerate(estimate.joint_names):
+        stiffness = estimate.stiffness[index]
+        if not np.isfinite(stiffness):
+            print(f"  {name:<16} {'—':>12}")
+            continue
+        print(
+            f"  {name:<16} {stiffness:12.2f} {estimate.torque_scale[index]:7.3f} "
+            f"{estimate.offset[index]:+14.5f} {estimate.residual_rmse[index]:15.5f} "
+            f"{estimate.condition[index]:6.1f} {estimate.used[index]:7d} "
+            f"{estimate.excluded[index]:7d}"
+        )
+    for name, reason in estimate.unidentifiable:
+        print(f"  {name}: not identified — {reason}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "pose":
@@ -892,6 +1003,8 @@ def main(argv: list[str] | None = None) -> int:
             + "\n"
         )
         print(f"fit: {args.output}")
+    elif args.stage == "identify":
+        return _identify(args, profile)
     elif args.stage == "validate":
         if not args.bundle:
             raise SystemExit("--bundle is required")
