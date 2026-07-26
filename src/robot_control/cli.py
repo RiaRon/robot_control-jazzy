@@ -11,6 +11,7 @@ import numpy as np
 from .artifacts import (
     ArtifactError,
     read_hdf5,
+    read_static_estimate,
     read_sweep,
     sweep_sha256,
     track_sha256,
@@ -22,9 +23,11 @@ from .calibration import load_bundle
 from .identification import (
     DEFAULT_NOISE_RAD,
     MAX_CONDITION,
+    MAX_INERTIA_DISAGREEMENT,
     FitError,
     GravitySweep,
     build_excitation,
+    combine,
     design_pose_set,
     fit_second_order,
     fit_static_gravity,
@@ -185,6 +188,18 @@ def _parser() -> argparse.ArgumentParser:
             item.add_argument("--population", type=int, default=128)
             item.add_argument("--track", type=Path)
             item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--static",
+                type=Path,
+                help="a stiffness set from r2s identify; adds the gravity term "
+                "and turns the fit's ratios into physical parameters",
+            )
+            item.add_argument(
+                "--urdf",
+                type=Path,
+                help="robot description to compute the modelled torque along the "
+                "track; required with --static",
+            )
         if stage == "normalize":
             item.add_argument("--input", type=Path)
             item.add_argument("--output", type=Path)
@@ -1030,6 +1045,133 @@ def _identify(args, profile) -> int:
     return 0
 
 
+def _fit(args, profile) -> int:
+    """Fit the dynamic model, and with a static estimate, the physical parameters.
+
+    Without --static this is the three-parameter fit it always was, which is
+    right for a track with no standing load in it. With one, the modelled gravity
+    torque enters as a fourth column — otherwise the regression has nowhere to
+    put a standing load but into the stiffness — and the two fits together give
+    the inertia neither can reach alone.
+    """
+    from .kinematics import KinematicsError, chain_from_urdf
+
+    track = read_hdf5(args.track)
+    gravity = None
+    static = None
+    group = None
+    if args.static is not None:
+        if not args.urdf:
+            print(
+                "error: --static needs --urdf, to work out the modelled torque at "
+                "every sample along the track. Dump it from the running stack "
+                "with: ros2 param get --hide-type /robot_state_publisher "
+                "robot_description > robot.urdf"
+            )
+            return UNUSABLE
+        try:
+            name, static = read_static_estimate(args.static, profile)
+        except ArtifactError as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        group = profile.groups[name]
+        source_by_canonical = {
+            joint.canonical: joint.source for joint in profile.joints
+        }
+        sources = tuple(source_by_canonical[joint] for joint in group.joints)
+        if tuple(track.joint_names) not in (tuple(group.joints), sources):
+            print(
+                f"error: the track covers {list(track.joint_names)}, but the "
+                f"static estimate is for group {name!r}, whose joints are "
+                f"{list(group.joints)} ({list(sources)} at the source)"
+            )
+            return UNUSABLE
+        try:
+            chain = chain_from_urdf(
+                Path(args.urdf).read_text(), sources, group.tip_link
+            )
+        except (KinematicsError, OSError) as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        # Corrected by the alpha the static fit measured, so the column is the
+        # load the arm actually carries rather than the one the URDF describes.
+        gravity = static.torque_scale * np.array(
+            [chain.gravity_torque(sample) for sample in track.measured]
+        )
+
+    try:
+        estimate = fit_second_order(
+            track.timestamps_ns * 1e-9,
+            track.command,
+            track.measured,
+            gravity_torque=gravity,
+        )
+    except FitError as error:
+        print(f"error: {error}")
+        return UNUSABLE
+
+    payload: dict = {
+        "population": args.population,
+        "joint_names": track.joint_names,
+        "stiffness": estimate.stiffness.tolist(),
+        "damping": estimate.damping.tolist(),
+        "friction": estimate.friction.tolist(),
+        "residual_rmse": estimate.residual_rmse.tolist(),
+        "track_sha256": track_sha256(track),
+    }
+
+    if static is not None:
+        try:
+            combined = combine(static, estimate, group.joints)
+        except FitError as error:
+            print(f"error: {error}")
+            return UNUSABLE
+        _report_combined(combined)
+        worst = float(np.nanmax(combined.disagreement))
+        if worst > MAX_INERTIA_DISAGREEMENT:
+            joint = combined.joint_names[int(np.nanargmax(combined.disagreement))]
+            print(
+                f"refused: nothing written. The two routes to {joint}'s inertia "
+                f"disagree by {worst:.0%}, over {MAX_INERTIA_DISAGREEMENT:.0%}. "
+                "kp/k and 1/g come from different columns of different "
+                "experiments, so a gap that size means one of them is measuring "
+                "something else — a static estimate from another robot, a URDF "
+                "that is not the arm on the track, or a track with a load on it."
+            )
+            return REFUSED
+        payload.update(
+            {
+                "group": group.name,
+                "stiffness_nm_per_rad": combined.stiffness.tolist(),
+                "inertia_kg_m2": combined.inertia.tolist(),
+                "damping_nm_s_per_rad": combined.damping.tolist(),
+                "friction_nm": combined.friction.tolist(),
+                "inertia_from_gravity_kg_m2": combined.inertia_from_gravity.tolist(),
+                "inertia_disagreement": combined.disagreement.tolist(),
+                "torque_scale": static.torque_scale.tolist(),
+            }
+        )
+
+    args.output.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"fit: {args.output}")
+    return 0
+
+
+def _report_combined(combined) -> None:
+    print(
+        "  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   "
+        "kp (N.m/rad)   J from gravity   gap"
+    )
+    for index, name in enumerate(combined.joint_names):
+        print(
+            f"  {name:<16} {combined.inertia[index]:9.5f} "
+            f"{combined.damping[index]:11.4f} {combined.friction[index]:13.4f} "
+            f"{combined.stiffness[index]:14.2f} "
+            f"{combined.inertia_from_gravity[index]:16.5f} "
+            f"{combined.disagreement[index]:5.1%}"
+        )
+
+
 def _collect_poses(args, profile) -> list[Path] | None:
     """Design a pose set, show it, and with --execute sweep at every pose.
 
@@ -1203,24 +1345,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("--track and --output are required")
         if args.population <= 0:
             raise SystemExit("--population must be positive")
-        track = read_hdf5(args.track)
-        estimate = fit_second_order(track.timestamps_ns * 1e-9, track.command, track.measured)
-        args.output.write_text(
-            json.dumps(
-                {
-                    "population": args.population,
-                    "joint_names": track.joint_names,
-                    "stiffness": estimate.stiffness.tolist(),
-                    "damping": estimate.damping.tolist(),
-                    "friction": estimate.friction.tolist(),
-                    "residual_rmse": estimate.residual_rmse.tolist(),
-                    "track_sha256": track_sha256(track),
-                },
-                indent=2,
-            )
-            + "\n"
-        )
-        print(f"fit: {args.output}")
+        return _fit(args, profile)
     elif args.stage == "identify":
         return _identify(args, profile)
     elif args.stage == "validate":

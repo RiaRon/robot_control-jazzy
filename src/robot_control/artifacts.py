@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .identification import FitError, GravitySweep, StaticEstimate
+from .identification import FitError, GravitySweep, StaticEstimate  # noqa: F401
 from .profile import RobotProfile
 from .track import CanonicalTrack
 

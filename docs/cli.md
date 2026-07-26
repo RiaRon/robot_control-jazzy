@@ -772,16 +772,67 @@ Fit a second-order joint model to a normalized track.
 | `--track` | *required* | HDF5 track from `normalize` |
 | `--output` | *required* | JSON estimate to write |
 | `--population` | `128` | Candidate population size; must be positive |
+| `--static` | — | Stiffness set from `r2s identify`; adds the gravity term and turns the ratios into physical parameters |
+| `--urdf` | *required with `--static`* | Robot description, to compute the modelled torque along the track |
 
 ```bash
 robotctl r2s fit --track track.h5 --output estimate.json
 ```
 
 The estimate records stiffness, damping, friction, and per-joint residual RMSE,
-along with the source track's SHA-256.
+along with the source track's SHA-256. Those three are **ratios**: the fit is
 
-**Exit codes:** `0` written; `SystemExit` for a missing path or a
-non-positive `--population`.
+```
+qdd = k (q_cmd - q) - d qd - f sign(qd)
+```
+
+so what comes out is `k = kp/J`, `d = b/J`, `f = tau_f/J` — every parameter
+divided by an inertia the track cannot separate from them.
+
+### With `--static`: the gravity term, and physical units
+
+Without a gravity term the regression has nowhere to put a standing load but the
+stiffness and damping columns. On a real arm that is not a small error: on a
+seven-joint arm under its own weight it can drive a fitted parameter out of range
+entirely, so the fit refuses rather than reporting anything. A lighter load is
+worse, because it gives a plausible wrong number instead.
+
+`--static` supplies both missing pieces. The modelled torque, corrected by the
+`alpha` that `r2s identify` measured, enters as a fourth column:
+
+```
+qdd = k (q_cmd - q) - d qd - f sign(qd) - g tau_g(q)
+```
+
+Its coefficient `g` is `1/J`, the inertia on its own. Dump the URDF from the
+running stack:
+
+```bash
+ros2 param get --hide-type /robot_state_publisher robot_description > robot.urdf
+robotctl r2s fit --track track.h5 --output estimate.json --static static.json --urdf robot.urdf
+```
+
+```text
+  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   kp (N.m/rad)   J from gravity   gap
+  r_aj_1             0.35000      1.5000        0.4000          20.00          0.35000  0.0%
+  ...
+```
+
+`J` in the first column is `kp/k`: the static fit's stiffness, which has no
+inertia in it, over the dynamic fit's, which is that same stiffness divided by
+one. `J from gravity` is `1/g`, from a different column of a different
+experiment. **They agreeing is evidence, not arithmetic** — it is the one check
+that catches a static estimate measured on another robot, or a URDF that is not
+the arm the track came from. A gap above 25% is refused and nothing is written.
+
+The output then also carries `inertia_kg_m2`, `damping_nm_s_per_rad`,
+`friction_nm` and `stiffness_nm_per_rad` — the set a simulator needs to behave
+like this arm, measured rather than taken from the URDF.
+
+**Exit codes:** `0` written; `2` `--static` without `--urdf`, a static estimate
+from another profile or asset, a track covering other joints, a URDF the chain
+cannot be built from, or dynamics the fit cannot identify; `3` the two inertias
+disagree; `SystemExit` for a missing path or a non-positive `--population`.
 
 ## `robotctl r2s identify`
 

@@ -27,13 +27,52 @@ DISTINCT_TORQUE_FRACTION = 0.05
 #: by 10% sit near 50.
 MAX_CONDITION = 200.0
 
+#: How far the two routes to a joint's inertia may differ before the pair is
+#: refused. kp/k and 1/g come from different columns of different experiments, so
+#: a gap this size means one of them is measuring something else.
+MAX_INERTIA_DISAGREEMENT = 0.25
+
 
 @dataclass(frozen=True)
 class SecondOrderEstimate:
+    """The dynamic fit, with every parameter divided by an inertia.
+
+    ``qdd = k (q_cmd - q) - d qd - f sign(qd) - g tau_g(q)`` gives
+    ``k = kp/J``, ``d = b/J``, ``f = tau_f/J`` and ``g = 1/J``. Only the last
+    carries the inertia on its own, and only when a gravity column was supplied.
+    """
+
     stiffness: np.ndarray
     damping: np.ndarray
     friction: np.ndarray
     residual_rmse: np.ndarray
+    #: 1/J, or None when the fit ran without a gravity column.
+    inverse_inertia: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class CombinedEstimate:
+    """What the two experiments say together, in physical units.
+
+    ``inertia`` comes from ``kp/k``: the static fit's stiffness, which has no
+    inertia in it, over the dynamic fit's, which is that same stiffness divided
+    by one. ``inertia_from_gravity`` is the dynamic fit's own ``1/g``, from a
+    different column of a different experiment, so the two agreeing is evidence
+    rather than arithmetic.
+    """
+
+    joint_names: tuple[str, ...]
+    #: J, kg m^2.
+    inertia: np.ndarray
+    #: b, N.m.s/rad.
+    damping: np.ndarray
+    #: tau_f, N.m.
+    friction: np.ndarray
+    #: kp, N.m/rad, carried through from the static fit.
+    stiffness: np.ndarray
+    inertia_from_gravity: np.ndarray
+    #: Relative gap between the two inertias, or nan with no gravity column.
+    disagreement: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -454,9 +493,23 @@ def split_repetitions(run_ids: Sequence[str]) -> tuple[tuple[str, ...], tuple[st
 
 
 def fit_second_order(
-    time_sec: np.ndarray, command: np.ndarray, measured: np.ndarray
+    time_sec: np.ndarray,
+    command: np.ndarray,
+    measured: np.ndarray,
+    *,
+    gravity_torque: np.ndarray | None = None,
 ) -> SecondOrderEstimate:
-    """Fit qdd = k(q_cmd-q) - d*qd - f*sign(qd) independently per joint."""
+    """Fit ``qdd = k(q_cmd-q) - d qd - f sign(qd) - g tau_g(q)`` per joint.
+
+    *gravity_torque* is the load acting against each joint at each sample, in
+    N.m, already corrected by the ``alpha`` a static fit measured. Supplying it
+    does two things: it stops the standing load being absorbed into ``k``, which
+    is the only column the regression could otherwise put it in, and its
+    coefficient is ``1/J``, which is the inertia on its own.
+
+    Omitting it keeps the older three-parameter fit, which is right for a track
+    with no standing load in it — a horizontal joint, or synthetic data.
+    """
     time_sec = np.asarray(time_sec, dtype=float)
     command = np.asarray(command, dtype=float)
     measured = np.asarray(measured, dtype=float)
@@ -469,27 +522,94 @@ def fit_second_order(
         or np.any(np.diff(time_sec) <= 0)
     ):
         raise FitError("invalid fit track")
+    if gravity_torque is not None:
+        gravity_torque = np.asarray(gravity_torque, dtype=float)
+        if gravity_torque.shape != command.shape or not np.isfinite(gravity_torque).all():
+            raise FitError(
+                "gravity torque must carry one finite value per sample and joint: "
+                f"expected {command.shape}, got {gravity_torque.shape}"
+            )
     dt = np.diff(time_sec)
     if np.max(dt) - np.min(dt) > np.mean(dt) * 1e-4:
         raise FitError("fit track must be uniformly sampled")
     step = float(np.mean(dt))
     velocity = np.diff(measured, axis=0) / step
     acceleration = np.diff(velocity, axis=0) / step
-    stiffness = np.empty(command.shape[1])
-    damping = np.empty(command.shape[1])
-    friction = np.empty(command.shape[1])
-    residual = np.empty(command.shape[1])
-    for joint in range(command.shape[1]):
+    width = command.shape[1]
+    stiffness = np.empty(width)
+    damping = np.empty(width)
+    friction = np.empty(width)
+    residual = np.empty(width)
+    inverse_inertia = None if gravity_torque is None else np.empty(width)
+    for joint in range(width):
         error = command[1:-1, joint] - measured[1:-1, joint]
         prior_velocity = velocity[:-1, joint]
-        design = np.column_stack((error, -prior_velocity, -np.sign(prior_velocity)))
+        columns = [error, -prior_velocity, -np.sign(prior_velocity)]
+        if gravity_torque is not None:
+            # Aligned with `error`, which reads the same window of samples.
+            columns.append(-gravity_torque[1:-1, joint])
+        design = np.column_stack(columns)
         params, _, rank, _ = np.linalg.lstsq(design, acceleration[:, joint], rcond=None)
         if rank < 2 or params[0] <= 0 or params[1] < 0:
             raise FitError(f"unidentifiable dynamics for joint {joint}")
+        if gravity_torque is not None:
+            if params[3] <= 0:
+                raise FitError(
+                    f"joint {joint} accelerates towards its load rather than away "
+                    "from it, so the gravity column has the wrong sign or the "
+                    "wrong chain"
+                )
+            inverse_inertia[joint] = params[3]
         prediction = design @ params
-        stiffness[joint], damping[joint], friction[joint] = params
+        stiffness[joint], damping[joint], friction[joint] = params[:3]
         residual[joint] = float(np.sqrt(np.mean((prediction - acceleration[:, joint]) ** 2)))
-    return SecondOrderEstimate(stiffness, damping, friction, residual)
+    return SecondOrderEstimate(
+        stiffness, damping, friction, residual, inverse_inertia
+    )
+
+
+def combine(
+    static: StaticEstimate,
+    dynamic: SecondOrderEstimate,
+    joint_names: Sequence[str],
+) -> CombinedEstimate:
+    """Put the two fits together, and get the inertia the simulator needs.
+
+    ``fit_second_order`` returns ``k = kp/J``, and the static fit returns ``kp``
+    with no inertia in it, so ``J = kp/k`` and with it ``b = d J`` and
+    ``tau_f = f J``. Neither experiment gives that alone: the dynamic track
+    cannot separate inertia from stiffness, and a held pose has no inertia in it
+    to separate.
+    """
+    names = tuple(str(name) for name in joint_names)
+    if static.joint_names != names or dynamic.stiffness.shape != (len(names),):
+        raise FitError(
+            f"the two fits cover different joints: static {list(static.joint_names)}, "
+            f"dynamic {dynamic.stiffness.shape[0]} of them, asked for {list(names)}"
+        )
+    if static.unidentifiable:
+        raise FitError(
+            "the static fit left joints unidentified, so their stiffness cannot "
+            "carry an inertia: "
+            + ", ".join(name for name, _reason in static.unidentifiable)
+        )
+    if not np.all(dynamic.stiffness > 0) or not np.all(static.stiffness > 0):
+        raise FitError("both fits must give a positive stiffness for every joint")
+
+    inertia = static.stiffness / dynamic.stiffness
+    if dynamic.inverse_inertia is None:
+        from_gravity = np.full(len(names), np.nan)
+    else:
+        from_gravity = 1.0 / dynamic.inverse_inertia
+    return CombinedEstimate(
+        joint_names=names,
+        inertia=inertia,
+        damping=dynamic.damping * inertia,
+        friction=dynamic.friction * inertia,
+        stiffness=static.stiffness.copy(),
+        inertia_from_gravity=from_gravity,
+        disagreement=np.abs(from_gravity - inertia) / inertia,
+    )
 
 
 def validate_holdout(
