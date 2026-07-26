@@ -545,3 +545,12 @@ def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
     assert np.abs(arm.joints).max() > DroopingDraggableArm.DROOP, (
         f"a drooping arm did not advance: {arm.joints}"
     )
+
+
+def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
+    """Clamp counts say the command moved; only the lag says the arm did."""
+    assert main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.3"]) == 0
+
+    output = capsys.readouterr().out
+    assert "trailed the marker by" in output
+    assert "mm on average" in output

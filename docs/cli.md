@@ -485,6 +485,7 @@ robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
 following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
 drag the marker in RViz; the arm tracks it until the time runs out
 followed 4193 samples; the arm holds its last commanded pose
+  tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
   velocity limit clamped on 271 of 4193 samples
 ```
 
@@ -521,6 +522,20 @@ A third bound follows from that: `max_lead` limits how far the command may run
 ahead of the measured position, so a joint held still by an obstacle cannot wind
 up command, and with it torque, without limit. It is set from the profile's
 velocity limit over `LEAD_SEC`, and `lead limit` in the clamp report names it.
+
+### Reading the report
+
+The clamp counts describe the *command*, not the arm — they were all zero during
+the run where nothing moved at all. The line above them is the measurement that
+answers whether following works: how far the tool centre point actually trailed
+the marker.
+
+| Line | What it means |
+| --- | --- |
+| `trailed the marker by` | The real measure. Average and worst distance from marker to tool centre point |
+| `velocity limit` | Normal. The marker was dragged faster than the profile allows the arm to move |
+| `lead limit` | The arm fell more than `LEAD_SEC` of travel behind its command. Frequent hits mean the arm cannot keep up — try `--gravity`, or drag more slowly |
+| `position limit` | The drag asked for a joint past the profile's bound. The arm stops there and keeps tracking the rest |
 
 ### Stopping, and what the arm does then
 

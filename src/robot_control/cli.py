@@ -633,6 +633,11 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
 
     samples = 0
     notes: dict[str, int] = {}
+    # How far the tool centre point actually trails the marker, which is the
+    # only measure of whether following works. The clamp counts say the command
+    # moved; they say nothing about the arm.
+    lag_total = 0.0
+    lag_worst = 0.0
     deadline = time.monotonic() + args.seconds
     try:
         while time.monotonic() < deadline:
@@ -648,7 +653,11 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
                 goal = np.eye(4)
                 goal[:3, 3] = target.position
                 goal[:3, :3] = _rotation_from_quaternion(target.orientation)
-                step = chain.delta_q(state, twist_between(chain.pose(state), goal))
+                here = chain.pose(state)
+                lag = float(np.linalg.norm(goal[:3, 3] - here[:3, 3]))
+                lag_total += lag
+                lag_worst = max(lag_worst, lag)
+                step = chain.delta_q(state, twist_between(here, goal))
                 command, limited = gate.follow(state + step, state, period)
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
@@ -663,6 +672,12 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
         if args.gravity > 0.0:
             adapter.send_effort(np.zeros(len(group.joints)))
         print(f"followed {samples} samples; the arm holds its last commanded pose")
+        if samples:
+            print(
+                f"  tool centre point trailed the marker by "
+                f"{lag_total / samples * 1000:.1f} mm on average, "
+                f"{lag_worst * 1000:.1f} mm at worst"
+            )
         for note, count in sorted(notes.items()):
             print(f"  {note} clamped on {count} of {samples} samples")
 

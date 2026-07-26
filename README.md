@@ -328,6 +328,7 @@ robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
 following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
 drag the marker in RViz; the arm tracks it until the time runs out
 followed 634 samples; the arm holds its last commanded pose
+  tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
   velocity limit clamped on 74 of 634 samples
 ```
 
