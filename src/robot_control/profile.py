@@ -44,10 +44,20 @@ class Group:
     moveit_group: str | None = None
     action: str | None = None
     tip_link: str | None = None
+    # A second controller claiming the same joints' effort interfaces, used to
+    # publish gravity feedforward without the trajectory controller giving up
+    # position. Named rather than derived: nothing in the trajectory
+    # controller's name says what an effort controller beside it is called.
+    effort_controller: str | None = None
 
     @property
     def executable(self) -> bool:
         return self.controller is not None
+
+    @property
+    def compensable(self) -> bool:
+        """Whether feedforward torque can be published for this group."""
+        return self.effort_controller is not None
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
     moveit_group = body.get("moveit_group")
     action = body.get("action")
     tip_link = body.get("tip_link")
+    effort_controller = body.get("effort_controller")
     if moveit_group is None and tip_link is not None:
         # The tip link is only ever used as the IK frame of a planning group.
         raise ProfileError(f"group {name} declares a tip_link without a moveit_group")
@@ -126,6 +137,10 @@ def _group(name: str, body: dict[str, Any]) -> Group:
             raise ProfileError(f"group {name} declares a moveit_group without a controller")
         if action is not None:
             raise ProfileError(f"group {name} declares an action without a controller")
+        if effort_controller is not None:
+            raise ProfileError(
+                f"group {name} declares an effort_controller without a controller"
+            )
     else:
         action = FOLLOW_JOINT_TRAJECTORY if action is None else str(action)
         if action not in _ACTIONS:
@@ -137,6 +152,9 @@ def _group(name: str, body: dict[str, Any]) -> Group:
         moveit_group=None if moveit_group is None else str(moveit_group),
         action=action,
         tip_link=None if tip_link is None else str(tip_link),
+        effort_controller=(
+            None if effort_controller is None else str(effort_controller)
+        ),
     )
 
 

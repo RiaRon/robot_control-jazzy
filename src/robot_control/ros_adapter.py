@@ -197,6 +197,52 @@ class RosAdapter:
             )
         return pose
 
+    def read_robot_description(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> str:
+        """Return the URDF the running stack is actually using.
+
+        Read from the graph rather than rendered locally, so gravity is computed
+        for the robot that is running: a locally rendered URDF could differ from
+        the one the controllers were configured against.
+        """
+        return self._backend.robot_description(timeout_sec)
+
+    def read_tracking_error(
+        self, timeout_sec: float = DEFAULT_TIMEOUT_SEC
+    ) -> np.ndarray:
+        """Return the group's per-joint position error, in canonical order.
+
+        The trajectory controller publishes the difference between what it asked
+        for and what it reads back, which is the droop directly. Deriving it from
+        the tool centre point instead would fold in IK and FK.
+        """
+        # __init__ already refused a group with no controller.
+        controller = self.group.controller
+        errors = self._backend.tracking_error(controller, timeout_sec)
+        try:
+            return self.interface.group_state_to_canonical(self.group.name, errors)
+        except InterfaceError as error:
+            raise AdapterUnavailable(
+                f"{controller} does not report every joint of "
+                f"{self.group.name!r}: {error}"
+            ) from error
+
+    def send_effort(self, effort: Sequence[float]) -> None:
+        """Publish authorized feedforward torque to the group's effort controller.
+
+        The values must already have passed a gate: this is a force, and the
+        adapter is not where forces are judged.
+        """
+        self._require_execute()
+        if self.group.effort_controller is None:
+            raise ValueError(
+                f"group {self.group.name!r} declares no effort_controller, so "
+                "torque cannot be published for it"
+            )
+        source = self.interface.group_command_to_source(self.group.name, effort)
+        self._backend.publish_effort(
+            self.group.effort_controller, list(source.values())
+        )
+
     def read_marker_pose(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Pose:
         """Return the pose of the RViz goal marker for this group's tip link.
 
@@ -302,9 +348,11 @@ class _RclpyBackend:
             from control_msgs.action import ParallelGripperCommand
             from geometry_msgs.msg import Pose as PoseMsg
             from geometry_msgs.msg import PoseStamped, Quaternion, Point
+            from control_msgs.msg import JointTrajectoryControllerState
             from moveit_msgs.srv import GetPositionFK, GetPositionIK
+            from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy
             from sensor_msgs.msg import JointState
-            from std_msgs.msg import Header
+            from std_msgs.msg import Float64MultiArray, Header, String
             from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
             from visualization_msgs.srv import GetInteractiveMarkers
         except ImportError as error:
@@ -324,6 +372,16 @@ class _RclpyBackend:
         self._Quaternion, self._Point = Quaternion, Point
         self._GetPositionFK, self._GetPositionIK = GetPositionFK, GetPositionIK
         self._GetInteractiveMarkers = GetInteractiveMarkers
+        self._ControllerState = JointTrajectoryControllerState
+        self._Float64MultiArray = Float64MultiArray
+        self._String = String
+        # robot_state_publisher latches the description, so a subscriber that
+        # arrives after it was published still receives it.
+        self._latching_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         self._JointState, self._Header = JointState, Header
         self._JointTrajectory = JointTrajectory
         self._JointTrajectoryPoint = JointTrajectoryPoint
@@ -339,6 +397,7 @@ class _RclpyBackend:
         self._fk_client = None
         self._ik_client = None
         self._marker_client = None
+        self._effort_publishers: dict[str, Any] = {}
 
     def close(self) -> None:
         self._node.destroy_node()
@@ -438,6 +497,78 @@ class _RclpyBackend:
             zip(response.solution.joint_state.name, response.solution.joint_state.position)
         )
         return (response.error_code.val, solution)
+
+    def robot_description(self, timeout_sec: float) -> str:
+        # Published transient-local, so a late subscriber still receives it.
+        latest: list[str] = []
+        subscription = self._node.create_subscription(
+            self._String,
+            "/robot_description",
+            lambda message: latest.append(message.data),
+            self._latching_qos,
+        )
+        try:
+            deadline = time.monotonic() + timeout_sec
+            while not latest and time.monotonic() < deadline:
+                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+        finally:
+            self._node.destroy_subscription(subscription)
+        if not latest:
+            raise AdapterUnavailable(
+                f"no /robot_description within {timeout_sec} s; is "
+                "robot_state_publisher running?"
+            )
+        return latest[-1]
+
+    def tracking_error(self, controller: str, timeout_sec: float) -> dict[str, float]:
+        topic = f"/{controller}/controller_state"
+        latest: list[dict[str, float]] = []
+        subscription = self._node.create_subscription(
+            self._ControllerState,
+            topic,
+            lambda message: latest.append(
+                dict(zip(message.joint_names, message.error.positions))
+            ),
+            10,
+        )
+        try:
+            deadline = time.monotonic() + timeout_sec
+            while not latest and time.monotonic() < deadline:
+                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+        finally:
+            self._node.destroy_subscription(subscription)
+        if not latest:
+            raise AdapterUnavailable(
+                f"no {topic} within {timeout_sec} s; is {controller} active?"
+            )
+        return latest[-1]
+
+    def publish_effort(self, controller: str, values: Sequence[float]) -> None:
+        # One publisher per controller, kept for the process's life: gravity
+        # compensation republishes at the controller rate, and a fresh publisher
+        # each time would drop commands to discovery every cycle.
+        publisher = self._effort_publishers.get(controller)
+        if publisher is None:
+            publisher = self._node.create_publisher(
+                self._Float64MultiArray, f"/{controller}/commands", 10
+            )
+            self._effort_publishers[controller] = publisher
+            # A brand new publisher has no matched subscriber yet, and a command
+            # sent into that gap is simply lost.
+            deadline = time.monotonic() + DEFAULT_TIMEOUT_SEC
+            while (
+                publisher.get_subscription_count() == 0
+                and time.monotonic() < deadline
+            ):
+                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+            if publisher.get_subscription_count() == 0:
+                raise AdapterUnavailable(
+                    f"nothing is subscribed to /{controller}/commands; load the "
+                    "effort controllers with ros_ws/load_effort_controllers.sh"
+                )
+        publisher.publish(
+            self._Float64MultiArray(data=[float(value) for value in values])
+        )
 
     def marker_pose(self, name: str, timeout_sec: float) -> Pose | None:
         if self._marker_client is None:

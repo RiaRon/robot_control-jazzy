@@ -236,6 +236,85 @@ settled: 1.4 mm after 2 corrections
 `--settle`은 `--execute` 없이 못 씁니다. 드라이런은 아무것도 보내지 않으므로
 부족분이라는 게 존재하지 않습니다.
 
+## 6. 처짐을 근본적으로 없애기 — 중력 보상
+
+`--settle`은 도착점만 고칩니다. 움직이는 내내 정확하려면 처짐 자체를 없애야
+하고, 그건 피드포워드 토크로 합니다.
+
+### 왜 배율을 실험으로 정하는가
+
+중력 토크는 URDF의 질량과 무게중심에서 계산하는데, 이게 맞서는 게인은
+**벤더 하드웨어에 하드코딩**돼 있습니다:
+
+```
+control_gains.yaml:  kp = 70 70 70 60 10 10 10   ← 아무도 읽지 않음
+DEFAULT_KP (헤더):   kp = 20 20 20 20  5  5  5   ← write()가 쓰는 값
+```
+
+`v10_simple_hardware.cpp`가 읽는 하드웨어 파라미터는 `can_interface`,
+`arm_prefix`, `hand`, `can_fd` 넷뿐입니다. **`control_gains.yaml`을 고쳐도
+아무 일도 일어나지 않습니다.**
+
+그래서 올바른 배율은 계산으로 나오는 값이 아니라 **측정하는 값**입니다.
+
+### 절차
+
+effort 컨트롤러는 벤더 브링업에 없으니 따로 올립니다. 트래젝토리 컨트롤러가
+위치를 계속 잡은 채로 effort만 추가되는 구조입니다:
+
+```bash
+./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1   # 터미널 1
+./ros_ws/load_effort_controllers.sh                                # 터미널 2
+```
+
+먼저 **부하가 걸리는 자세**로 팔을 보내십시오. 팔을 접고 있으면 중력 토크가
+작아서 배율 차이가 안 보입니다.
+
+```bash
+robotctl pose ee --group openarm_right_arm --from-marker --execute --settle
+```
+
+그 자세에서 배율을 훑습니다. 각 배율마다 유지하고, 트래젝토리 컨트롤러가
+발행하는 `error.positions`(= 관절별 처짐, IK도 FK도 거치지 않은 값)를 읽어
+표로 찍습니다:
+
+```bash
+# --execute는 배율마다 토크를 발행합니다. 보상이 바뀔 때마다 팔이 조금씩
+# 움직입니다. E-stop 준비하십시오.
+robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.25,0.5,0.75,1.0
+```
+
+```text
+  scale      r_aj_1    r_aj_2    r_aj_3    r_aj_4    r_aj_5    r_aj_6    r_aj_7
+   0.00     +0.0694   -0.0225   -0.0137   +0.1790   +0.0112   +0.0193   -0.0705
+   ...
+best measured scale: 0.75 (worst joint +0.0121 rad)
+```
+
+찾은 배율로 유지합니다:
+
+```bash
+# --execute가 토크를 발행합니다. 명령을 멈출 때까지 팔이 스스로 버팁니다.
+robotctl pose gravity --group openarm_right_arm --scale 0.75 --execute
+```
+
+### 안전장치
+
+- 배율 **1.5 초과는 거부**합니다. 과보상은 자세가 틀리는 게 아니라 버티던
+  자리에서 팔을 밀어냅니다
+- 토크가 프로파일의 관절별 `effort` 한계를 넘으면 **거부**합니다. 서보 스텝과
+  달리 클램프하지 않습니다 — "허용된 만큼"으로 줄인 힘도 여전히 잘못된 크기의
+  힘입니다
+- 종료할 때 **반드시 0을 발행**합니다. 프로세스가 죽은 뒤 토크가 남아 있으면
+  계속 밀게 됩니다
+
+### 모델의 한계
+
+제 중력 모델을 실측 처짐과 비교하면 어깨 1.39배, 팔꿈치 0.87배입니다. 부호와
+순위는 전부 맞습니다. 남은 차이는 마찰·스틱션과 URDF 질량 오차이고, 그래서
+배율이 조작자 손에 있습니다. 최적값은 1.0 근처지만 1.0은 아닐 것이며, 그건
+위 sweep이 답할 문제입니다.
+
 ## 그 밖의 명령
 
 ```bash

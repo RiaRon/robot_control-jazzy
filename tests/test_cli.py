@@ -253,3 +253,138 @@ def test_pose_show_reports_every_executable_group_offline(capsys):
     output = capsys.readouterr().out
     assert "openarm_right_arm" in output
     assert "right_joint_trajectory_controller" in output
+
+
+class StiffArm:
+    """A stub adapter whose tracking error shrinks as gravity torque is added.
+
+    Modelled the way the real arm behaves: a joint holds position by sitting
+    short of its command by (unmet load / kp), so feedforward torque matching
+    the load removes the error and torque past it overshoots.
+    """
+
+    #: What the hardware's DEFAULT_KP applies on the wrist joints upward.
+    KP = 20.0
+
+    def __init__(self):
+        self.published = []
+        self.applied = np.zeros(7)
+        self.load = np.zeros(7)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exception):
+        return None
+
+    def read_robot_description(self):
+        return "<robot name='stub'/>"  # unused: the chain is injected
+
+    def read_state(self):
+        return np.zeros(7)
+
+    def send_effort(self, effort):
+        self.applied = np.asarray(effort, dtype=float).copy()
+        self.published.append(self.applied)
+
+    def read_tracking_error(self):
+        return (self.load - self.applied) / self.KP
+
+
+def _stub_chain(masses):
+    """A seven-joint chain about +y, each link's mass a metre out along +x."""
+    from robot_control import kinematics
+
+    joints = tuple(
+        kinematics.Revolute(
+            f"j{index}",
+            np.array([0.0, 1.0, 0.0]),
+            np.array([0.0, 0.0, 0.0]) if index == 0 else np.array([1e-6, 0.0, 0.0]),
+            np.eye(3),
+            f"l{index}",
+        )
+        for index in range(7)
+    )
+    links = tuple(
+        kinematics.Link(f"l{index}", mass, np.array([1.0, 0.0, 0.0]))
+        for index, mass in enumerate(masses)
+    )
+    return kinematics.Chain(joints, links)
+
+
+@pytest.fixture
+def stiff(monkeypatch):
+    from robot_control import ros_adapter
+
+    arm = StiffArm()
+    # One 2 kg link a metre out on the last joint only, so the modelled torque
+    # is unambiguous and well inside the profile's 50 N.m effort limit.
+    chain = _stub_chain([0.0] * 6 + [2.0])
+    arm.load = chain.gravity_torque(np.zeros(7))
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+    return arm
+
+
+def test_pose_gravity_dry_run_publishes_nothing(stiff, capsys):
+    assert main(["pose", "gravity", *RIGHT_ARM, "--scale", "1.0"]) == 0
+
+    assert stiff.published == []
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+def test_pose_gravity_releases_the_torque_when_it_finishes(stiff, capsys):
+    assert (
+        main(
+            ["pose", "gravity", *RIGHT_ARM, "--scale", "1.0", "--execute",
+             "--hold-sec", "0.02"]
+        )
+        == 0
+    )
+
+    # Whatever was held during the run, the last thing published is zero: torque
+    # left applied after the process exits would keep pushing.
+    np.testing.assert_allclose(stiff.published[-1], np.zeros(7))
+    assert "torque released" in capsys.readouterr().out
+
+
+def test_pose_gravity_sweep_names_the_scale_that_measured_best(stiff, capsys):
+    assert (
+        main(
+            ["pose", "gravity", *RIGHT_ARM, "--execute", "--hold-sec", "0.02",
+             "--sweep", "0,0.5,1.0"]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    # The stub's error vanishes at full compensation, so 1 must win.
+    assert "best measured scale: 1" in output
+    for scale in ("0.00", "0.50", "1.00"):
+        assert scale in output
+
+
+def test_pose_gravity_refuses_a_scale_that_would_overcompensate(stiff, capsys):
+    assert main(["pose", "gravity", *RIGHT_ARM, "--scale", "3.0", "--execute"]) == 2
+
+    assert "outside 0 to 1.5" in capsys.readouterr().out
+    assert stiff.published == []
+
+
+def test_pose_gravity_refuses_a_group_with_no_effort_controller(no_ros, capsys):
+    code = main(["pose", "gravity", "--group", "tesollo_curl", "--scale", "1.0"])
+
+    assert code == 2
+    assert "effort_controller" in capsys.readouterr().out
+
+
+def test_pose_gravity_refuses_torque_over_the_profile_limit(stiff, capsys, monkeypatch):
+    """A scale inside range can still ask for more torque than a joint allows."""
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain", lambda *a: _stub_chain([500.0] + [0.0] * 6)
+    )
+
+    code = main(["pose", "gravity", *RIGHT_ARM, "--scale", "1.0", "--execute"])
+
+    assert code == 3
+    assert "effort limit exceeded" in capsys.readouterr().out

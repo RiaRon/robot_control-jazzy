@@ -393,6 +393,76 @@ no planning group, malformed `--xyz` or `--rpy`, `--from-marker` combined with
 `--rpy` or `--relative`, `--settle` without `--execute`, no adapter, or no
 marker to read; `3` no IK solution, or refused by the safety gate.
 
+## `robotctl pose gravity`
+
+Publish gravity feedforward torque, and measure the scale that works.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--profile` | `openarm_tesollo` | Built-in profile to load |
+| `--group` | *required* | Group to compensate; must declare an `effort_controller` |
+| `--scale` | *one of these two* | Fraction of the modelled gravity torque to publish |
+| `--sweep` | *one of these two* | Comma-separated scales to measure in turn |
+| `--hold-sec` | `2.0` | Seconds to publish at each scale before measuring |
+| `--execute` | off | Publish; without it the torque is only computed and printed |
+
+The effort controllers are not part of the vendor bringup, so load them first:
+
+```bash
+./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1   # terminal 1
+./ros_ws/load_effort_controllers.sh                                # terminal 2
+```
+
+They are additive — the trajectory controllers keep the position interfaces, and
+`ros2 control list_hardware_components` shows `position` and `effort` both
+claimed on every arm joint.
+
+### Why a scale, and why it is measured
+
+The torque comes from the URDF's masses and centres of mass, and it works against
+gains that are **hard-coded in the vendor hardware**, not configured:
+`control_gains.yaml` declares `kp` 70/70/70/60/10/10/10, but
+`v10_simple_hardware.cpp` reads only `can_interface`, `arm_prefix`, `hand`, and
+`can_fd`, and `write()` applies `DEFAULT_KP` = 20/20/20/20/5/5/5. Editing that
+YAML changes nothing.
+
+So the right scale is a measured quantity. `--sweep` measures it: hold at each
+scale, read the trajectory controller's own `error.positions` — the droop
+directly, with no IK or FK in the way — and print what happened.
+
+```bash
+# --execute publishes torque at each scale in turn, and the arm shifts as the
+# compensation changes. Keep the E-stop within reach.
+robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.25,0.5,0.75,1.0
+```
+
+```text
+  scale      r_aj_1    r_aj_2    r_aj_3    r_aj_4    r_aj_5    r_aj_6    r_aj_7
+   0.00     +0.0694   -0.0225   -0.0137   +0.1790   +0.0112   +0.0193   -0.0705
+   ...
+best measured scale: 0.75 (worst joint +0.0121 rad)
+```
+
+Then hold there:
+
+```bash
+# --execute publishes torque; the arm holds itself up until you stop the command:
+robotctl pose gravity --group openarm_right_arm --scale 0.75 --execute
+```
+
+Scales above `1.5` are refused. Over-compensating does not mispose the arm, it
+drives it away from the pose it was holding. The torque is also checked against
+the profile's per-joint `effort` bound and refused if it exceeds it — unlike a
+servo step, torque is clamped nowhere, because a force reduced to "as much as
+allowed" is still a force in the wrong amount.
+
+Whatever happens, the command publishes zeros before it exits. Torque left
+applied after the process is gone would keep pushing.
+
+**Exit codes:** `0` published or printed; `2` unknown group, group with no
+`effort_controller` or no `tip_link`, a scale outside range, or no adapter;
+`3` torque over the profile's effort limit.
+
 ## `robotctl pose rviz`
 
 Launch the bimanual MoveIt stack with RViz through `ros_ws/pose_bringup.sh`.

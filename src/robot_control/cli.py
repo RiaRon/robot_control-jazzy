@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import time
 
 import numpy as np
 
@@ -23,6 +24,13 @@ DEFAULT_DURATION_SEC = 3.0
 # a standing position error to produce holding torque, so a command lands short
 # by roughly (gravity torque / kp). --settle closes that gap by re-commanding.
 DEFAULT_TOLERANCE_M = 0.005
+# Long enough for the arm to stop moving after a torque step before its
+# tracking error is read, at the 100 Hz the controller manager runs.
+DEFAULT_HOLD_SEC = 2.0
+# Refuse a scale beyond this. The model is only as good as the URDF's masses,
+# and over-compensating does not mispose the arm, it drives it away from where
+# it was holding.
+MAX_GRAVITY_SCALE = 1.5
 SETTLE_PASSES = 4
 # Below this fraction of improvement the loop has stopped converging: the arm
 # is against a hard stop, or holding something, and more passes would only wind
@@ -115,6 +123,29 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help="metres of residual --settle aims for",
     )
 
+    gravity = stages.add_parser(
+        "gravity", help="publish gravity feedforward torque, and tune its scale"
+    )
+    gravity.add_argument("--profile", default="openarm_tesollo")
+    gravity.add_argument("--group", required=True)
+    how = gravity.add_mutually_exclusive_group(required=True)
+    how.add_argument(
+        "--scale",
+        type=float,
+        help="fraction of the modelled gravity torque to publish",
+    )
+    how.add_argument(
+        "--sweep",
+        help="comma-separated scales to measure in turn, for tuning",
+    )
+    gravity.add_argument(
+        "--hold-sec",
+        type=float,
+        default=DEFAULT_HOLD_SEC,
+        help="seconds to publish at each scale before measuring",
+    )
+    gravity.add_argument("--execute", action="store_true")
+
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
     rviz.add_argument("--profile", default="openarm_tesollo")
     rviz.add_argument(
@@ -140,6 +171,8 @@ def _pose(args: argparse.Namespace) -> int:
             return _pose_show(args, profile)
         if args.stage == "joints":
             return _pose_joints(args, profile)
+        if args.stage == "gravity":
+            return _pose_gravity(args, profile)
         return _pose_ee(args, profile)
     except (SafetyError, IkFailed) as error:
         print(f"refused: {error}")
@@ -174,6 +207,7 @@ def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
         upper=np.array([joint.upper for joint in limits]),
         velocity=np.array([joint.velocity for joint in limits]),
         command_period_sec=1.0 / profile.ros["jazzy"].command_rate_hz,
+        effort=np.array([joint.effort for joint in limits]),
     )
     if seed is not None:
         # Seeding makes the velocity limit apply to the move itself, not just
@@ -400,6 +434,123 @@ def _report_residual(adapter, target, solution, profile, group, args) -> None:
         residual = corrected
 
     print(f"settle: {residual * 1000:.1f} mm after {SETTLE_PASSES} corrections")
+
+
+def _gravity_chain(adapter, profile, group):
+    """Build the kinematic chain for *group* from the running stack's URDF."""
+    from .kinematics import chain_from_urdf
+
+    source_by_canonical = {joint.canonical: joint.source for joint in profile.joints}
+    return chain_from_urdf(
+        adapter.read_robot_description(),
+        [source_by_canonical[canonical] for canonical in group.joints],
+        group.tip_link,
+    )
+
+
+def _pose_gravity(args, profile) -> int:
+    """Publish gravity feedforward, at one scale or measured across several.
+
+    The model is only as good as the URDF's masses, and the gains it works
+    against are hard-coded in the vendor hardware rather than configured, so the
+    right scale is a measured quantity rather than a derived one. --sweep exists
+    to measure it: hold at each scale, read the controller's own tracking error,
+    and print what actually happened.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if not group.compensable:
+        raise ValueError(
+            f"group {group.name!r} declares no effort_controller, so torque "
+            "cannot be published for it"
+        )
+    if group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no tip_link, so its chain cannot be built"
+        )
+    scales = (
+        [args.scale] if args.sweep is None else _parse_floats(args.sweep, "--sweep")
+    )
+    for scale in scales:
+        if not 0.0 <= scale <= MAX_GRAVITY_SCALE:
+            raise ValueError(
+                f"gravity scale {scale:g} is outside 0 to {MAX_GRAVITY_SCALE:g}; "
+                "over-compensating drives the arm away from where it was holding"
+            )
+    if args.hold_sec <= 0:
+        raise ValueError("--hold-sec must be positive")
+
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        state = adapter.read_state()
+        modelled = chain.gravity_torque(state)
+        gate = _gate(profile, group, seed=None)
+
+        print(f"{group.name}: {len(chain)} joints, "
+              f"{sum(link.mass for link in chain.links):.3f} kg modelled")
+        _describe_torque(group, modelled)
+        if not args.execute:
+            print("DRY RUN: torque computed but not published; pass --execute")
+            return 0
+
+        try:
+            rows = []
+            for scale in scales:
+                # Recomputed each round: compensation moves the arm, and the
+                # torque that holds it depends on where it now is.
+                state = adapter.read_state()
+                effort = gate.authorize_effort(chain.gravity_torque(state) * scale)
+                _publish_for(adapter, effort, args.hold_sec)
+                error = adapter.read_tracking_error()
+                rows.append((scale, error))
+                print(
+                    f"scale {scale:4.2f}: worst joint error "
+                    f"{np.max(np.abs(error)):+.4f} rad, "
+                    f"mean {np.mean(np.abs(error)):.4f} rad"
+                )
+            if len(rows) > 1:
+                _report_sweep(group, rows)
+        finally:
+            # Torque left applied after this process exits would keep pushing.
+            adapter.send_effort(np.zeros(len(group.joints)))
+            print("torque released")
+    return 0
+
+
+def _publish_for(adapter, effort, seconds: float) -> None:
+    """Republish *effort* at the controller rate for *seconds*.
+
+    ForwardCommandController holds its last command, so one message would do,
+    but republishing means a dropped message cannot silently leave the arm on a
+    stale torque.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        adapter.send_effort(effort)
+        time.sleep(0.01)
+
+
+def _describe_torque(group, torque) -> None:
+    print("  joint            modelled gravity torque (N.m)")
+    for canonical, value in zip(group.joints, torque):
+        print(f"  {canonical:<16} {value:+8.2f}")
+
+
+def _report_sweep(group, rows) -> None:
+    """Print the sweep as a table, and name the scale that measured best."""
+    print()
+    header = "  scale  " + "".join(f"{canonical:>10}" for canonical in group.joints)
+    print(header)
+    for scale, error in rows:
+        print(f"  {scale:5.2f}  " + "".join(f"{value:+10.4f}" for value in error))
+    best = min(rows, key=lambda row: float(np.max(np.abs(row[1]))))
+    print()
+    print(
+        f"best measured scale: {best[0]:g} "
+        f"(worst joint {np.max(np.abs(best[1])):+.4f} rad)"
+    )
+    print("re-run with --scale to hold there, and record it in the profile notes")
 
 
 def _pose_rviz(args) -> int:

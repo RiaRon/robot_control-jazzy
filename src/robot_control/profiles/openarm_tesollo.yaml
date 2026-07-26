@@ -25,11 +25,13 @@ groups:
     controller: right_joint_trajectory_controller
     moveit_group: right_arm
     tip_link: openarm_right_hand_tcp
+    effort_controller: right_forward_effort_controller
   openarm_left_arm:
     joints: [l_aj_1, l_aj_2, l_aj_3, l_aj_4, l_aj_5, l_aj_6, l_aj_7]
     controller: left_joint_trajectory_controller
     moveit_group: left_arm
     tip_link: openarm_left_hand_tcp
+    effort_controller: left_forward_effort_controller
   openarm_left_gripper:
     joints: [l_hj_gripper_1]
     controller: left_gripper_controller
