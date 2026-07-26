@@ -523,6 +523,28 @@ ahead of the measured position, so a joint held still by an obstacle cannot wind
 up command, and with it torque, without limit. It is set from the profile's
 velocity limit over `LEAD_SEC`, and `lead limit` in the clamp report names it.
 
+### The arm's posture will not match RViz's ghost
+
+Following puts the tool centre point on the marker, and leaves the elbow
+somewhere MoveIt's goal-state ghost does not show. That is redundancy, not error.
+
+The arm has seven joints and a pose has six degrees of freedom, so a whole
+one-dimensional family of joint configurations reaches any given tool centre
+point — the elbow swings around a cone while the hand stays put. Which member of
+that family you get depends on who solved the inverse kinematics:
+
+| | Solver | Behaviour |
+| --- | --- | --- |
+| RViz ghost | MoveIt's KDL solver | Whatever it converges to from its seed; the elbow can land differently each solve |
+| `pose follow` | Jacobian, damped least squares | The smallest joint change from where the arm already is |
+| `pose ee --from-marker` | `/compute_ik`, MoveIt's solver | Matches the ghost, because it is the same solver |
+
+For servoing the local solution is the one you want. Re-solving from scratch each
+sample can send the tool centre point along a smooth path while the elbow flips
+to the other side of its cone — which reads, from the operating position, as the
+arm suddenly swinging for no reason. Check the tool centre point against the
+marker, not the posture against the ghost.
+
 ### Reading the report
 
 The clamp counts describe the *command*, not the arm — they were all zero during
