@@ -39,12 +39,12 @@ def test_group_contract_declares_openarm_controllers_and_moveit_groups():
     assert groups["openarm_right_arm"].controller == "right_joint_trajectory_controller"
     assert groups["openarm_right_arm"].moveit_group == "right_arm"
     assert groups["openarm_right_arm"].action == "follow_joint_trajectory"
-    assert groups["openarm_right_arm"].tip_link == "openarm_right_hand"
+    assert groups["openarm_right_arm"].tip_link == "openarm_right_hand_tcp"
 
     assert groups["openarm_left_arm"].controller == "left_joint_trajectory_controller"
     assert groups["openarm_left_arm"].moveit_group == "left_arm"
     assert groups["openarm_left_arm"].action == "follow_joint_trajectory"
-    assert groups["openarm_left_arm"].tip_link == "openarm_left_hand"
+    assert groups["openarm_left_arm"].tip_link == "openarm_left_hand_tcp"
 
     # The gripper is driven by parallel_gripper_action_controller, not a
     # trajectory controller, so the action must be declared rather than assumed.
@@ -99,6 +99,35 @@ def test_group_contract_matches_vendored_moveit_configuration():
         assert declared == tuple(source_by_canonical[j] for j in group.joints), name
         if group.tip_link is not None:
             assert group.tip_link in srdf_tips, name
+
+
+def test_tip_link_is_the_tool_centre_point_rviz_anchors_its_marker_to():
+    """RViz and robotctl must mean the same frame by "the end effector".
+
+    MoveIt anchors the interactive end-effector marker at the end effector's
+    parent link, but only once it can resolve that end effector's parent group,
+    which needs both `parent_group` and the link being inside that group. Until
+    both hold it silently falls back to the group's last joint-bearing link,
+    which is 0.18 m short of the tool centre point here: an operator would drag
+    one frame while robotctl commanded another.
+    """
+    profile = load_profile(PROFILE)
+    srdf = (MOVEIT_CONFIG / "openarm_bimanual.srdf").read_text()
+
+    end_effectors = dict(
+        re.findall(
+            r'<end_effector [^>]*parent_link="([^"]+)"[^>]*parent_group="([^"]+)"',
+            srdf,
+        )
+    )
+    groups = dict(re.findall(r'<group name="([^"]+)">(.*?)</group>', srdf, re.S))
+
+    for name in ("openarm_right_arm", "openarm_left_arm"):
+        group = profile.groups[name]
+        tip = group.tip_link
+        assert tip is not None and tip.endswith("_hand_tcp"), name
+        assert end_effectors.get(tip) == group.moveit_group, name
+        assert f'<link name="{tip}"/>' in groups[group.moveit_group], name
 
 
 def test_group_contract_excludes_groups_without_a_controller(tmp_path):

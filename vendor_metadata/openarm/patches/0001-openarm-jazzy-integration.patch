@@ -1,0 +1,21 @@
+diff --git a/openarm_bimanual_moveit_config/config/openarm_bimanual.srdf b/openarm_bimanual_moveit_config/config/openarm_bimanual.srdf
+index 8c2c6e1d390e870ece67315785babb72594f270a..428b6eb2ca58ae783c685a7f4e9904afa605a5b8 100644
+--- a/openarm_bimanual_moveit_config/config/openarm_bimanual.srdf
++++ b/openarm_bimanual_moveit_config/config/openarm_bimanual.srdf
+@@ -35,0 +36,2 @@
++        <link name="openarm_left_hand"/>
++        <link name="openarm_left_hand_tcp"/>
+@@ -44,0 +47,2 @@
++        <link name="openarm_right_hand"/>
++        <link name="openarm_right_hand_tcp"/>
+@@ -107,2 +111,2 @@
+-    <end_effector name="left_ee" parent_link="openarm_left_hand" group="left_gripper"/>
+-    <end_effector name="right_ee" parent_link="openarm_right_hand" group="right_gripper"/>
++    <end_effector name="left_ee" parent_link="openarm_left_hand_tcp" group="left_gripper" parent_group="left_arm"/>
++    <end_effector name="right_ee" parent_link="openarm_right_hand_tcp" group="right_gripper" parent_group="right_arm"/>
+diff --git a/openarm_hardware/package.xml b/openarm_hardware/package.xml
+index dc132e3d966b48bfaeded8b75d891bcd89d4bbd3..0a892789ea16dbe38f7aafd40c8fbfdc39c0a2e1 100644
+--- a/openarm_hardware/package.xml
++++ b/openarm_hardware/package.xml
+@@ -28,0 +29 @@
++  <depend>openarm_can</depend>

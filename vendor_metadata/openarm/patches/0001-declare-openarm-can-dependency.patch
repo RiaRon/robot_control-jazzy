@@ -1,6 +1,0 @@
-diff --git a/openarm_hardware/package.xml b/openarm_hardware/package.xml
-index dc132e3d966b48bfaeded8b75d891bcd89d4bbd3..0a892789ea16dbe38f7aafd40c8fbfdc39c0a2e1 100644
---- a/openarm_hardware/package.xml
-+++ b/openarm_hardware/package.xml
-@@ -28,0 +29 @@
-+  <depend>openarm_can</depend>

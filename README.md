@@ -50,9 +50,9 @@ source /opt/ros/jazzy/setup.bash
 ```
 
 In RViz, open the **MotionPlanning** panel and drag the interactive marker on
-`openarm_right_hand`. That moves the goal state only; the robot does not
-follow it until a command is executed. Read the pose back and commit it from a
-second terminal:
+`openarm_right_hand_tcp`, the tool centre point. That moves the goal state
+only; the robot does not follow it until a command is executed. Read the pose
+back and commit it from a second terminal:
 
 ```bash
 source /opt/ros/jazzy/setup.bash

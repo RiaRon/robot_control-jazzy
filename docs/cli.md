@@ -25,9 +25,9 @@ source /opt/ros/jazzy/setup.bash
 ```
 
 **2. Drag the marker.** In RViz open the **MotionPlanning** panel and drag the
-interactive marker on `openarm_right_hand`. This moves MoveIt's *goal state*
-only. The robot does not follow the marker; nothing reaches the controllers
-until you run a command with `--execute`.
+interactive marker on `openarm_right_hand_tcp`, the tool centre point. This
+moves MoveIt's *goal state* only. The robot does not follow the marker;
+nothing reaches the controllers until you run a command with `--execute`.
 
 **3. Read the pose back.** In a second terminal:
 
@@ -57,6 +57,41 @@ robotctl pose ee --group openarm_right_arm --relative --xyz 0,0,0.03 --execute
 # --execute sends the trajectory; the arm moves back to the SRDF home state:
 robotctl pose joints --group openarm_right_arm --named home --execute
 ```
+
+> **RViz's own Plan & Execute buttons do not work on this branch yet.** The
+> vendored `joint_limits.yaml` declares `has_acceleration_limits: false` for
+> all 17 joints, and Jazzy's default planning pipeline runs
+> `AddTimeOptimalParameterization`, which requires acceleration limits. Every
+> plan therefore fails inside `move_group` with
+> `PlanningResponseAdapter 'AddTimeOptimalParameterization' failed with error
+> code FAILURE`, before anything reaches a controller. This is a configuration
+> gap, not a hardware one: it fails identically on fake hardware, in Gazebo,
+> and on the real robot. Use the marker to *find* a pose and `robotctl pose ee`
+> to *reach* it — `robotctl pose ee` calls `/compute_ik` and sends the
+> trajectory straight to the controller, so it never enters that pipeline.
+
+## Running against the real robot
+
+Everything above runs on fake hardware. To drive the physical arms:
+
+```bash
+# --real opens the named CAN buses and the physical arms will move:
+./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1
+```
+
+Both buses must be named; the wrapper refuses to guess. Before the first real
+run:
+
+1. Bring the buses up (`ip link show can0` should report `state UP`).
+2. Keep the E-stop within reach and the workspace clear.
+3. Check the pose with a dry run first. Every `pose` command prints exactly
+   what it would send before you add `--execute`.
+4. Start from `--named home`, and prefer small `--relative` steps over absolute
+   `--xyz` targets until you trust the frame.
+
+The profile's velocity limits apply to real hardware exactly as they do to fake
+hardware, and `--duration` sets how long a move is allowed to take: a short
+duration on a large move is refused rather than executed quickly.
 
 ## Groups
 
@@ -103,7 +138,7 @@ robotctl pose show --group openarm_right_arm
 ```text
 openarm_right_arm: controller=right_joint_trajectory_controller planning_group=right_arm
 openarm_right_arm: +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000
-openarm_right_arm: openarm_right_hand xyz [+0.0000 -0.1535 +0.1619] rpy [-3.1416 -0.0000 +0.0000]
+openarm_right_arm: openarm_right_hand_tcp xyz [+0.0000 -0.1535 +0.0819] rpy [-3.1416 -0.0000 +0.0000]
 ```
 
 The first line is static profile data and is printed even with no robot
@@ -191,16 +226,16 @@ robotctl pose ee --group openarm_right_arm --relative --xyz 0,0,0.03
 ```
 
 ```text
-openarm_right_hand: [-0.0000 -0.1535 +0.2219] -> [-0.0000 -0.1535 +0.2519] in world
+openarm_right_hand_tcp: [+0.0000 -0.1535 +0.0819] -> [+0.0000 -0.1535 +0.1119] in world
 group: openarm_right_arm -> controller right_joint_trajectory_controller (follow_joint_trajectory)
   canonical        source joint                 commanded (rad)
-  r_aj_1           openarm_right_joint1                 -0.6470
-  r_aj_2           openarm_right_joint2                 -0.0139
-  r_aj_3           openarm_right_joint3                 +0.0184
-  r_aj_4           openarm_right_joint4                 +1.3083
-  r_aj_5           openarm_right_joint5                 -0.0182
-  r_aj_6           openarm_right_joint6                 +0.0142
-  r_aj_7           openarm_right_joint7                 -0.6611
+  r_aj_1           openarm_right_joint1                 -0.3692
+  r_aj_2           openarm_right_joint2                 +0.0159
+  r_aj_3           openarm_right_joint3                 -0.0410
+  r_aj_4           openarm_right_joint4                 +0.7463
+  r_aj_5           openarm_right_joint5                 +0.0409
+  r_aj_6           openarm_right_joint6                 -0.0162
+  r_aj_7           openarm_right_joint7                 -0.3764
 DRY RUN: solved but not sent; pass --execute to send
 ```
 
@@ -420,7 +455,7 @@ Nothing is publishing joint states. Start the stack with
 The controllers came up but `move_group` did not. Look for a MoveIt
 configuration error in the bringup log.
 
-**`refused: no IK solution for openarm_right_hand`**
+**`refused: no IK solution for openarm_right_hand_tcp`**
 The pose is outside the arm's reach, or the only solutions collide. Try a
 smaller `--relative` step, or move to an intermediate pose first.
 
@@ -450,3 +485,15 @@ The bracket around the first character stops the pattern from matching the
 **`error: source a ROS 2 Jazzy environment`**
 `ROS_DISTRO` is not `jazzy`. This branch is Jazzy-only; Humble lives on a
 separate long-lived branch.
+
+**RViz reports `Fail: ABORTED: No motion plan found` or the Plan button does
+nothing**
+See the note at the top of this document: the vendored MoveIt configuration
+declares no acceleration limits, so every plan fails in
+`AddTimeOptimalParameterization`. Nothing reaches the robot when this happens.
+Use `robotctl pose ee`, which does not go through the planning pipeline.
+
+**The RViz marker and `pose show` disagree about where the end effector is**
+They should not: both are `openarm_*_hand_tcp`, the tool centre point. If they
+differ, the SRDF has drifted; `pytest tests/test_profile.py` pins the contract
+and will say so.

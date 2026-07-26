@@ -15,6 +15,7 @@ excluded:
   - "*.pyc"
   - "*.pyo"
 patches:
-  - patches/0001-declare-openarm-can-dependency.patch
+  - patches/0001-openarm-jazzy-integration.patch
 post_patch_sha256:
+  openarm_bimanual_moveit_config/config/openarm_bimanual.srdf: cd188e343c17a9a6dcf28d3076866656bd9d6d27d68c8c33c2c006acb66d63aa
   openarm_hardware/package.xml: fb0744f6fe2787b3604ded1d23d7cdbcd26126533a1340ae11e9a990d93effc4
