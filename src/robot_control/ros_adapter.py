@@ -111,6 +111,15 @@ def gripper_failure(result: Any) -> str | None:
     return "the gripper neither reached its commanded position nor stalled"
 
 
+def make_backend(node_name: str = "robot_control_pose") -> Any:
+    """Build one ROS backend, shareable by several adapters.
+
+    Reading every group costs one node and one rclpy context rather than one
+    per group, and each adapter created with it must not close it.
+    """
+    return _RclpyBackend(node_name)
+
+
 class RosAdapter:
     """Convert canonical commands to controller traffic for one actuator group."""
 

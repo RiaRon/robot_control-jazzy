@@ -3,14 +3,27 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import subprocess
 
 import numpy as np
 
 from .artifacts import read_hdf5, track_sha256, write_hdf5
 from .calibration import load_bundle
 from .identification import build_excitation, fit_second_order, validate_holdout
-from .profile import load_builtin_profile
+from .interface import CanonicalInterface
+from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
+from .safety import CommandGate, SafetyError
+from .srdf import named_state, repository_root
 from .track import normalize_track
+
+
+DEFAULT_DURATION_SEC = 3.0
+
+# Exit codes, shared with the r2s stages: 2 means the request or the
+# environment cannot support the command, 3 means it was understood and
+# refused.
+UNUSABLE = 2
+REFUSED = 3
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,11 +54,282 @@ def _parser() -> argparse.ArgumentParser:
         if stage == "export":
             item.add_argument("--validation", type=Path)
             item.add_argument("--output", type=Path)
+    _add_pose(commands)
     return parser
+
+
+def _add_pose(commands: argparse._SubParsersAction) -> None:
+    pose = commands.add_parser("pose", help="read and set robot poses")
+    stages = pose.add_subparsers(dest="stage", required=True)
+
+    show = stages.add_parser("show", help="report the current pose")
+    show.add_argument("--profile", default="openarm_tesollo")
+    show.add_argument("--group")
+
+    joints = stages.add_parser("joints", help="set a group by joint values")
+    joints.add_argument("--profile", default="openarm_tesollo")
+    joints.add_argument("--group", required=True)
+    target = joints.add_mutually_exclusive_group(required=True)
+    target.add_argument("--values", help="comma-separated canonical values")
+    target.add_argument("--named", help="an SRDF group state, such as home")
+    joints.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
+    joints.add_argument("--execute", action="store_true")
+
+    end_effector = stages.add_parser("ee", help="set a group by end-effector pose")
+    end_effector.add_argument("--profile", default="openarm_tesollo")
+    end_effector.add_argument("--group", required=True)
+    end_effector.add_argument("--xyz", required=True, help="x,y,z in metres")
+    end_effector.add_argument("--rpy", help="roll,pitch,yaw in radians")
+    end_effector.add_argument(
+        "--relative",
+        action="store_true",
+        help="treat --xyz and --rpy as an offset from the current pose",
+    )
+    end_effector.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
+    end_effector.add_argument("--execute", action="store_true")
+
+    rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
+    rviz.add_argument("--profile", default="openarm_tesollo")
+    rviz.add_argument(
+        "--real",
+        action="store_true",
+        help="drive real hardware over CAN instead of fake hardware",
+    )
+    rviz.add_argument("--right-can", help="CAN interface for the right arm")
+    rviz.add_argument("--left-can", help="CAN interface for the left arm")
+
+
+def _pose(args: argparse.Namespace) -> int:
+    """Dispatch a pose stage, mapping every failure onto the exit convention."""
+    # Imported here so `robotctl r2s` never pays for it. The module itself is
+    # rclpy-free; only using an adapter pulls ROS in.
+    from .ros_adapter import AdapterUnavailable, IkFailed
+
+    try:
+        if args.stage == "rviz":
+            return _pose_rviz(args)
+        profile = load_builtin_profile(args.profile)
+        if args.stage == "show":
+            return _pose_show(args, profile)
+        if args.stage == "joints":
+            return _pose_joints(args, profile)
+        return _pose_ee(args, profile)
+    except (SafetyError, IkFailed) as error:
+        print(f"refused: {error}")
+        return REFUSED
+    except AdapterUnavailable as error:
+        print(f"unavailable: {error}")
+        return UNUSABLE
+    except (ValueError, OSError) as error:
+        # ProfileError, InterfaceError, and SrdfError are all ValueError.
+        print(f"error: {error}")
+        return UNUSABLE
+
+
+def _group(profile, name: str):
+    if name not in profile.groups:
+        raise ValueError(
+            f"unknown group {name!r}; known groups are {sorted(profile.groups)}"
+        )
+    group = profile.groups[name]
+    if group.controller is None:
+        raise ValueError(f"group {name!r} declares no controller, so it cannot be set")
+    return group
+
+
+def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
+    """Build a gate over one group's profile limits, optionally seeded."""
+    joints = {joint.canonical: joint for joint in profile.joints}
+    limits = [joints[canonical] for canonical in group.joints]
+    gate = CommandGate(
+        execute=True,
+        lower=np.array([joint.lower for joint in limits]),
+        upper=np.array([joint.upper for joint in limits]),
+        velocity=np.array([joint.velocity for joint in limits]),
+        command_period_sec=1.0 / profile.ros["jazzy"].command_rate_hz,
+    )
+    if seed is not None:
+        # Seeding makes the velocity limit apply to the move itself, not just
+        # between waypoints of a multi-point plan.
+        gate.authorize(seed, now_sec=0.0)
+    return gate
+
+
+def _parse_floats(text: str, label: str) -> list[float]:
+    values = []
+    for item in text.split(","):
+        try:
+            values.append(float(item))
+        except ValueError:
+            raise ValueError(f"{label} is not a number: {item!r}") from None
+    return values
+
+
+def _target_from_args(args, profile, group, interface) -> np.ndarray:
+    """Resolve --values or --named into a canonical target for the group."""
+    if args.values is not None:
+        values = _parse_floats(args.values, "--values")
+        if len(values) != len(group.joints):
+            raise ValueError(
+                f"group {group.name!r} has {len(group.joints)} joints, "
+                f"but --values gave {len(values)}"
+            )
+        return np.asarray(values, dtype=float)
+
+    if group.moveit_group is None:
+        raise ValueError(
+            f"group {group.name!r} has no planning group, so it has no SRDF "
+            "named states; use --values"
+        )
+    state = named_state(group.moveit_group, args.named)
+    return interface.group_state_to_canonical(group.name, state)
+
+
+def _describe(group, interface, target: np.ndarray) -> None:
+    """Print exactly what would go on the wire, in the robot's own names."""
+    names = interface.group_source_names(group.name)
+    source = interface.group_command_to_source(group.name, target)
+    print(f"group: {group.name} -> controller {group.controller} ({group.action})")
+    print(f"  {'canonical':<16} {'source joint':<28} {'commanded (rad)':>15}")
+    for canonical, name in zip(group.joints, names):
+        print(f"  {canonical:<16} {name:<28} {source[name]:>+15.4f}")
+
+
+def _pose_show(args, profile) -> int:
+    from .ros_adapter import AdapterUnavailable, RosAdapter, make_backend
+
+    interface = CanonicalInterface(profile)
+    groups = (
+        {args.group: _group(profile, args.group)}
+        if args.group
+        else profile.executable_groups()
+    )
+    # The static contract is worth printing even with no robot to read.
+    for name, group in groups.items():
+        planning = group.moveit_group or "-"
+        print(f"{name}: controller={group.controller} planning_group={planning}")
+
+    try:
+        backend = make_backend()
+    except AdapterUnavailable as error:
+        print(f"unavailable: {error}")
+        return UNUSABLE
+    try:
+        for name, group in groups.items():
+            adapter = RosAdapter(profile, name, execute=False, backend=backend)
+            state = adapter.read_state()
+            values = " ".join(f"{value:+.4f}" for value in state)
+            print(f"{name}: {values}")
+            if group.moveit_group is not None and group.tip_link is not None:
+                pose = adapter.read_pose()
+                xyz = " ".join(f"{value:+.4f}" for value in pose.position)
+                rpy = " ".join(f"{value:+.4f}" for value in pose.rpy)
+                print(f"{name}: {group.tip_link} xyz [{xyz}] rpy [{rpy}]")
+    finally:
+        backend.close()
+    return 0
+
+
+def _pose_joints(args, profile) -> int:
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    interface = CanonicalInterface(profile)
+    target = _target_from_args(args, profile, group, interface)
+
+    if not args.execute:
+        # A dry run stays entirely offline, so it can never reach the robot.
+        _gate(profile, group, seed=None).authorize_trajectory(
+            [target], start_time_sec=0.0, period_sec=args.duration
+        )
+        print(f"DRY RUN: would send over {args.duration:g} s; pass --execute to send")
+        _describe(group, interface, target)
+        return 0
+
+    with RosAdapter(profile, args.group, execute=True) as adapter:
+        gate = _gate(profile, group, seed=adapter.read_state())
+        points = gate.authorize_trajectory(
+            [target], start_time_sec=0.0, period_sec=args.duration
+        )
+        _describe(group, interface, target)
+        if group.action == PARALLEL_GRIPPER_COMMAND:
+            adapter.send_gripper(float(points[-1][0]))
+        else:
+            adapter.send_trajectory(points, period_sec=args.duration)
+        print(f"EXECUTED: {group.name} over {args.duration:g} s")
+    return 0
+
+
+def _pose_ee(args, profile) -> int:
+    from .ros_adapter import Pose, RosAdapter, quaternion_from_rpy
+
+    group = _group(profile, args.group)
+    if group.moveit_group is None or group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no planning group, so it has no "
+            "end-effector pose; set it with pose joints --values instead"
+        )
+    interface = CanonicalInterface(profile)
+    xyz = _parse_floats(args.xyz, "--xyz")
+    if len(xyz) != 3:
+        raise ValueError(f"--xyz needs exactly three values, got {len(xyz)}")
+    rpy = None
+    if args.rpy is not None:
+        rpy = _parse_floats(args.rpy, "--rpy")
+        if len(rpy) != 3:
+            raise ValueError(f"--rpy needs exactly three values, got {len(rpy)}")
+
+    # Even a dry run needs move_group: IK is a service, with no offline form.
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        current = adapter.read_pose()
+        seed = adapter.read_state()
+        if args.relative:
+            target = current.translated(xyz)
+            if rpy is not None:
+                roll, pitch, yaw = (a + b for a, b in zip(current.rpy, rpy))
+                target = target.rotated_to(quaternion_from_rpy(roll, pitch, yaw))
+        else:
+            orientation = (
+                current.orientation if rpy is None else quaternion_from_rpy(*rpy)
+            )
+            target = Pose(tuple(xyz), orientation, current.frame_id)
+
+        solution = adapter.solve_ik(target, seed=seed)
+        gate = _gate(profile, group, seed=seed)
+        points = gate.authorize_trajectory(
+            [solution], start_time_sec=0.0, period_sec=args.duration
+        )
+
+        start = " ".join(f"{value:+.4f}" for value in current.position)
+        goal = " ".join(f"{value:+.4f}" for value in target.position)
+        print(f"{group.tip_link}: [{start}] -> [{goal}] in {target.frame_id}")
+        _describe(group, interface, solution)
+        if not args.execute:
+            print("DRY RUN: solved but not sent; pass --execute to send")
+            return 0
+        adapter.send_trajectory(points, period_sec=args.duration)
+        print(f"EXECUTED: {group.name} over {args.duration:g} s")
+    return 0
+
+
+def _pose_rviz(args) -> int:
+    script = repository_root() / "ros_ws/pose_bringup.sh"
+    if not script.is_file():
+        raise ValueError(f"bringup wrapper not found: {script}")
+    command = [str(script)]
+    if args.real:
+        command.append("--real")
+        for flag, value in (("--right-can", args.right_can), ("--left-can", args.left_can)):
+            if value:
+                command += [flag, value]
+    print(f"launching: {' '.join(command)}")
+    return subprocess.call(command)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "pose":
+        return _pose(args)
     profile = load_builtin_profile(args.profile)
     if args.stage == "preflight":
         print(f"profile: {profile.name}")
