@@ -443,6 +443,33 @@ class RosAdapter:
             )
 
 
+#: Every ROS interface this backend needs, in one place because this is the
+#: surface that differs between distributions. `ParallelGripperCommand` arrived
+#: in control_msgs after Humble, so on an older distribution this list is what
+#: fails and this list is what a port edits — not nine hundred lines of code.
+REQUIRED_INTERFACES = (
+    "builtin_interfaces/msg/Duration",
+    "control_msgs/action/FollowJointTrajectory",
+    "control_msgs/action/ParallelGripperCommand",
+    "control_msgs/msg/JointTrajectoryControllerState",
+    "geometry_msgs/msg/Pose",
+    "moveit_msgs/srv/GetPositionIK",
+    "sensor_msgs/msg/JointState",
+    "trajectory_msgs/msg/JointTrajectory",
+    "visualization_msgs/srv/GetInteractiveMarkers",
+)
+
+#: The trajectory controller's state topic, relative to the controller. Renamed
+#: from `state` after Humble, and it is the only thing `pose gravity` measures —
+#: point it at the wrong name and every gravity scale is unmeasurable rather
+#: than wrong.
+CONTROLLER_STATE_TOPIC = "controller_state"
+
+#: Where a servo stream goes, and where feedforward torque goes.
+CONTROLLER_STREAM_TOPIC = "joint_trajectory"
+EFFORT_COMMAND_TOPIC = "commands"
+
+
 class _RclpyBackend:
     """The real ROS backend. Every rclpy import is confined to this class."""
 
@@ -465,10 +492,18 @@ class _RclpyBackend:
             from visualization_msgs.msg import InteractiveMarkerFeedback
             from visualization_msgs.srv import GetInteractiveMarkers
         except ImportError as error:
+            # Naming what was missing, because these are two different problems
+            # with two different fixes: no rclpy means nothing is sourced, while
+            # one absent interface on an otherwise working install means this
+            # distribution does not have it. Saying "source a workspace" to
+            # someone whose workspace is sourced sends them to the wrong place.
+            missing = getattr(error, "name", None) or "a ROS interface"
             raise AdapterUnavailable(
-                "the ROS adapter needs rclpy and the MoveIt message packages; "
-                "source a ROS 2 Jazzy workspace "
-                "(source ros_ws/install/setup.bash) and try again"
+                f"the ROS adapter could not import {missing}. If nothing is "
+                "sourced, run `source ros_ws/install/setup.bash`. If it is, "
+                "this ROS distribution does not ship that interface — the "
+                "adapter's REQUIRED_INTERFACES lists everything it needs, and "
+                f"{error}"
             ) from error
 
         self._rclpy = rclpy
@@ -665,7 +700,7 @@ class _RclpyBackend:
         return latest[-1]
 
     def tracking_error(self, controller: str, timeout_sec: float) -> dict[str, float]:
-        topic = f"/{controller}/controller_state"
+        topic = f"/{controller}/{CONTROLLER_STATE_TOPIC}"
         latest: list[dict[str, float]] = []
         subscription = self._node.create_subscription(
             self._ControllerState,
@@ -694,7 +729,7 @@ class _RclpyBackend:
         publisher = self._effort_publishers.get(controller)
         if publisher is None:
             publisher = self._node.create_publisher(
-                self._Float64MultiArray, f"/{controller}/commands", 10
+                self._Float64MultiArray, f"/{controller}/{EFFORT_COMMAND_TOPIC}", 10
             )
             self._effort_publishers[controller] = publisher
             # A brand new publisher has no matched subscriber yet, and a command
@@ -748,7 +783,7 @@ class _RclpyBackend:
         positions: Sequence[float],
         period_sec: float,
     ) -> None:
-        topic = f"/{controller}/joint_trajectory"
+        topic = f"/{controller}/{CONTROLLER_STREAM_TOPIC}"
         publisher = self._stream_publishers.get(topic)
         if publisher is None:
             publisher = self._node.create_publisher(self._JointTrajectory, topic, 10)

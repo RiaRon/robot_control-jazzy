@@ -10,6 +10,12 @@ from typing import Any
 import yaml
 
 
+#: The distributions a profile may declare an endpoint for. A spelling list for
+#: the validator, not a branch in the code: nothing here behaves differently per
+#: distro, and `tests/test_distro_neutrality.py` keeps it that way.
+KNOWN_DISTROS = ("humble", "jazzy")
+
+
 class ProfileError(ValueError):
     pass
 
@@ -82,6 +88,23 @@ class RobotProfile:
     @property
     def joint_names(self) -> tuple[str, ...]:
         return tuple(j.canonical for j in self.joints)
+
+    def endpoint(self) -> RosEndpoint:
+        """The ROS endpoint for the distribution this branch declares.
+
+        Callers ask for "the endpoint" rather than for a named one, so the same
+        source file works on either branch and the answer comes from
+        ``.rosdistro`` — the one place that legitimately differs.
+        """
+        from .layout import declared_distro
+
+        distro = declared_distro()
+        if distro not in self.ros:
+            raise ProfileError(
+                f"this branch declares {distro!r}, which profile {self.name!r} "
+                f"has no ROS endpoint for; it has {sorted(self.ros)}"
+            )
+        return self.ros[distro]
 
     def executable_groups(self) -> dict[str, Group]:
         """Return only the groups a controller can actually be commanded on."""
@@ -209,7 +232,7 @@ def load_profile(path: str | Path) -> RobotProfile:
         for distro, body in _mapping(raw.get("ros"), "ros").items()
     }
     for distro, endpoint in ros.items():
-        if distro not in {"humble", "jazzy"} or endpoint.command_rate_hz <= 0:
+        if distro not in KNOWN_DISTROS or endpoint.command_rate_hz <= 0:
             raise ProfileError(f"invalid ROS endpoint: {distro}")
     return RobotProfile(
         name=str(raw["name"]),

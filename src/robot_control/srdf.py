@@ -16,6 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 import xml.etree.ElementTree as ElementTree
 
+from .layout import repository_root
+
 # Where the bimanual SRDF lives, most-built first: the installed share
 # directory is what a sourced workspace actually uses.
 _SRDF_CANDIDATES = (
@@ -30,9 +32,9 @@ class SrdfError(ValueError):
     pass
 
 
-def repository_root() -> Path:
-    """Return the branch checkout this package was imported from."""
-    return Path(__file__).resolve().parents[2]
+#: Re-exported: callers have always reached the checkout through this module,
+#: and where it lives is layout's business rather than the SRDF reader's.
+repository_root = repository_root
 
 
 def find_srdf(root: Path | None = None) -> Path:

@@ -443,7 +443,7 @@ def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
         lower=np.array([joint.lower for joint in limits]),
         upper=np.array([joint.upper for joint in limits]),
         velocity=np.array([joint.velocity for joint in limits]),
-        command_period_sec=1.0 / profile.ros["jazzy"].command_rate_hz,
+        command_period_sec=1.0 / profile.endpoint().command_rate_hz,
         effort=np.array([joint.effort for joint in limits]),
         max_lead=np.array([joint.velocity * LEAD_SEC for joint in limits]),
     )
@@ -925,7 +925,7 @@ def _pose_follow(args, profile) -> int:
     if args.seconds <= 0:
         raise ValueError("--seconds must be positive")
 
-    period = 1.0 / profile.ros["jazzy"].command_rate_hz
+    period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group)
         gate = _gate(profile, group, seed=None)
@@ -1302,7 +1302,7 @@ def _score_manifest(args, profile) -> tuple[dict, dict]:
             f"exactly one run is held out, this manifest holds out {len(holdout)}"
         )
 
-    rate = profile.ros["jazzy"].command_rate_hz
+    rate = profile.endpoint().command_rate_hz
     track = _load_recording(Path(args.manifest).parent / holdout[0], profile, rate)
     estimate = _estimate_from_fit(args.fit, group)
 
@@ -1378,7 +1378,7 @@ def _fit_tracks_from_manifest(args, profile) -> tuple[list, dict]:
             "Validating against a run the model was fitted on validates nothing."
         )
     root = Path(args.manifest).parent
-    rate = profile.ros["jazzy"].command_rate_hz
+    rate = profile.endpoint().command_rate_hz
     tracks = [_load_recording(root / name, profile, rate) for name in fit_names]
     return tracks, {
         "group": group.name,
@@ -1477,7 +1477,7 @@ def _collect_track_run(args, profile) -> int:
             f"group {group.name!r} is driven by a gripper action, which takes a "
             "position rather than a stream, so it cannot be excited this way"
         )
-    rate = profile.ros["jazzy"].command_rate_hz
+    rate = profile.endpoint().command_rate_hz
     period = 1.0 / rate
     joints = {joint.canonical: joint for joint in profile.joints}
     limits = [joints[canonical] for canonical in group.joints]
@@ -1893,7 +1893,7 @@ def main(argv: list[str] | None = None) -> int:
                 raw["measured_time_ns"],
                 raw["measured"],
                 list(raw["joint_names"]),
-                profile.ros["jazzy"].command_rate_hz,
+                profile.endpoint().command_rate_hz,
                 max_gap_periods=args.max_gap_periods,
             )
             write_hdf5(args.output, track)
