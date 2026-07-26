@@ -678,6 +678,143 @@ def combine(
     )
 
 
+@dataclass(frozen=True)
+class HoldoutMetrics:
+    """How a fitted model did on a run it was not fitted on."""
+
+    #: Open-loop prediction error against the measured positions.
+    rmse_rad: float
+    #: Error of the model-free assumption that the arm reached its command.
+    baseline_rmse_rad: float
+    #: Lag the model did not account for, found by shifting the prediction.
+    delay_residual_sec: float
+    #: How much of the baseline error the model removed.
+    improvement_fraction: float
+
+
+def _fit_step(time_sec: np.ndarray) -> float:
+    time_sec = np.asarray(time_sec, dtype=float)
+    if time_sec.ndim != 1 or len(time_sec) < 5 or np.any(np.diff(time_sec) <= 0):
+        raise FitError("invalid holdout track")
+    dt = np.diff(time_sec)
+    if np.max(dt) - np.min(dt) > np.mean(dt) * 1e-4:
+        raise FitError("holdout track must be uniformly sampled")
+    return float(np.mean(dt))
+
+
+def predict_second_order(
+    estimate: SecondOrderEstimate,
+    time_sec: np.ndarray,
+    command: np.ndarray,
+    measured: np.ndarray,
+    *,
+    gravity_torque: np.ndarray | None = None,
+) -> np.ndarray:
+    """Simulate the fitted model open loop along *command*.
+
+    Open loop on purpose: the measurement is used only to start the integration,
+    never to correct it. Feeding the measurement back each step would score how
+    well the model interpolates between samples it was already given, which every
+    model does well; a simulator has to run without them.
+
+    Integrated the same way ``fit_second_order`` differentiates — semi-implicit
+    Euler — so a model fitted from a track reproduces that track exactly and any
+    error is the model's rather than the arithmetic's.
+    """
+    step = _fit_step(time_sec)
+    command = np.asarray(command, dtype=float)
+    measured = np.asarray(measured, dtype=float)
+    width = len(estimate.stiffness)
+    if command.ndim != 2 or command.shape[1] != width or measured.shape != command.shape:
+        raise FitError(
+            f"the model covers {width} joints, the track "
+            f"{command.shape[-1] if command.ndim == 2 else '?'}"
+        )
+    if (estimate.inverse_inertia is None) != (gravity_torque is None):
+        raise FitError(
+            "a model fitted with a gravity column must be scored with one, and "
+            "one fitted without must not be: otherwise a different model is "
+            "being scored than the one that was fitted"
+        )
+    if gravity_torque is not None:
+        gravity_torque = np.asarray(gravity_torque, dtype=float)
+        if gravity_torque.shape != command.shape:
+            raise FitError("gravity torque must match the track's shape")
+
+    predicted = np.empty_like(command)
+    # Started at the second sample, because that is where a velocity can be
+    # observed. Under semi-implicit Euler (q[i+1] = q[i] + dt*qd[i+1]) the first
+    # difference is qd[1], not qd[0], so seeding position q[0] with it would
+    # pair a position with the velocity from one step later — a small error that
+    # then integrates for the whole run.
+    predicted[0] = measured[0]
+    position = measured[1].copy()
+    velocity = (measured[1] - measured[0]) / step
+    for index in range(1, len(command)):
+        predicted[index] = position
+        acceleration = (
+            estimate.stiffness * (command[index] - position)
+            - estimate.damping * velocity
+            - estimate.friction * np.sign(velocity)
+        )
+        if gravity_torque is not None:
+            acceleration = acceleration - estimate.inverse_inertia * gravity_torque[index]
+        velocity = velocity + step * acceleration
+        position = position + step * velocity
+    return predicted
+
+
+def score_holdout(
+    estimate: SecondOrderEstimate,
+    time_sec: np.ndarray,
+    command: np.ndarray,
+    measured: np.ndarray,
+    *,
+    gravity_torque: np.ndarray | None = None,
+    max_lag_samples: int = 50,
+) -> HoldoutMetrics:
+    """Measure a fitted model against a run it was not fitted on.
+
+    The baseline is the model-free assumption that the arm reached its command.
+    That is what somebody with no identification at all would believe, so it is
+    what a model has to beat to be worth carrying.
+    """
+    predicted = predict_second_order(
+        estimate, time_sec, command, measured, gravity_torque=gravity_torque
+    )
+    step = _fit_step(time_sec)
+    measured = np.asarray(measured, dtype=float)
+    command = np.asarray(command, dtype=float)
+
+    rmse = float(np.sqrt(np.mean((predicted - measured) ** 2)))
+    baseline = float(np.sqrt(np.mean((command - measured) ** 2)))
+
+    # How far the prediction would have to slide to line up best. A model that
+    # captured the loop's delay needs no sliding; one that did not shows it here
+    # rather than spreading it through the position error.
+    lag = min(max_lag_samples, len(measured) // 4)
+    best_shift, best_error = 0, rmse
+    for shift in range(-lag, lag + 1):
+        if shift == 0:
+            continue
+        if shift > 0:
+            error = predicted[:-shift] - measured[shift:]
+        else:
+            error = predicted[-shift:] - measured[:shift]
+        value = float(np.sqrt(np.mean(error**2)))
+        if value < best_error:
+            best_shift, best_error = shift, value
+
+    return HoldoutMetrics(
+        rmse_rad=rmse,
+        baseline_rmse_rad=baseline,
+        delay_residual_sec=abs(best_shift) * step,
+        improvement_fraction=(
+            0.0 if baseline <= 0 else max(0.0, 1.0 - rmse / baseline)
+        ),
+    )
+
+
 def validate_holdout(
     *,
     openarm_rmse_rad: float,

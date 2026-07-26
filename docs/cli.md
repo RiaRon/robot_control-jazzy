@@ -1147,24 +1147,58 @@ Check holdout metrics against the acceptance thresholds.
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--bundle` | *required* | Calibration bundle to validate against |
-| `--metrics` | *required* | JSON holdout metrics |
 | `--output` | *required* | JSON verdict to write |
+| `--manifest` | — | Run manifest from `collect --repetitions 3`; scores the held-out run |
+| `--fit` | *required with `--manifest`* | Fit estimate to score |
+| `--urdf` | *required if the fit carries a gravity term* | Robot description |
+| `--metrics` | — | JSON holdout metrics computed elsewhere |
 
 ```bash
-robotctl r2s validate --bundle bundle.json --metrics holdout.json --output verdict.json
+robotctl r2s validate --bundle bundle.json --manifest run.json --fit estimate.json --output verdict.json
 ```
 
 ```text
 validate: schema v2, status=validated
   identified parameters: openarm_left_arm, openarm_right_arm
+  command_period_sec: 0.01
+  delay_residual_sec: 0
+  improvement_fraction: 0.9997
+  openarm_rmse_rad: 8.9e-05
+  tesollo_rmse_rad: 0
 ```
+
+### What is actually measured
+
+The model is simulated **open loop** along the held-out run's commands and
+compared with what the arm did. Open loop on purpose: feeding the measurement
+back each step would score how well the model interpolates between samples it was
+already given, which every model does well. A simulator has to run without them.
+
+`improvement_fraction` is against the model-free assumption that **the arm
+reached its command** — what somebody with no identification at all would
+believe. That is what a model has to beat to be worth carrying.
+
+`delay_residual_sec` is how far the prediction would have to slide to line up
+best. A model that captured the loop's delay needs no sliding; one that did not
+shows it here rather than spreading it through the position error.
+
+Which of `openarm_rmse_rad` and `tesollo_rmse_rad` a run fills comes from the
+group's own name against the profile's declared components — the two have
+different thresholds, so putting a run's error under the wrong one would compare
+it against the wrong bound. The other is left at `0`, which cannot fail: an arm
+run says nothing about the hand, and inventing a number for it would be worse
+than admitting that.
+
+`--metrics` remains for a verdict computed elsewhere.
 
 Loading the bundle is itself part of the verdict, so a bundle that cannot be read
 — a bad checksum, the wrong asset, or identified parameters fitted against
 another robot — exits `2` with the reason rather than raising.
 
-**Exit codes:** `0` validated; `2` the bundle could not be read; `3` the model is
-inadequate; `SystemExit` for a missing path.
+**Exit codes:** `0` validated; `2` the bundle could not be read, neither
+`--metrics` nor `--manifest` was given, `--manifest` without `--fit`, or a
+manifest from another profile or asset; `3` the model is inadequate;
+`SystemExit` for a missing path.
 
 ## `robotctl r2s export`
 

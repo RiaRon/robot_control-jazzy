@@ -32,11 +32,13 @@ from .identification import (
     FitError,
     GravitySweep,
     CombinedEstimate,
+    SecondOrderEstimate,
     build_excitation,
     combine,
     design_pose_set,
     fit_second_order,
     fit_static_gravity,
+    score_holdout,
     split_repetitions,
     validate_holdout,
 )
@@ -251,6 +253,23 @@ def _parser() -> argparse.ArgumentParser:
         if stage == "validate":
             item.add_argument("--metrics", type=Path)
             item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--manifest",
+                type=Path,
+                help="run manifest from r2s collect --repetitions 3; scores the "
+                "held-out run instead of reading --metrics",
+            )
+            item.add_argument(
+                "--fit",
+                type=Path,
+                help="fit estimate to score against the holdout; needs --manifest",
+            )
+            item.add_argument(
+                "--urdf",
+                type=Path,
+                help="robot description, required when the fit carries a "
+                "gravity term",
+            )
         if stage == "export":
             item.add_argument("--validation", type=Path)
             item.add_argument("--output", type=Path)
@@ -1221,6 +1240,136 @@ _BUNDLE_KEYS = (
 )
 
 
+def _component_of(group, profile) -> str:
+    """Which component of the robot a group belongs to.
+
+    Read from the group's own name against the profile's declared components,
+    rather than assumed: `validate_holdout` holds arms and hands to different
+    thresholds, so putting a run's error under the wrong name would compare it
+    against the wrong bound.
+    """
+    for component in profile.components:
+        if group.name.startswith(f"{component}_"):
+            return component
+    raise ValueError(
+        f"group {group.name!r} does not name one of this profile's components "
+        f"{list(profile.components)}, so its holdout error cannot be scored "
+        "against the right threshold"
+    )
+
+
+def _score_manifest(args, profile) -> tuple[dict, dict]:
+    """Score a fitted model against the run the manifest held out."""
+    from .kinematics import KinematicsError, chain_from_urdf
+
+    if not args.fit:
+        raise ValueError(
+            "--manifest names the run to score against, so it needs --fit: the "
+            "model being scored"
+        )
+    manifest = json.loads(Path(args.manifest).read_text())
+    asset = manifest.get("asset") or {}
+    if (
+        manifest.get("profile") != profile.name
+        or asset.get("id") != profile.asset_id
+        or asset.get("manifest_sha256") != profile.manifest_sha256
+    ):
+        raise ValueError(
+            "the run manifest was recorded against another profile or asset"
+        )
+    group = _group(profile, manifest["group"])
+    names = [entry["path"] for entry in manifest["runs"]]
+    holdout = [names[index] for index in manifest["holdout_runs"]]
+    if len(holdout) != 1:
+        raise ValueError(
+            f"exactly one run is held out, this manifest holds out {len(holdout)}"
+        )
+
+    rate = profile.ros["jazzy"].command_rate_hz
+    track = _load_recording(Path(args.manifest).parent / holdout[0], profile, rate)
+    estimate = _estimate_from_fit(args.fit, group)
+
+    gravity = None
+    if estimate.inverse_inertia is not None:
+        if not args.urdf:
+            raise ValueError(
+                "the fit carries a gravity term, so scoring it needs --urdf to "
+                "work out the modelled torque along the holdout"
+            )
+        source_by_canonical = {j.canonical: j.source for j in profile.joints}
+        sources = tuple(source_by_canonical[j] for j in group.joints)
+        try:
+            chain = chain_from_urdf(
+                Path(args.urdf).read_text(), sources, group.tip_link
+            )
+        except KinematicsError as error:
+            raise ValueError(str(error)) from error
+        gravity = np.array([chain.gravity_torque(q) for q in track.measured])
+
+    scored = score_holdout(
+        estimate,
+        track.timestamps_ns * 1e-9,
+        track.command,
+        track.measured,
+        gravity_torque=gravity,
+    )
+    component = _component_of(group, profile)
+    metrics = {
+        # The run says nothing about the other component, so its metric is left
+        # at a value that cannot fail rather than invented from this one.
+        "openarm_rmse_rad": 0.0,
+        "tesollo_rmse_rad": 0.0,
+        "delay_residual_sec": scored.delay_residual_sec,
+        "command_period_sec": 1.0 / rate,
+        "improvement_fraction": scored.improvement_fraction,
+    }
+    metrics[f"{component}_rmse_rad"] = scored.rmse_rad
+    return metrics, {
+        "group": group.name,
+        "fit_runs": [names[index] for index in manifest["fit_runs"]],
+        "holdout_runs": holdout,
+        "baseline_rmse_rad": scored.baseline_rmse_rad,
+    }
+
+
+def _load_recording(path: Path, profile, rate_hz):
+    """Read one `.npz` from collect and put its two streams on a common grid."""
+    raw = np.load(path, allow_pickle=False)
+    return normalize_track(
+        raw["command_time_ns"],
+        raw["command"],
+        raw["measured_time_ns"],
+        raw["measured"],
+        list(raw["joint_names"]),
+        rate_hz,
+    )
+
+
+def _estimate_from_fit(path: Path, group) -> SecondOrderEstimate:
+    payload = json.loads(Path(path).read_text())
+    width = len(group.joints)
+
+    def column(key):
+        values = np.asarray(payload[key], dtype=float)
+        if values.shape != (width,):
+            raise ValueError(
+                f"{path}: {key} must carry one value per joint of "
+                f"{group.name!r}, {width} of them"
+            )
+        return values
+
+    inverse = None
+    if "inertia_kg_m2" in payload:
+        inverse = 1.0 / column("inertia_kg_m2")
+    return SecondOrderEstimate(
+        column("stiffness"),
+        column("damping"),
+        column("friction"),
+        column("residual_rmse"),
+        inverse,
+    )
+
+
 def _collect_track(args, profile) -> int:
     """Publish an identification excitation and record what the arm did.
 
@@ -1707,18 +1856,44 @@ def main(argv: list[str] | None = None) -> int:
         except (CalibrationError, OSError, ValueError) as error:
             print(f"error: {error}")
             return UNUSABLE
-        if not args.metrics or not args.output:
-            raise SystemExit("--metrics and --output are required")
-        metrics = json.loads(args.metrics.read_text())
+        if not args.output:
+            raise SystemExit("--output is required")
+        extra: dict = {}
+        if args.manifest is not None:
+            try:
+                metrics, extra = _score_manifest(args, profile)
+            except (FitError, TrackError, ValueError, OSError, KeyError) as error:
+                print(f"error: {error}")
+                return UNUSABLE
+        elif args.metrics is not None:
+            metrics = json.loads(args.metrics.read_text())
+        else:
+            print(
+                "error: validate needs either --metrics, a verdict computed "
+                "elsewhere, or --manifest with --fit, which scores the held-out "
+                "run itself"
+            )
+            return UNUSABLE
         result = validate_holdout(**metrics)
         args.output.write_text(
-            json.dumps({"status": result.status, "failures": result.failures}, indent=2) + "\n"
+            json.dumps(
+                {
+                    "status": result.status,
+                    "failures": result.failures,
+                    "metrics": metrics,
+                    **extra,
+                },
+                indent=2,
+            )
+            + "\n"
         )
         print(f"validate: schema v{bundle.schema_version}, status={result.status}")
         print(
             "  identified parameters: "
             + (", ".join(sorted(bundle.identified)) or "none")
         )
+        for name, value in sorted(metrics.items()):
+            print(f"  {name}: {value:.5g}")
         return 0 if result.status == "validated" else 3
     elif args.stage == "export":
         if not args.bundle or not args.validation or not args.output:
