@@ -1,5 +1,11 @@
 # Real2Sim parameter identification
 
+> **Status.** All six tasks implemented (`380a113`..`6411697`). Task 4's second
+> half — "the gravity term measurably reduces the fit residual on real data" — is
+> **not met and cannot be**: `r2s collect --execute` publishes nothing, so no real
+> dynamic track exists. The first half is verified against a synthetic robot.
+> Follow-up: `2026-07-26-dynamic-track-collection.md`.
+
 ## Why
 
 The gravity work left the arm with a compensation scale tuned per joint, and the

@@ -298,7 +298,13 @@ term is supplied.
   backend is required` and publishes nothing, so no real track exists. The
   static half of the pipeline (`pose gravity --output`, `r2s identify`,
   `r2s identify --collect`) reaches hardware; `r2s fit --static` cannot be run on
-  real data until collect does.
+  real data until collect does. Planned in
+  `docs/superpowers/plans/2026-07-26-dynamic-track-collection.md`, which also
+  records three further gaps found while auditing it: the adapter discards
+  `/joint_states` timestamps, `normalize_track` interpolates across dropped
+  samples without reporting them, and nothing produces the three repetitions that
+  `split_repetitions` and the bundle's `fit_runs`/`holdout_runs` have always
+  expected — so `validate --metrics` has only ever read a hand-written file.
 - **Measured parameters.** No `J`, `b`, `tau_f` or `kp` has been measured on this
   arm yet. The `kp` values of 7.5, 15.4 and 28.4 quoted in the plan are what
   fitting the *existing single-pose* sweep gives, and the point of quoting them is
