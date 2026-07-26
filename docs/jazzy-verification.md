@@ -153,6 +153,62 @@ Run the three scripts from a clean process table. A leftover launch from a
 previous run keeps publishing `/joint_states`, and the validator then reports
 the other robot's joints as `extra joints`.
 
+## Pose-setting verification
+
+Completed on 2026-07-26 (Asia/Seoul), after the pose-setting work landed. Every
+check was run from a clean process table.
+
+| Check | Status | Exit status | Evidence |
+| --- | --- | ---: | --- |
+| Static suite | **PASS** | 0 | `156 passed`, up from 84 before this work. `python3 -m compileall -q src tests tools` and `bash -n` on both new scripts are clean. |
+| OpenArm fake smoke | **PASS** | 0 | `smoke test passed`. |
+| DG5F fake smoke | **PASS** | 0 | `smoke test passed`. |
+| DG5F Gazebo smoke | **PASS** | 0 | `smoke test passed`. |
+| OpenArm pose smoke | **PASS** | 0 | New. `pose smoke: after z=+0.1919 moved +0.0300` against a commanded +0.0300 m, tolerance 0.005 m. |
+| Snapshot provenance | **PASS** | 0 | Four `snapshot verified` results. This work changed no vendored tree, so no patch or inventory needed updating. |
+
+```bash
+PYTHONPATH=src:. pytest -q
+python3 -m compileall -q src tests tools
+bash -n ros_ws/pose_bringup.sh ros_ws/smoke_pose_openarm.sh
+./ros_ws/smoke_openarm_fake.sh
+./ros_ws/smoke_dg5f_fake.sh
+./ros_ws/smoke_dg5f_gazebo.sh
+./ros_ws/smoke_pose_openarm.sh
+```
+
+`smoke_pose_openarm.sh` launches through `ros_ws/pose_bringup.sh`, the same
+wrapper an operator uses, so it would catch that wrapper regressing to the
+vendor's real-hardware default. Its validator measures the end effector, runs
+the real `robotctl pose ee --relative --xyz 0,0,0.03 --execute`, and measures
+again; a library-only check would pass even with the CLI wiring broken.
+
+Kill leftovers between runs with patterns that bracket their first character:
+
+```bash
+for pattern in "[m]ove_group" "[r]os2_control_node" "[r]obot_state_publisher" \
+               "[b]in/ros2 launch" "[r]viz2" "[g]z sim" "[p]arameter_bridge"; do
+    pkill -f "$pattern" || true
+done
+```
+
+Without the bracket the pattern matches the `pkill` command line itself and
+kills the shell running it, which happened once during this run and left a
+half-torn-down controller manager that the next check then read from.
+
+### Environment noise seen during the pose runs
+
+Neither affects kinematics or control, and neither is caused by this branch:
+
+- `move_group` logs `Unable to transform object from frame 'camera_*' to
+  planning frame 'world'`. A RealSense node running on this host publishes
+  collision objects in camera frames that are not connected to the robot's TF
+  tree.
+- `rviz2` logs `unrealistic inertia` for the four gripper finger links, and
+  `occupancy_map_monitor` fails to load `DepthImageOctomapUpdater` because
+  `moveit_ros_perception` is not installed. Depth-sensor octomap collision is
+  therefore unavailable, as already recorded under Deferred in the design.
+
 ## Defects found and fixed during this run
 
 Three defects were exposed only once the build blocker was cleared. Each was

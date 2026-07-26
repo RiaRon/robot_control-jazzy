@@ -41,8 +41,12 @@ SMOKE_SCRIPTS = (
     ROOT / "ros_ws/smoke_openarm_fake.sh",
     ROOT / "ros_ws/smoke_dg5f_fake.sh",
     ROOT / "ros_ws/smoke_dg5f_gazebo.sh",
+    ROOT / "ros_ws/smoke_pose_openarm.sh",
 )
 SMOKE_HARNESS = ROOT / "ros_ws/smoke_harness.sh"
+# smoke_pose_openarm.sh launches through the operator's bringup wrapper rather
+# than calling ros2 directly, so a synthetic workspace needs it too.
+SMOKE_SUPPORT = (SMOKE_HARNESS, ROOT / "ros_ws/pose_bringup.sh")
 
 
 def test_wait_for_returns_after_predicate_succeeds():
@@ -247,7 +251,8 @@ def test_smoke_script_sources_colcon_setup_that_reads_unset_variables(
         "export ROBOT_CONTROL_SMOKE_SETUP_SOURCED=1\n"
     )
     shutil.copy2(script, workspace)
-    shutil.copy2(SMOKE_HARNESS, workspace)
+    for support in SMOKE_SUPPORT:
+        shutil.copy2(support, workspace)
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
