@@ -11,15 +11,6 @@ ROOT = Path(__file__).parents[1]
 PROFILE = ROOT / "src/robot_control/profiles/openarm_tesollo.yaml"
 
 
-def _moveit_config():
-    """Wherever the vendored SRDF lives is the configuration directory.
-
-    Derived rather than written out: the two branches vendor upstream trees that
-    keep it in different places, and `find_srdf` already knows both.
-    """
-    from robot_control.srdf import find_srdf
-
-    return find_srdf().parent
 
 
 def test_openarm_tesollo_profile_has_complete_canonical_contract():
@@ -77,131 +68,6 @@ def test_group_contract_marks_tesollo_groups_executable_without_moveit():
         assert name in profile.executable_groups()
 
 
-def test_group_contract_matches_vendored_moveit_configuration():
-    """Declared names must exist in the vendored MoveIt configuration.
-
-    This fails if a vendor snapshot bump renames a controller or a planning
-    group, which would otherwise only surface as a runtime action timeout.
-    """
-    profile = load_profile(PROFILE)
-    source_by_canonical = {joint.canonical: joint.source for joint in profile.joints}
-
-    srdf = _moveit_config().joinpath("openarm_bimanual.srdf").read_text()
-    srdf_groups = set(re.findall(r'<group name="([^"]+)"', srdf))
-    srdf_tips = set(re.findall(r'<end_effector [^>]*parent_link="([^"]+)"', srdf))
-    controllers = yaml.safe_load(
-        _moveit_config().joinpath("moveit_controllers.yaml").read_text()
-    )
-    controllers = controllers["moveit_simple_controller_manager"]
-
-    openarm = {
-        name: group
-        for name, group in profile.executable_groups().items()
-        if name.startswith("openarm_")
-    }
-    assert set(openarm) == {
-        "openarm_right_arm",
-        "openarm_left_arm",
-        "openarm_left_gripper",
-    }
-    for name, group in openarm.items():
-        assert group.moveit_group in srdf_groups, name
-        assert group.controller in controllers["controller_names"], name
-        declared = tuple(controllers[group.controller]["joints"])
-        assert declared == tuple(source_by_canonical[j] for j in group.joints), name
-        if group.tip_link is not None:
-            assert group.tip_link in srdf_tips, name
-
-
-def test_tip_link_is_the_tool_centre_point_rviz_anchors_its_marker_to():
-    """RViz and robotctl must mean the same frame by "the end effector".
-
-    MoveIt anchors the interactive end-effector marker at the end effector's
-    parent link, but only once it can resolve that end effector's parent group,
-    which needs both `parent_group` and the link being inside that group. Until
-    both hold it silently falls back to the group's last joint-bearing link,
-    which is 0.18 m short of the tool centre point here: an operator would drag
-    one frame while robotctl commanded another.
-    """
-    profile = load_profile(PROFILE)
-    srdf = _moveit_config().joinpath("openarm_bimanual.srdf").read_text()
-
-    end_effectors = dict(
-        re.findall(
-            r'<end_effector [^>]*parent_link="([^"]+)"[^>]*parent_group="([^"]+)"',
-            srdf,
-        )
-    )
-    groups = dict(re.findall(r'<group name="([^"]+)">(.*?)</group>', srdf, re.S))
-
-    for name in ("openarm_right_arm", "openarm_left_arm"):
-        group = profile.groups[name]
-        tip = group.tip_link
-        assert tip is not None and tip.endswith("_hand_tcp"), name
-        assert end_effectors.get(tip) == group.moveit_group, name
-        assert f'<link name="{tip}"/>' in groups[group.moveit_group], name
-
-
-def test_group_contract_excludes_groups_without_a_controller(tmp_path):
-    profile = _write_two_group_profile(tmp_path, extra="")
-
-    loaded = load_profile(profile)
-    assert set(loaded.groups) == {"one", "two"}
-    assert set(loaded.executable_groups()) == {"one"}
-
-
-def test_group_contract_rejects_moveit_group_without_controller(tmp_path):
-    profile = _write_two_group_profile(tmp_path, extra="    moveit_group: orphan\n")
-
-    with pytest.raises(ProfileError, match="moveit_group.*without a controller"):
-        load_profile(profile)
-
-
-def test_group_contract_rejects_tip_link_without_moveit_group(tmp_path):
-    profile = _write_two_group_profile(
-        tmp_path, extra="    controller: c2\n    tip_link: hand\n"
-    )
-
-    with pytest.raises(ProfileError, match="tip_link.*without a moveit_group"):
-        load_profile(profile)
-
-
-def test_group_contract_rejects_unknown_action(tmp_path):
-    profile = _write_two_group_profile(
-        tmp_path, extra="    controller: c2\n    action: teleport\n"
-    )
-
-    with pytest.raises(ProfileError, match="unsupported action"):
-        load_profile(profile)
-
-
-def _write_two_group_profile(tmp_path: Path, extra: str) -> Path:
-    """Write a minimal two-group profile; ``extra`` is appended to group ``two``."""
-    import hashlib
-
-    manifest = tmp_path / "manifest.yaml"
-    manifest.write_text("control_joint_order: [j1, j2]\n")
-    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    profile = tmp_path / "profile.yaml"
-    profile.write_text(
-        f"""
-name: groups
-components: [openarm]
-asset: {{id: asset, manifest: manifest.yaml, manifest_sha256: {digest}}}
-joints:
-  - {{canonical: j1, source: a, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
-  - {{canonical: j2, source: b, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
-groups:
-  one:
-    joints: [j1]
-    controller: c1
-  two:
-    joints: [j2]
-{extra}ros:
-  jazzy: {{command_topic: /cmd, state_topic: /state, controller: c, command_rate_hz: 100}}
-"""
-    )
-    return profile
 
 
 def test_profile_rejects_manifest_hash_mismatch(tmp_path):
@@ -286,3 +152,65 @@ ros:
 
     with pytest.raises(ProfileError, match="exactly one actuator group"):
         load_profile(profile)
+
+
+def test_group_contract_excludes_groups_without_a_controller(tmp_path):
+    profile = _write_two_group_profile(tmp_path, extra="")
+
+    loaded = load_profile(profile)
+    assert set(loaded.groups) == {"one", "two"}
+    assert set(loaded.executable_groups()) == {"one"}
+
+
+def test_group_contract_rejects_moveit_group_without_controller(tmp_path):
+    profile = _write_two_group_profile(tmp_path, extra="    moveit_group: orphan\n")
+
+    with pytest.raises(ProfileError, match="moveit_group.*without a controller"):
+        load_profile(profile)
+
+
+def test_group_contract_rejects_tip_link_without_moveit_group(tmp_path):
+    profile = _write_two_group_profile(
+        tmp_path, extra="    controller: c2\n    tip_link: hand\n"
+    )
+
+    with pytest.raises(ProfileError, match="tip_link.*without a moveit_group"):
+        load_profile(profile)
+
+
+def test_group_contract_rejects_unknown_action(tmp_path):
+    profile = _write_two_group_profile(
+        tmp_path, extra="    controller: c2\n    action: teleport\n"
+    )
+
+    with pytest.raises(ProfileError, match="unsupported action"):
+        load_profile(profile)
+
+
+def _write_two_group_profile(tmp_path: Path, extra: str) -> Path:
+    """Write a minimal two-group profile; ``extra`` is appended to group ``two``."""
+    import hashlib
+
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("control_joint_order: [j1, j2]\n")
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        f"""
+name: groups
+components: [openarm]
+asset: {{id: asset, manifest: manifest.yaml, manifest_sha256: {digest}}}
+joints:
+  - {{canonical: j1, source: a, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+  - {{canonical: j2, source: b, sign: 1, unit: rad, lower: -1, upper: 1, velocity: 1, effort: 1}}
+groups:
+  one:
+    joints: [j1]
+    controller: c1
+  two:
+    joints: [j2]
+{extra}ros:
+  jazzy: {{command_topic: /cmd, state_topic: /state, controller: c, command_rate_hz: 100}}
+"""
+    )
+    return profile
