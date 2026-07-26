@@ -16,17 +16,20 @@ ros:
     controller: openarm_tesollo_canonical_controller
     command_rate_hz: 100
 # A group is executable only if it names a controller. `moveit_group` names the
-# SRDF planning group used for IK and FK; groups without one are reachable by
-# direct joint values only. `action` defaults to follow_joint_trajectory.
+# SRDF planning group used for IK and FK, and `tip_link` the frame those solve
+# for; groups without them are reachable by direct joint values only. `action`
+# defaults to follow_joint_trajectory.
 groups:
   openarm_right_arm:
     joints: [r_aj_1, r_aj_2, r_aj_3, r_aj_4, r_aj_5, r_aj_6, r_aj_7]
     controller: right_joint_trajectory_controller
     moveit_group: right_arm
+    tip_link: openarm_right_hand
   openarm_left_arm:
     joints: [l_aj_1, l_aj_2, l_aj_3, l_aj_4, l_aj_5, l_aj_6, l_aj_7]
     controller: left_joint_trajectory_controller
     moveit_group: left_arm
+    tip_link: openarm_left_hand
   openarm_left_gripper:
     joints: [l_hj_gripper_1]
     controller: left_gripper_controller

@@ -41,6 +41,7 @@ class Group:
     controller: str | None = None
     moveit_group: str | None = None
     action: str | None = None
+    tip_link: str | None = None
 
     @property
     def executable(self) -> bool:
@@ -112,6 +113,10 @@ def _group(name: str, body: dict[str, Any]) -> Group:
     controller = body.get("controller")
     moveit_group = body.get("moveit_group")
     action = body.get("action")
+    tip_link = body.get("tip_link")
+    if moveit_group is None and tip_link is not None:
+        # The tip link is only ever used as the IK frame of a planning group.
+        raise ProfileError(f"group {name} declares a tip_link without a moveit_group")
     if controller is None:
         # A planning group or an action without a controller names no endpoint,
         # so it would silently never execute.
@@ -129,6 +134,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
         controller=None if controller is None else str(controller),
         moveit_group=None if moveit_group is None else str(moveit_group),
         action=action,
+        tip_link=None if tip_link is None else str(tip_link),
     )
 
 

@@ -39,10 +39,12 @@ def test_group_contract_declares_openarm_controllers_and_moveit_groups():
     assert groups["openarm_right_arm"].controller == "right_joint_trajectory_controller"
     assert groups["openarm_right_arm"].moveit_group == "right_arm"
     assert groups["openarm_right_arm"].action == "follow_joint_trajectory"
+    assert groups["openarm_right_arm"].tip_link == "openarm_right_hand"
 
     assert groups["openarm_left_arm"].controller == "left_joint_trajectory_controller"
     assert groups["openarm_left_arm"].moveit_group == "left_arm"
     assert groups["openarm_left_arm"].action == "follow_joint_trajectory"
+    assert groups["openarm_left_arm"].tip_link == "openarm_left_hand"
 
     # The gripper is driven by a GripperActionController, not a trajectory
     # controller, so the action must be declared rather than assumed.
@@ -76,6 +78,7 @@ def test_group_contract_matches_vendored_moveit_configuration():
 
     srdf = (MOVEIT_CONFIG / "openarm_bimanual.srdf").read_text()
     srdf_groups = set(re.findall(r'<group name="([^"]+)"', srdf))
+    srdf_tips = set(re.findall(r'<end_effector [^>]*parent_link="([^"]+)"', srdf))
     controllers = yaml.safe_load((MOVEIT_CONFIG / "moveit_controllers.yaml").read_text())
     controllers = controllers["moveit_simple_controller_manager"]
 
@@ -94,6 +97,8 @@ def test_group_contract_matches_vendored_moveit_configuration():
         assert group.controller in controllers["controller_names"], name
         declared = tuple(controllers[group.controller]["joints"])
         assert declared == tuple(source_by_canonical[j] for j in group.joints), name
+        if group.tip_link is not None:
+            assert group.tip_link in srdf_tips, name
 
 
 def test_group_contract_excludes_groups_without_a_controller(tmp_path):
@@ -108,6 +113,15 @@ def test_group_contract_rejects_moveit_group_without_controller(tmp_path):
     profile = _write_two_group_profile(tmp_path, extra="    moveit_group: orphan\n")
 
     with pytest.raises(ProfileError, match="moveit_group.*without a controller"):
+        load_profile(profile)
+
+
+def test_group_contract_rejects_tip_link_without_moveit_group(tmp_path):
+    profile = _write_two_group_profile(
+        tmp_path, extra="    controller: c2\n    tip_link: hand\n"
+    )
+
+    with pytest.raises(ProfileError, match="tip_link.*without a moveit_group"):
         load_profile(profile)
 
 
