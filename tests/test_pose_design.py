@@ -144,3 +144,43 @@ def test_the_designed_set_conditions_a_real_chain():
     )
 
     assert design.worst_condition < MAX_CONDITION, design.condition
+
+
+def test_a_repositioning_carries_its_own_ramp():
+    """Why a move is many waypoints and not one at the far end.
+
+    The controller runs `interpolation_method: none`, so it holds the state a
+    trajectory was installed with until a waypoint comes due and then steps to
+    it. One waypoint a whole `--duration` away is therefore not a slow move: it
+    is a wait, then a jump, and a longer duration only lengthens the wait.
+    Measured on the OpenArm — `EXECUTED ... over 10 s` printed while the arm
+    lunged.
+
+    The ramp is built before the gate rather than inside the adapter so that
+    what was authorized is what goes on the wire.
+    """
+    from robot_control.cli import _ramp
+
+    start = np.zeros(7)
+    target = np.full(7, 1.5)
+
+    points = _ramp(start, target, duration_sec=10.0, rate_hz=100.0)
+
+    assert len(points) == 1000
+    np.testing.assert_allclose(points[-1], target)
+    # No waypoint may be the whole move: every step is one command period of
+    # travel, which is also what makes the gate's velocity check meaningful.
+    steps = np.diff(np.vstack([start, *points]), axis=0)
+    assert np.max(np.abs(steps)) == pytest.approx(1.5 / 1000)
+
+
+def test_a_move_of_nothing_still_carries_a_waypoint():
+    """Commanding the pose the arm is already in must not send an empty goal."""
+    from robot_control.cli import _ramp
+
+    here = np.full(7, 0.25)
+
+    points = _ramp(here, here, duration_sec=10.0, rate_hz=100.0)
+
+    assert points
+    np.testing.assert_allclose(points[-1], here)

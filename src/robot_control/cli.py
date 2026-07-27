@@ -553,6 +553,32 @@ def _pose_show(args, profile) -> int:
     return 0
 
 
+def _ramp(
+    start: Sequence[float],
+    target: Sequence[float],
+    duration_sec: float,
+    rate_hz: float,
+) -> list[np.ndarray]:
+    """Waypoints from *start* to *target*, one per command period.
+
+    The controller runs `interpolation_method: none`, so it holds the state a
+    trajectory was installed with until a waypoint comes due and then steps to
+    it — see `STREAM_HORIZON_SEC` for the same behaviour on the servo path. One
+    waypoint a whole duration away is therefore not a slow move but a wait and
+    then a jump: measured on the OpenArm as an abrupt lunge, and at ten seconds
+    as an arm that appears not to move at all until it suddenly does.
+
+    Built before the gate rather than inside the adapter, so that what was
+    authorized is what goes on the wire. It is also what makes the gate's
+    velocity check bite: a single distant waypoint has a whole duration of
+    budget and passes whatever it asks for.
+    """
+    start = np.asarray(start, dtype=float)
+    target = np.asarray(target, dtype=float)
+    steps = max(1, int(round(duration_sec * rate_hz)))
+    return [start + (target - start) * (step / steps) for step in range(1, steps + 1)]
+
+
 def _pose_joints(args, profile) -> int:
     from .ros_adapter import RosAdapter
 
@@ -570,15 +596,19 @@ def _pose_joints(args, profile) -> int:
         return 0
 
     with RosAdapter(profile, args.group, execute=True) as adapter:
-        gate = _gate(profile, group, seed=adapter.read_state())
+        here = adapter.read_state()
+        rate = profile.endpoint().command_rate_hz
+        gate = _gate(profile, group, seed=here)
         points = gate.authorize_trajectory(
-            [target], start_time_sec=0.0, period_sec=args.duration
+            _ramp(here, target, args.duration, rate),
+            start_time_sec=0.0,
+            period_sec=1.0 / rate,
         )
         _describe(group, interface, target)
         if group.action == PARALLEL_GRIPPER_COMMAND:
             adapter.send_gripper(float(points[-1][0]))
         else:
-            adapter.send_trajectory(points, period_sec=args.duration)
+            adapter.send_trajectory(points, period_sec=1.0 / rate)
         print(f"EXECUTED: {group.name} over {args.duration:g} s")
     return 0
 
@@ -632,9 +662,12 @@ def _pose_ee(args, profile) -> int:
             target = Pose(tuple(xyz), orientation, current.frame_id)
 
         solution = adapter.solve_ik(target, seed=seed)
+        rate = profile.endpoint().command_rate_hz
         gate = _gate(profile, group, seed=seed)
         points = gate.authorize_trajectory(
-            [solution], start_time_sec=0.0, period_sec=args.duration
+            _ramp(seed, solution, args.duration, rate),
+            start_time_sec=0.0,
+            period_sec=1.0 / rate,
         )
 
         start = " ".join(f"{value:+.4f}" for value in current.position)
@@ -644,7 +677,7 @@ def _pose_ee(args, profile) -> int:
         if not args.execute:
             print("DRY RUN: solved but not sent; pass --execute to send")
             return 0
-        adapter.send_trajectory(points, period_sec=args.duration)
+        adapter.send_trajectory(points, period_sec=1.0 / rate)
         print(f"EXECUTED: {group.name} over {args.duration:g} s")
         _report_residual(adapter, target, solution, profile, group, args)
     return 0
@@ -680,11 +713,14 @@ def _report_residual(adapter, target, solution, profile, group, args) -> None:
         command = command + (solution - actual)
         # A fresh gate each pass, so the wound-up command is checked against the
         # profile limits rather than trusted for having been safe once.
+        rate = profile.endpoint().command_rate_hz
         gate = _gate(profile, group, seed=actual)
         points = gate.authorize_trajectory(
-            [command], start_time_sec=0.0, period_sec=args.duration
+            _ramp(actual, command, args.duration, rate),
+            start_time_sec=0.0,
+            period_sec=1.0 / rate,
         )
-        adapter.send_trajectory(points, period_sec=args.duration)
+        adapter.send_trajectory(points, period_sec=1.0 / rate)
         corrected = _residual(adapter, target)
         print(f"settle {attempt}: {residual * 1000:.1f} -> {corrected * 1000:.1f} mm")
         if corrected > residual * (1.0 - SETTLE_PROGRESS):
@@ -1548,9 +1584,11 @@ def _collect_track_run(args, profile) -> int:
                 print(f"\nrun {index}: returning to the starting pose")
                 state = adapter.read_state()
                 points = _gate(profile, group, seed=state).authorize_trajectory(
-                    [neutral], start_time_sec=0.0, period_sec=DEFAULT_DURATION_SEC
+                    _ramp(state, neutral, DEFAULT_DURATION_SEC, rate),
+                    start_time_sec=0.0,
+                    period_sec=period,
                 )
-                adapter.send_trajectory(points, period_sec=DEFAULT_DURATION_SEC)
+                adapter.send_trajectory(points, period_sec=period)
             stamps, recording = _publish_excitation(adapter, command, period)
             _report_recording(len(command), recording, rate)
             path = _repetition_path(args.output, index, args.repetitions)
@@ -1798,6 +1836,7 @@ def _collect_poses(args, profile) -> list[Path] | None:
 
     joints = {joint.canonical: joint for joint in profile.joints}
     limits = [joints[canonical] for canonical in group.joints]
+    rate = profile.endpoint().command_rate_hz
 
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group)
@@ -1843,9 +1882,11 @@ def _collect_poses(args, profile) -> list[Path] | None:
             state = adapter.read_state()
             gate = _gate(profile, group, seed=state)
             points = gate.authorize_trajectory(
-                [pose], start_time_sec=0.0, period_sec=args.duration
+                _ramp(state, pose, args.duration, rate),
+                start_time_sec=0.0,
+                period_sec=1.0 / rate,
             )
-            adapter.send_trajectory(points, period_sec=args.duration)
+            adapter.send_trajectory(points, period_sec=1.0 / rate)
             sweep = _measure_sweep(
                 adapter, chain, gate, group, rounds, args.hold_sec, None, None
             )
