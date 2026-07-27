@@ -38,3 +38,24 @@ also be installed for execution; the core CLI deliberately fails without one.
 Calibration JSON v1 is read-only compatibility input. All newly exported
 bundles are schema v2, checksum protected, and tied to a profile and asset
 manifest hash.
+
+## Handing a calibration to hdgp
+
+`hdgp` reads schema v1 and one scalar per actuator group, so `r2s export` can
+write that form beside the bundle:
+
+```bash
+robotctl r2s export --bundle bundle.json --validation verdict.json \
+    --output exported.json --hdgp real2sim_actuator.json
+OPENARM_REAL2SIM_ACTUATOR_CALIBRATION=$PWD/real2sim_actuator.json ./train.sh ...
+```
+
+Two things about that conversion are worth knowing before trusting a run.
+`get_actuator_params` answers a group name it does not recognise with the
+env's own default and reports nothing, so the group each profile group lands
+in is declared as `hdgp_group` in the profile rather than guessed; a measured
+group without one is refused. And collapsing a group's joints to one scalar is
+refused when they disagree by more than `--hdgp-max-spread` of their mean —
+the arm's real gains run kp 70 / 60 / 10, where the average describes no joint
+in the group. Groups with no measurement are left out, so the env keeps its own
+gain; the export names them.

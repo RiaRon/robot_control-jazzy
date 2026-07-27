@@ -43,6 +43,11 @@ from .identification import (
     split_repetitions,
     validate_holdout,
 )
+from .hdgp_export import (
+    DEFAULT_MAX_SPREAD,
+    HdgpExportError,
+    write_hdgp_calibration,
+)
 from .interface import CanonicalInterface
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .safety import CommandGate, SafetyError
@@ -280,6 +285,19 @@ def _parser() -> argparse.ArgumentParser:
         if stage == "export":
             item.add_argument("--validation", type=Path)
             item.add_argument("--output", type=Path)
+            item.add_argument(
+                "--hdgp",
+                type=Path,
+                help="also write the schema v1 file hdgp's training env loads, "
+                "one scalar per actuator group under the name that env uses",
+            )
+            item.add_argument(
+                "--hdgp-max-spread",
+                type=float,
+                default=DEFAULT_MAX_SPREAD,
+                help="how far a group's joints may disagree, as (max-min)/mean, "
+                "before one scalar is refused as describing none of them",
+            )
     _add_pose(commands)
     return parser
 
@@ -1972,7 +1990,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.bundle or not args.validation or not args.output:
             raise SystemExit("--bundle, --validation, and --output are required")
         try:
-            load_bundle(args.bundle, profile)
+            bundle = load_bundle(args.bundle, profile)
         except (CalibrationError, OSError, ValueError) as error:
             print(f"error: {error}")
             return UNUSABLE
@@ -1982,6 +2000,31 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         args.output.write_bytes(args.bundle.read_bytes())
         print(f"export: {args.output}")
+        if args.hdgp:
+            try:
+                payload = write_hdgp_calibration(
+                    args.hdgp, bundle, profile, max_spread=args.hdgp_max_spread
+                )
+            except (HdgpExportError, OSError) as error:
+                print(f"error: {error}")
+                return UNUSABLE
+            print(f"export hdgp: {args.hdgp}")
+            for name in sorted(payload["groups"]):
+                body = payload["groups"][name]
+                print(
+                    f"  {name}: stiffness={body['stiffness']:.4g} "
+                    f"damping={body['damping']:.4g} "
+                    f"friction={body['joint_friction']:.4g}"
+                )
+            # Named, not silent: these keep the env's own gain, and the run is
+            # only partly calibrated as a result.
+            defaulted = sorted(
+                group.hdgp_group
+                for name, group in profile.groups.items()
+                if group.hdgp_group and group.hdgp_group not in payload["groups"]
+            )
+            if defaulted:
+                print(f"  left at the env's defaults: {', '.join(defaulted)}")
     else:
         print(f"{args.stage}: profile={profile.name}")
     return 0

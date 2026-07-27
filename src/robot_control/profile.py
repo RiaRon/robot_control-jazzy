@@ -55,6 +55,12 @@ class Group:
     # position. Named rather than derived: nothing in the trajectory
     # controller's name says what an effort controller beside it is called.
     effort_controller: str | None = None
+    # What hdgp's training env calls this same set of joints, in its
+    # `actuators={...}` dict. Named rather than derived for the same reason
+    # `moveit_group` is: the two namespaces were written independently, and
+    # hdgp's `get_actuator_params` answers an unrecognised name with the env's
+    # own default instead of an error. A guessed name trains silently wrong.
+    hdgp_group: str | None = None
 
     @property
     def executable(self) -> bool:
@@ -150,6 +156,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
     action = body.get("action")
     tip_link = body.get("tip_link")
     effort_controller = body.get("effort_controller")
+    hdgp_group = body.get("hdgp_group")
     if moveit_group is None and tip_link is not None:
         # The tip link is only ever used as the IK frame of a planning group.
         raise ProfileError(f"group {name} declares a tip_link without a moveit_group")
@@ -178,6 +185,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
         effort_controller=(
             None if effort_controller is None else str(effort_controller)
         ),
+        hdgp_group=None if hdgp_group is None else str(hdgp_group),
     )
 
 

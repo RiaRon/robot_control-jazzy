@@ -243,6 +243,51 @@ def test_validate_refuses_parameters_measured_on_another_asset(base, tmp_path, c
     assert "fitted against" in capsys.readouterr().out
 
 
+def _validated_bundle(base, tmp_path):
+    bundled = tmp_path / "bundled.json"
+    main(["r2s", "bundle", "--base", str(base), "--output", str(bundled),
+          "--fit", str(_fit(tmp_path / "right.json"))])
+    verdict = tmp_path / "verdict.json"
+    verdict.write_text(json.dumps({"status": "validated", "failures": []}))
+    return bundled, verdict
+
+
+def test_export_writes_the_file_hdgps_env_loads(base, tmp_path, capsys):
+    bundled, verdict = _validated_bundle(base, tmp_path)
+    hdgp = tmp_path / "real2sim.json"
+
+    code = main(
+        ["r2s", "export", "--bundle", str(bundled), "--validation", str(verdict),
+         "--output", str(tmp_path / "exported.json"), "--hdgp", str(hdgp),
+         # The seven arm joints genuinely disagree by more than the default
+         # allows; accepting the average is the caller's call to make.
+         "--hdgp-max-spread", "2.0"]
+    )
+
+    assert code == 0
+    payload = json.loads(hdgp.read_text())
+    assert payload["schema_version"] == 1
+    assert set(payload["groups"]) == {GROUP}
+    out = capsys.readouterr().out
+    assert "export hdgp" in out
+    # The groups that keep the env's own gain are named, not left to be noticed.
+    assert "tesollo_hand_curl" in out
+
+
+def test_export_refuses_to_average_joints_that_disagree(base, tmp_path, capsys):
+    bundled, verdict = _validated_bundle(base, tmp_path)
+    hdgp = tmp_path / "real2sim.json"
+
+    code = main(
+        ["r2s", "export", "--bundle", str(bundled), "--validation", str(verdict),
+         "--output", str(tmp_path / "exported.json"), "--hdgp", str(hdgp)]
+    )
+
+    assert code == 2
+    assert not hdgp.exists()
+    assert "one scalar describes no joint" in capsys.readouterr().out
+
+
 def test_export_refuses_a_bundle_it_cannot_read(base, tmp_path, capsys):
     verdict = tmp_path / "verdict.json"
     verdict.write_text(json.dumps({"status": "validated", "failures": []}))
