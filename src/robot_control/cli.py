@@ -73,13 +73,21 @@ DEFAULT_DURATION_SEC = 10.0
 # the gate refuses it by name.
 SEED_SLACK_RAD = 0.05
 
-# The initial working state `pose ready` moves each arm to, from wherever it
-# is: elbow raised here, every other joint at zero. `pose rest` reverses it,
-# back down to all zeros. The elbow's raise is what clears the hand from the
-# table — at zero the fingertips touch it.
+# The initial working state `pose ready` moves each arm to: elbow raised here,
+# wrist pitched READY_WRIST_RAD away from the table, every other joint at zero.
+# It goes in two phases because a tool resting on the table blocks the wrist's
+# sweep entirely — commanding the wrist while the arm lies down is a stall, not
+# a move, and it burned left j7's rotor. Phase 1 raises only the elbow with
+# every other joint holding where it measured; phase 2, airborne, settles the
+# rest. `pose rest` reverses the ritual and leaves the wrist at its lifted
+# angle, so the tool meets the table yielding in the direction the table
+# pushes rather than commanded straight against it.
 READY_ELBOW_RAD = 0.8
-# joints[3] is *_aj_4, the elbow, in each arm group's serial order.
+READY_WRIST_RAD = 0.524  # 30 degrees
+# joints[3] is *_aj_4, the elbow, and joints[6] is *_aj_7, the wrist pitch, in
+# each arm group's serial order.
 ELBOW_INDEX = 3
+WRIST_INDEX = 6
 # Slow enough to walk to the E-stop mid-move: the full raise takes 8 s.
 PARK_SPEED_RAD_PER_SEC = 0.1
 
@@ -676,13 +684,47 @@ def _pose_joints(args, profile) -> int:
     return 0
 
 
-def _pose_park(args, profile, raise_elbow: bool) -> int:
-    """Move each arm between all-zeros rest and the initial working state.
+def _wrist_lift_sign(name: str) -> float:
+    """The lift that clears a mounted tool from the table, per arm.
 
-    One target per direction, paced by PARK_SPEED_RAD_PER_SEC rather than a
-    duration, so the move is equally slow whether the arm starts at rest or
-    somewhere it was left mid-experiment. Arms go one at a time: a single
-    operator watches a single arm.
+    The arms are mirrored — joint 7's axis carries the xacro's reflect — so
+    the same physical pitch away from the table is positive on the right and
+    negative on the left, matching the direction the table itself pushes a
+    resting tool (left j7 is pinned near its negative limit at rest).
+    """
+    return -1.0 if "left" in name else 1.0
+
+
+def _park_targets(name: str, here: np.ndarray, raise_elbow: bool):
+    """The two waypoint poses of a park move, in the order they are visited.
+
+    Ready: lift the elbow with everything else holding, then settle. Rest:
+    settle with the elbow still up, then lower. Either way the wrist is only
+    ever commanded while the elbow is raised, and it ends at the lifted angle
+    in both directions — see READY_ELBOW_RAD's comment for why.
+    """
+    settled = np.zeros_like(here)
+    settled[ELBOW_INDEX] = READY_ELBOW_RAD
+    settled[WRIST_INDEX] = _wrist_lift_sign(name) * READY_WRIST_RAD
+    if raise_elbow:
+        lifted = here.copy()
+        lifted[ELBOW_INDEX] = READY_ELBOW_RAD
+        return [lifted, settled]
+    lowered = settled.copy()
+    lowered[ELBOW_INDEX] = 0.0
+    # From wherever the arm was working: keep its elbow up while the wrist
+    # and shoulder settle, then lower.
+    settled[ELBOW_INDEX] = max(float(here[ELBOW_INDEX]), READY_ELBOW_RAD)
+    return [settled, lowered]
+
+
+def _pose_park(args, profile, raise_elbow: bool) -> int:
+    """Move each arm between the table rest and the initial working state.
+
+    Paced by PARK_SPEED_RAD_PER_SEC rather than a duration, so the move is
+    equally slow whether the arm starts at rest or somewhere it was left
+    mid-experiment. Arms go one at a time: a single operator watches a single
+    arm.
     """
     from .ros_adapter import RosAdapter
 
@@ -695,31 +737,34 @@ def _pose_park(args, profile, raise_elbow: bool) -> int:
             raise ValueError(
                 f"{name!r} is not an arm group; ready/rest move whole arms"
             )
-        target = np.zeros(len(group.joints))
-        if raise_elbow:
-            target[ELBOW_INDEX] = READY_ELBOW_RAD
 
         if not args.execute:
+            final = _park_targets(name, np.zeros(len(group.joints)), raise_elbow)[-1]
             print(
-                f"DRY RUN: {name}: would move to "
-                f"[{', '.join(f'{value:g}' for value in target)}] at "
+                f"DRY RUN: {name}: would move in two phases to "
+                f"[{', '.join(f'{value:g}' for value in final)}] at "
                 f"{PARK_SPEED_RAD_PER_SEC:g} rad/s; pass --execute to send"
             )
             continue
 
         with RosAdapter(profile, name, execute=True) as adapter:
-            here = _start_pose(profile, group, adapter.read_state())
-            travel = float(np.abs(target - here).max())
-            duration = max(travel / PARK_SPEED_RAD_PER_SEC, 1.0)
             rate = profile.endpoint().command_rate_hz
-            gate = _gate(profile, group, seed=here)
-            points = gate.authorize_trajectory(
-                _ramp(here, target, duration, rate),
-                start_time_sec=0.0,
-                period_sec=1.0 / rate,
-            )
-            adapter.send_trajectory(points, period_sec=1.0 / rate)
-            print(f"EXECUTED: {name} over {duration:.1f} s")
+            here = _start_pose(profile, group, adapter.read_state())
+            for target in _park_targets(name, here, raise_elbow):
+                travel = float(np.abs(target - here).max())
+                if travel < 1e-4:
+                    continue
+                duration = max(travel / PARK_SPEED_RAD_PER_SEC, 1.0)
+                gate = _gate(profile, group, seed=here)
+                points = gate.authorize_trajectory(
+                    _ramp(here, target, duration, rate),
+                    start_time_sec=0.0,
+                    period_sec=1.0 / rate,
+                )
+                adapter.send_trajectory(points, period_sec=1.0 / rate)
+                print(f"{name}: phase over {duration:.1f} s")
+                here = target
+            print(f"EXECUTED: {name}")
     return 0
 
 

@@ -22,7 +22,9 @@ from robot_control.cli import (
     ELBOW_INDEX,
     PARK_SPEED_RAD_PER_SEC,
     READY_ELBOW_RAD,
+    READY_WRIST_RAD,
     SEED_SLACK_RAD,
+    WRIST_INDEX,
     main,
 )
 
@@ -76,39 +78,85 @@ def test_ready_dry_run_names_both_arms_offline(no_ros, capsys):
     assert "DRY RUN" in output
 
 
-def test_ready_moves_to_the_initial_pose_and_slowly(arm, capsys):
-    """From wherever the arm is, ready lands on the initial state: elbow at
-    READY_ELBOW_RAD, every other joint at zero."""
-    arm.joints = np.array([0.3, 0.2, -0.1, 0.5, 0.1, -0.1, 0.2])
+def test_ready_lifts_the_elbow_before_touching_the_wrist(arm, capsys):
+    """A tool resting on the table blocks the wrist's sweep entirely, so any
+    wrist target commanded while the arm lies down is a stall, not a move.
+    That is what burned left j7: at rest the gripper pins j7 near its limit,
+    and driving it to zero fought the table until the rotor overheated.
 
-    assert main(["pose", "ready", "--group", "openarm_right_arm", "--execute"]) == 0
+    Phase 1 therefore raises ONLY the elbow — every other joint holds where it
+    measured, including the pinned wrist. Phase 2, airborne, settles the rest.
+    """
+    pinned = -1.3
+    arm.joints = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, pinned])
 
-    trajectory = arm.trajectories[-1]
-    final = trajectory[-1]
+    assert main(["pose", "ready", "--group", "openarm_left_arm", "--execute"]) == 0
+
+    lift, settle = arm.trajectories
+    for point in lift:
+        assert point[WRIST_INDEX] == pytest.approx(pinned), (
+            "the wrist may not be commanded while the tool can still touch "
+            "the table"
+        )
+    assert lift[-1][ELBOW_INDEX] == pytest.approx(READY_ELBOW_RAD)
+
+    final = settle[-1]
     expected = np.zeros(ARM_JOINTS)
     expected[ELBOW_INDEX] = READY_ELBOW_RAD
+    expected[WRIST_INDEX] = -READY_WRIST_RAD  # mirrored: the left lift is negative
     assert np.allclose(final, expected)
 
-    # Slow enough to react to: no joint's step may exceed the park speed.
-    steps = np.diff(np.asarray(trajectory), axis=0)
-    assert np.abs(steps).max() <= PARK_SPEED_RAD_PER_SEC * arm.period_sec + 1e-9
+    # Slow enough to react to, in both phases.
+    for trajectory in (lift, settle):
+        steps = np.diff(np.asarray(trajectory), axis=0)
+        assert np.abs(steps).max() <= PARK_SPEED_RAD_PER_SEC * arm.period_sec + 1e-9
 
 
-def test_rest_lowers_the_elbow_back_down(arm, capsys):
-    arm.joints[ELBOW_INDEX] = READY_ELBOW_RAD
+def test_ready_wrist_sign_mirrors_between_the_arms(arm, capsys):
+    assert main(["pose", "ready", "--group", "openarm_right_arm", "--execute"]) == 0
+
+    final = arm.trajectories[-1][-1]
+    assert final[WRIST_INDEX] == pytest.approx(READY_WRIST_RAD)
+
+
+def test_rest_keeps_the_wrist_lifted_while_the_elbow_comes_down(arm, capsys):
+    """The reverse ritual: settle the wrist first, then lower. The wrist stays
+    at its lifted angle to the end, so the tool meets the table yielding in
+    the direction the table pushes — never commanded straight against it."""
+    arm.joints = np.array([0.0, 0.0, 0.0, READY_ELBOW_RAD, 0.0, 0.0, 0.3])
 
     assert main(["pose", "rest", "--group", "openarm_right_arm", "--execute"]) == 0
 
-    final = arm.trajectories[-1][-1]
-    assert np.allclose(final, np.zeros(ARM_JOINTS))
+    settle, lower = arm.trajectories
+    # Phase 1 holds the elbow up while everything else reaches its rest value.
+    for point in settle:
+        assert point[ELBOW_INDEX] == pytest.approx(READY_ELBOW_RAD)
+    assert settle[-1][WRIST_INDEX] == pytest.approx(READY_WRIST_RAD)
+
+    final = lower[-1]
+    expected = np.zeros(ARM_JOINTS)
+    expected[WRIST_INDEX] = READY_WRIST_RAD
+    assert np.allclose(final, expected)
 
 
-def test_ready_covers_both_arms_by_default(arm, capsys):
+def test_ready_covers_both_arms_by_default(monkeypatch, capsys):
+    from robot_control import ros_adapter
+
+    # One fresh parked arm per adapter session, so the second arm does not
+    # inherit the first one's final state through a shared stub.
+    arms = []
+
+    def fresh(profile, name, execute):
+        stub = ParkableArm(np.zeros(ARM_JOINTS))
+        arms.append((name, stub))
+        return stub
+
+    monkeypatch.setattr(ros_adapter, "RosAdapter", fresh)
+
     assert main(["pose", "ready", "--execute"]) == 0
 
-    assert len(arm.trajectories) == 2
-    output = capsys.readouterr().out
-    assert "openarm_left_arm" in output and "openarm_right_arm" in output
+    assert [name for name, _ in arms] == ["openarm_left_arm", "openarm_right_arm"]
+    assert all(len(stub.trajectories) == 2 for _, stub in arms)  # two phases each
 
 
 def test_ready_refuses_a_group_that_is_not_an_arm(no_ros, capsys):
