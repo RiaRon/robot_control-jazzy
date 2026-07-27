@@ -39,7 +39,13 @@ def test_build_wrapper_uses_branch_local_products(tmp_path):
     arguments = calls.read_text().splitlines()
     workspace = ROOT / "ros_ws"
 
-    assert arguments[:2] == ["build", "--base-paths"]
+    # `--log-base` is a global colcon option: colcon-core rejects it after the
+    # verb, so the verb cannot come first and where it sits is the contract.
+    assert "build" in arguments
+    verb = arguments.index("build")
+    assert arguments[verb - 2] == "--log-base"
+    assert arguments[verb + 1] == "--base-paths"
+
     assert str(workspace / "src") in arguments
     assert str(workspace / "build") in arguments
     assert str(workspace / "install") in arguments
