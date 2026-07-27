@@ -17,5 +17,11 @@ excluded:
 local_modifications: []
 patches:
   - patches/0001-bringup-urdf-robot-layout-v10.patch
+  # The profile names an effort_controller per arm so `r2s identify` can publish
+  # gravity feedforward while the trajectory controller holds position; upstream
+  # ships forward position and velocity controllers but no effort one. Declared
+  # here and spawned by ros_ws/load_effort_controllers.sh, never by the bringup.
+  - patches/0002-controllers-effort-forward-controllers.patch
 post_patch_sha256:
   openarm_bringup/launch/openarm.bimanual.launch.py: cb5ad384d47f48e8d0ab77b2ec31594aa8ee59f91c2f26a2264f996b487426e7
+  openarm_bringup/config/controllers/openarm_bimanual_controllers.yaml: 9c5acf7c65a16003a0175035691d97a078897718604bfe57c4752f2cbe17c4de
