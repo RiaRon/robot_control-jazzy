@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import json
 from pathlib import Path
 import subprocess
@@ -470,6 +471,7 @@ def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
         command_period_sec=1.0 / profile.endpoint().command_rate_hz,
         effort=np.array([joint.effort for joint in limits]),
         max_lead=np.array([joint.velocity * LEAD_SEC for joint in limits]),
+        names=list(group.joints),
     )
     if seed is not None:
         # Seeding makes the velocity limit apply to the move itself, not just

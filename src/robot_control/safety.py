@@ -42,6 +42,11 @@ class CommandGate:
     #: lets the command outrun the arm's standing droop, and on its own it would
     #: also let a blocked joint wind up command, and torque, without limit.
     max_lead: np.ndarray | None = None
+    #: Joint names, in the group's order, used only to say which joint broke a
+    #: limit. "position limit exceeded" over seven joints names nothing an
+    #: operator can act on; whether the pose is wrong or the profile is wrong is
+    #: exactly what the numbers decide.
+    names: Sequence[str] | None = None
     watchdog_sec: float = 0.25
     _last: np.ndarray | None = field(default=None, init=False)
     _last_time: float | None = field(default=None, init=False)
@@ -201,8 +206,21 @@ class CommandGate:
     def _check_position(self, command: np.ndarray, where: str) -> None:
         if command.shape != self.lower.shape or not np.isfinite(command).all():
             raise SafetyError(f"invalid command shape or value{where}")
-        if np.any(command < self.lower) or np.any(command > self.upper):
-            raise SafetyError(f"position limit exceeded{where}")
+        outside = (command < self.lower) | (command > self.upper)
+        if outside.any():
+            offenders = self._offenders(command, outside)
+            raise SafetyError(f"position limit exceeded{where}: {offenders}")
+
+    def _offenders(self, command: np.ndarray, outside: np.ndarray) -> str:
+        """Name each joint that broke a bound, with the value and the bound."""
+        parts = []
+        for index in np.flatnonzero(outside):
+            name = self.names[index] if self.names else f"joint {index}"
+            parts.append(
+                f"{name}={command[index]:+.4f} outside "
+                f"[{self.lower[index]:+.4f}, {self.upper[index]:+.4f}]"
+            )
+        return ", ".join(parts)
 
     def _check_velocity(
         self,
@@ -212,8 +230,15 @@ class CommandGate:
         where: str,
     ) -> None:
         permitted = self.velocity * max(elapsed, self.command_period_sec)
-        if np.any(np.abs(command - previous) > permitted + 1e-12):
-            raise SafetyError(f"velocity limit exceeded{where}")
+        over = np.abs(command - previous) > permitted + 1e-12
+        if over.any():
+            moved = np.abs(command - previous)
+            parts = [
+                f"{self.names[i] if self.names else f'joint {i}'} moves "
+                f"{moved[i]:.4f} rad against a budget of {permitted[i]:.4f}"
+                for i in np.flatnonzero(over)
+            ]
+            raise SafetyError(f"velocity limit exceeded{where}: {', '.join(parts)}")
 
     def estop(self) -> None:
         self._estopped = True

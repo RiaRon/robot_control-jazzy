@@ -339,3 +339,71 @@ def test_follow_still_bounds_the_first_sample_against_the_measured_pose():
 
     np.testing.assert_allclose(command, [0.52, 0.0])
     assert limited is not None and "velocity" in limited
+
+
+def _named_gate() -> CommandGate:
+    return CommandGate(
+        execute=True,
+        lower=np.array([-0.1745, 0.0]),
+        upper=np.array([3.3161, 2.4435]),
+        velocity=np.array([2.0, 2.0]),
+        command_period_sec=0.01,
+        names=["r_aj_2", "r_aj_4"],
+    )
+
+
+def test_a_refused_position_names_the_joint_the_value_and_the_bound():
+    """What the operator needs is which joint, not that some joint.
+
+    An arm parked outside the profile's bounds is refused at the seed, before
+    any waypoint exists, so the message is the only evidence of what happened.
+    Over seven joints "position limit exceeded" cannot distinguish an arm in a
+    surprising pose from a profile whose limits are wrong for this robot, which
+    is the whole question.
+    """
+    gate = _named_gate()
+
+    with pytest.raises(SafetyError) as refusal:
+        gate.authorize(np.array([-0.9, 0.8]), now_sec=0.0)
+
+    message = str(refusal.value)
+    assert "r_aj_2=-0.9000" in message
+    assert "[-0.1745, +3.3161]" in message
+    # The joint that was in range is not accused.
+    assert "r_aj_4" not in message
+
+
+def test_a_refused_position_names_every_joint_that_broke_a_bound():
+    gate = _named_gate()
+
+    with pytest.raises(SafetyError) as refusal:
+        gate.authorize(np.array([-0.9, -0.5]), now_sec=0.0)
+
+    message = str(refusal.value)
+    assert "r_aj_2" in message and "r_aj_4" in message
+
+
+def test_a_refused_velocity_names_the_joint_and_the_budget_it_broke():
+    gate = _named_gate()
+    gate.authorize(np.array([0.0, 0.5]), now_sec=0.0)
+
+    with pytest.raises(SafetyError) as refusal:
+        gate.authorize(np.array([0.0, 1.5]), now_sec=0.01)
+
+    message = str(refusal.value)
+    assert "r_aj_4" in message
+    assert "1.0000 rad" in message and "0.0200" in message
+
+
+def test_an_unnamed_gate_still_says_which_index_broke_the_bound():
+    """names is optional; every other construction site must keep working."""
+    gate = CommandGate(
+        execute=True,
+        lower=np.array([-1.0, -1.0]),
+        upper=np.array([1.0, 1.0]),
+        velocity=np.array([2.0, 2.0]),
+        command_period_sec=0.1,
+    )
+
+    with pytest.raises(SafetyError, match=r"joint 1=\+2\.0000"):
+        gate.authorize(np.array([0.0, 2.0]), now_sec=0.0)
