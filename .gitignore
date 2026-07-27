@@ -10,6 +10,8 @@ ros_ws/build/
 ros_ws/install/
 ros_ws/log/
 ros_ws/src/.snapshot-tmp/
+# Selected by install_dependencies_humble.sh from the vendored versioned copies.
+ros_ws/src/delto_m_ros2/dg_sdk_ros2_bridge/libs/libDGSDK.so
 /log/
 
 artifacts/
