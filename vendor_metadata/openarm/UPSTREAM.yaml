@@ -15,3 +15,7 @@ excluded:
   - "*.pyc"
   - "*.pyo"
 local_modifications: []
+patches:
+  - patches/0001-bringup-urdf-robot-layout-v10.patch
+post_patch_sha256:
+  openarm_bringup/launch/openarm.bimanual.launch.py: cb5ad384d47f48e8d0ab77b2ec31594aa8ee59f91c2f26a2264f996b487426e7

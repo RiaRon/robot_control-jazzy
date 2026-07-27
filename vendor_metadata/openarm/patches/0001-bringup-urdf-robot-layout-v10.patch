@@ -1,0 +1,60 @@
+--- a/openarm_bringup/launch/openarm.bimanual.launch.py
++++ b/openarm_bringup/launch/openarm.bimanual.launch.py
+@@ -31,11 +31,11 @@
+ }
+ 
+ 
+-def resolve_arm_config(arm_type_str: str) -> tuple[str, str]:
++def resolve_arm_config(arm_type_str: str) -> str:
+     """
+-    Resolve folder name and xacro file name from arm_type.
++    Resolve the xacro file name from arm_type, relative to urdf/robot/.
+     Accepts: v1.0, v10, v1_0, openarm_v1.0, openarm_v10, openarm_v1_0 (and v2.0 variants)
+-    Raises ValueError if arm_type is not recognized.
++    Raises ValueError if arm_type is not recognized or is not shipped here.
+     """
+     if arm_type_str not in VALID_ARM_TYPES:
+         raise ValueError(
+@@ -43,8 +43,11 @@
+             f"Please specify openarm_v1.0 or openarm_v2.0."
+         )
+     if any(x in arm_type_str for x in ("1.0", "10", "1_0")):
+-        return "openarm_v1.0", "openarm_v10.urdf.xacro"
+-    return "openarm_v2.0", "openarm_v20.urdf.xacro"
++        return "v10.urdf.xacro"
++    raise ValueError(
++        f"arm_type '{arm_type_str}' is not available: this branch's "
++        f"openarm_description ships urdf/robot/v10.urdf.xacro only."
++    )
+ 
+ 
+ def namespace_from_context(context, arm_prefix):
+@@ -63,11 +66,11 @@
+     right_can_interface_str = context.perform_substitution(right_can_interface)
+     left_can_interface_str = context.perform_substitution(left_can_interface)
+ 
+-    folder_name, file_name = resolve_arm_config(arm_type_str)
++    file_name = resolve_arm_config(arm_type_str)
+ 
+     xacro_path = os.path.join(
+         get_package_share_directory(description_package_str),
+-        "assets", "robot", folder_name, "urdf", file_name
++        "urdf", "robot", file_name
+     )
+ 
+     robot_description = xacro.process_file(
+@@ -165,12 +168,12 @@
+         ),
+         DeclareLaunchArgument(
+             "description_file",
+-            default_value="v20.urdf.xacro",
++            default_value="v10.urdf.xacro",
+             description="URDF/XACRO description file with the robot.",
+         ),
+         DeclareLaunchArgument(
+             "arm_type",
+-            default_value="openarm_v2.0",
++            default_value="openarm_v1.0",
+             description="Arm type. Accepts: v1.0, v10, openarm_v1.0, v2.0, v20, openarm_v2.0, etc.",
+         ),
+         DeclareLaunchArgument(
