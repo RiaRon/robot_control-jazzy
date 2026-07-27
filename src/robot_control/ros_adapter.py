@@ -265,15 +265,14 @@ class RosAdapter:
         """Return the newest dragged pose, or None if none has arrived yet."""
         return self._backend.latest_marker()
 
-    def stream_positions(
-        self, positions: Sequence[float], period_sec: float
-    ) -> None:
+    def stream_positions(self, positions: Sequence[float]) -> None:
         """Send one servo sample to the group's trajectory controller.
 
         Published on the controller's topic interface rather than as an action
         goal: a goal per sample would spend the whole period on the accept and
         result handshake. The controller replaces its active trajectory with
-        each message, which is what makes a stream of single points track.
+        each message, and the point is due on arrival — see
+        ``STREAM_HORIZON_SEC`` for why it cannot be a period ahead.
         """
         self._require_execute()
         self._require_action(FOLLOW_JOINT_TRAJECTORY)
@@ -282,7 +281,7 @@ class RosAdapter:
             self.group.controller,
             list(source),
             list(source.values()),
-            period_sec,
+            STREAM_HORIZON_SEC,
         )
 
     def pump(self, timeout_sec: float = 0.0) -> None:
@@ -468,6 +467,28 @@ CONTROLLER_STATE_TOPIC = "controller_state"
 #: Where a servo stream goes, and where feedforward torque goes.
 CONTROLLER_STREAM_TOPIC = "joint_trajectory"
 EFFORT_COMMAND_TOPIC = "commands"
+
+#: How far ahead a streamed point is placed. Zero, so it is due the moment it
+#: arrives, and deliberately not the stream's period.
+#:
+#: ``Trajectory::sample`` in ros2_controllers returns the state the trajectory
+#: was installed with — not an interpolation toward the point — for any sample
+#: taken before the first point comes due, when the controller runs
+#: ``interpolation_method: none``. A servo stream reinstalls the trajectory
+#: every period, so a point one period ahead puts every sample inside that
+#: window: the reference never advances, and neither does the arm. Nothing is
+#: logged and the controller reports its goals reached, so the only visible
+#: symptom is a robot that does not move.
+#:
+#: Measured on the OpenArm: a commanded 0.06 rad excitation moved the reference
+#: by 0.00001 rad, while the same joint on the same controller tracked an
+#: action goal normally. At zero the first sample is already at the point, so
+#: the controller adopts it at once — under either interpolation method.
+#:
+#: This is a horizon, not a rate limit. What bounds the step between
+#: consecutive samples is the safety gate, which authorizes the whole track
+#: against each joint's velocity limit before any of it is published.
+STREAM_HORIZON_SEC = 0.0
 
 
 class _RclpyBackend:
@@ -781,7 +802,7 @@ class _RclpyBackend:
         controller: str,
         joint_names: Sequence[str],
         positions: Sequence[float],
-        period_sec: float,
+        horizon_sec: float,
     ) -> None:
         topic = f"/{controller}/{CONTROLLER_STREAM_TOPIC}"
         publisher = self._stream_publishers.get(topic)
@@ -802,7 +823,7 @@ class _RclpyBackend:
         trajectory.joint_names = list(joint_names)
         point = self._JointTrajectoryPoint()
         point.positions = [float(value) for value in positions]
-        point.time_from_start = self._duration(period_sec)
+        point.time_from_start = self._duration(horizon_sec)
         trajectory.points.append(point)
         publisher.publish(trajectory)
 

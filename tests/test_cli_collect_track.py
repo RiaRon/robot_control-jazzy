@@ -33,6 +33,9 @@ class RecordingArm:
         self.published = []
         self.trajectories = []
         self.clock_ns = 1_000_000_000
+        # The stream carries no period any more, so the stand-in for the
+        # hardware holds the cadence its clock advances by.
+        self.period_sec = 1.0 / 100.0
         self.recording = False
         self._pending = []
         self._recorded = []
@@ -68,11 +71,11 @@ class RecordingArm:
         return Recording(stamps, rows, tuple(load_builtin_profile(
             "openarm_tesollo").groups[GROUP].joints))
 
-    def stream_positions(self, positions, period_sec):
+    def stream_positions(self, positions):
         self.published.append(np.asarray(positions, dtype=float).copy())
         self._pending.append(np.asarray(positions, dtype=float).copy())
         # The clock advances with the stream, as it would on hardware.
-        self.clock_ns += int(period_sec * 1e9)
+        self.clock_ns += int(self.period_sec * 1e9)
 
     def send_trajectory(self, points, period_sec):
         self.trajectories.append(np.asarray(points[-1], dtype=float).copy())

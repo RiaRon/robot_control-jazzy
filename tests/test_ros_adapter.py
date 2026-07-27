@@ -76,6 +76,7 @@ class RecordingBackend:
         self.fk_requests = []
         self.marker_requests = []
         self.trajectories = []
+        self.streamed = []
         self.gripper_goals = []
         self.closed = False
         #: What this backend will deliver on the next pump, as
@@ -88,6 +89,9 @@ class RecordingBackend:
 
     def joint_states(self, timeout_sec):
         return dict(self.states)
+
+    def publish_trajectory_point(self, controller, joint_names, positions, horizon_sec):
+        self.streamed.append((controller, list(joint_names), list(positions), horizon_sec))
 
     # --- recording -------------------------------------------------------
     def start_recording(self):
@@ -503,3 +507,27 @@ def test_core_package_imports_without_rclpy():
 
     assert result.returncode == 0, result.stderr
     assert Path(result.stdout.strip()).name == "ros_adapter.py"
+
+
+def test_a_streamed_point_is_due_immediately(profile):
+    """Why the horizon is zero, and not the stream's period.
+
+    `joint_trajectory_controller` configured with `interpolation_method: none`
+    returns the state a trajectory was installed with for any sample taken
+    before that trajectory's first point comes due — see `Trajectory::sample`
+    in ros2_controllers. A servo stream republishes every period, and each
+    message resets the trajectory, so a point one period ahead puts every
+    sample inside that window: the reference never advances and the arm never
+    moves, with nothing logged and the goal reported reached.
+
+    Measured on the OpenArm: reference span 0.00001 rad against a commanded
+    0.06, while the same arm tracked an action goal on the same controller.
+    """
+    backend = RecordingBackend()
+    adapter = _adapter(profile, backend=backend)
+
+    adapter.stream_positions([0.4, -0.5])
+
+    controller, _, _, horizon = backend.streamed[-1]
+    assert controller == "arm_controller"
+    assert horizon == 0.0

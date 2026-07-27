@@ -1003,7 +1003,7 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
                 command, limited = gate.follow(state + step, state, period)
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
-                adapter.stream_positions(command, period_sec=period)
+                adapter.stream_positions(command)
                 samples += 1
             time.sleep(max(0.0, period - (time.monotonic() - cycle)))
     except KeyboardInterrupt:
@@ -1585,7 +1585,7 @@ def _publish_excitation(adapter, command, period):
             # Stamped at publish, not from the planned clock: the planned time
             # is the intent and this is what happened.
             stamps.append(adapter.now_ns())
-            adapter.stream_positions(sample, period_sec=period)
+            adapter.stream_positions(sample)
             time.sleep(max(0.0, period - (time.monotonic() - cycle)))
         adapter.pump(timeout_sec=0.0)
     finally:

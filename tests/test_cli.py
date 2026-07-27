@@ -431,7 +431,7 @@ class DraggableArm(StiffArm):
     def read_state(self, timeout_sec=None):
         return self.joints.copy()
 
-    def stream_positions(self, positions, period_sec):
+    def stream_positions(self, positions):
         self.joints = np.asarray(positions, dtype=float).copy()
         self.streamed.append(self.joints)
 
@@ -537,7 +537,7 @@ class DroopingDraggableArm(DraggableArm):
     #: Radians the joint sits behind its command in order to hold position.
     DROOP = 0.03
 
-    def stream_positions(self, positions, period_sec):
+    def stream_positions(self, positions):
         command = np.asarray(positions, dtype=float)
         self.streamed.append(command.copy())
         # Move towards the command, stopping the droop short of it.
