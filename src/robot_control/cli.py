@@ -64,6 +64,25 @@ from .track import DEFAULT_MAX_GAP_PERIODS, TrackError, normalize_track
 # slew a cap low enough to slow a large move would refuse outright.
 DEFAULT_DURATION_SEC = 10.0
 
+# How far outside the profile a *measured* pose may sit and still be adopted,
+# clamped into bounds, as a move's start. The measured pose is evidence, not a
+# command: an arm at rest sits ON its lower stop, and impedance droop reads a
+# hair past it, so refusing to move because the seed is 3 mrad outside a bound
+# the arm is resting against would make the rest pose unrecoverable. Beyond
+# this slack the pose is not droop, it is a wrong profile or a wrong arm, and
+# the gate refuses it by name.
+SEED_SLACK_RAD = 0.05
+
+# The initial working state `pose ready` moves each arm to, from wherever it
+# is: elbow raised here, every other joint at zero. `pose rest` reverses it,
+# back down to all zeros. The elbow's raise is what clears the hand from the
+# table — at zero the fingertips touch it.
+READY_ELBOW_RAD = 0.8
+# joints[3] is *_aj_4, the elbow, in each arm group's serial order.
+ELBOW_INDEX = 3
+# Slow enough to walk to the E-stop mid-move: the full raise takes 8 s.
+PARK_SPEED_RAD_PER_SEC = 0.1
+
 # The arms hold position through the DM motors' impedance control, which needs
 # a standing position error to produce holding torque, so a command lands short
 # by roughly (gravity torque / kp). --settle closes that gap by re-commanding.
@@ -326,6 +345,23 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     joints.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
     joints.add_argument("--execute", action="store_true")
 
+    # ready/rest are the bringup and shutdown moves: from wherever each arm is
+    # to the initial working state (elbow at READY_ELBOW_RAD, the rest at
+    # zero), and back down. Paced by PARK_SPEED_RAD_PER_SEC, not --duration, so
+    # they are slow no matter how far the arm has to travel.
+    for name, blurb in (
+        ("ready", "raise each arm to the initial working state, slowly"),
+        ("rest", "lower each arm back to all zeros, slowly"),
+    ):
+        park = stages.add_parser(name, help=blurb)
+        park.add_argument("--profile", default="openarm_tesollo")
+        park.add_argument(
+            "--group",
+            action="append",
+            help="an arm group to move; repeatable. Default: every *_arm group",
+        )
+        park.add_argument("--execute", action="store_true")
+
     end_effector = stages.add_parser("ee", help="set a group by end-effector pose")
     end_effector.add_argument("--profile", default="openarm_tesollo")
     end_effector.add_argument("--group", required=True)
@@ -431,6 +467,8 @@ def _pose(args: argparse.Namespace) -> int:
             return _pose_show(args, profile)
         if args.stage == "joints":
             return _pose_joints(args, profile)
+        if args.stage in ("ready", "rest"):
+            return _pose_park(args, profile, raise_elbow=args.stage == "ready")
         if args.stage == "gravity":
             return _pose_gravity(args, profile)
         if args.stage == "follow":
@@ -461,8 +499,7 @@ def _group(profile, name: str):
 
 def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
     """Build a gate over one group's profile limits, optionally seeded."""
-    joints = {joint.canonical: joint for joint in profile.joints}
-    limits = [joints[canonical] for canonical in group.joints]
+    limits = _joint_limits(profile, group)
     gate = CommandGate(
         execute=True,
         lower=np.array([joint.lower for joint in limits]),
@@ -478,6 +515,30 @@ def _gate(profile, group, seed: np.ndarray | None) -> CommandGate:
         # between waypoints of a multi-point plan.
         gate.authorize(seed, now_sec=0.0)
     return gate
+
+
+def _joint_limits(profile, group):
+    """The group's joints in order, with their profile limit entries."""
+    joints = {joint.canonical: joint for joint in profile.joints}
+    return [joints[canonical] for canonical in group.joints]
+
+
+def _start_pose(profile, group, measured) -> np.ndarray:
+    """Adopt the measured pose as a move's start, absorbing standing droop.
+
+    Within SEED_SLACK_RAD of a bound the pose is clamped inside it, so the
+    ramp's first waypoints — and the gate's seed — are legal. Further out the
+    measured pose is returned untouched, and the gate refuses it naming the
+    joint, because that is no longer droop against a stop.
+    """
+    limits = _joint_limits(profile, group)
+    lower = np.array([joint.lower for joint in limits])
+    upper = np.array([joint.upper for joint in limits])
+    measured = np.asarray(measured, dtype=float)
+    clamped = np.clip(measured, lower, upper)
+    if np.all(np.abs(clamped - measured) <= SEED_SLACK_RAD):
+        return clamped
+    return measured
 
 
 def _parse_floats(text: str, label: str) -> list[float]:
@@ -556,8 +617,8 @@ def _pose_show(args, profile) -> int:
 
 
 def _ramp(
-    start: Sequence[float],
-    target: Sequence[float],
+    start: Sequence[float] | np.ndarray,
+    target: Sequence[float] | np.ndarray,
     duration_sec: float,
     rate_hz: float,
 ) -> list[np.ndarray]:
@@ -598,7 +659,7 @@ def _pose_joints(args, profile) -> int:
         return 0
 
     with RosAdapter(profile, args.group, execute=True) as adapter:
-        here = adapter.read_state()
+        here = _start_pose(profile, group, adapter.read_state())
         rate = profile.endpoint().command_rate_hz
         gate = _gate(profile, group, seed=here)
         points = gate.authorize_trajectory(
@@ -612,6 +673,53 @@ def _pose_joints(args, profile) -> int:
         else:
             adapter.send_trajectory(points, period_sec=1.0 / rate)
         print(f"EXECUTED: {group.name} over {args.duration:g} s")
+    return 0
+
+
+def _pose_park(args, profile, raise_elbow: bool) -> int:
+    """Move each arm between all-zeros rest and the initial working state.
+
+    One target per direction, paced by PARK_SPEED_RAD_PER_SEC rather than a
+    duration, so the move is equally slow whether the arm starts at rest or
+    somewhere it was left mid-experiment. Arms go one at a time: a single
+    operator watches a single arm.
+    """
+    from .ros_adapter import RosAdapter
+
+    names = args.group or sorted(
+        name for name in profile.groups if name.endswith("_arm")
+    )
+    for name in names:
+        group = _group(profile, name)
+        if not name.endswith("_arm"):
+            raise ValueError(
+                f"{name!r} is not an arm group; ready/rest move whole arms"
+            )
+        target = np.zeros(len(group.joints))
+        if raise_elbow:
+            target[ELBOW_INDEX] = READY_ELBOW_RAD
+
+        if not args.execute:
+            print(
+                f"DRY RUN: {name}: would move to "
+                f"[{', '.join(f'{value:g}' for value in target)}] at "
+                f"{PARK_SPEED_RAD_PER_SEC:g} rad/s; pass --execute to send"
+            )
+            continue
+
+        with RosAdapter(profile, name, execute=True) as adapter:
+            here = _start_pose(profile, group, adapter.read_state())
+            travel = float(np.abs(target - here).max())
+            duration = max(travel / PARK_SPEED_RAD_PER_SEC, 1.0)
+            rate = profile.endpoint().command_rate_hz
+            gate = _gate(profile, group, seed=here)
+            points = gate.authorize_trajectory(
+                _ramp(here, target, duration, rate),
+                start_time_sec=0.0,
+                period_sec=1.0 / rate,
+            )
+            adapter.send_trajectory(points, period_sec=1.0 / rate)
+            print(f"EXECUTED: {name} over {duration:.1f} s")
     return 0
 
 
@@ -649,7 +757,7 @@ def _pose_ee(args, profile) -> int:
     # Even a dry run needs move_group: IK is a service, with no offline form.
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         current = adapter.read_pose()
-        seed = adapter.read_state()
+        seed = _start_pose(profile, group, adapter.read_state())
         if args.from_marker:
             target = adapter.read_marker_pose()
         elif args.relative:
@@ -711,7 +819,7 @@ def _report_residual(adapter, target, solution, profile, group, args) -> None:
         if residual <= args.tolerance:
             print(f"settled: {residual * 1000:.1f} mm after {attempt - 1} corrections")
             return
-        actual = adapter.read_state()
+        actual = _start_pose(profile, group, adapter.read_state())
         command = command + (solution - actual)
         # A fresh gate each pass, so the wound-up command is checked against the
         # profile limits rather than trusted for having been safe once.
@@ -1558,7 +1666,7 @@ def _collect_track_run(args, profile) -> int:
         # Around where the arm is, not the middle of its range: the midpoint of
         # the arms' symmetric limits is the all-zeros pose, so starting there
         # would mean a large unplanned move before the excitation even begins.
-        neutral = adapter.read_state()
+        neutral = _start_pose(profile, group, adapter.read_state())
         clock, command, phases = build_excitation(
             neutral, amplitude, rate, max_step=budget
         )
@@ -1584,7 +1692,7 @@ def _collect_track_run(args, profile) -> int:
                 # repetitions of the same experiment. The excitation ends
                 # wherever its last phase left the arm, not at neutral.
                 print(f"\nrun {index}: returning to the starting pose")
-                state = adapter.read_state()
+                state = _start_pose(profile, group, adapter.read_state())
                 points = _gate(profile, group, seed=state).authorize_trajectory(
                     _ramp(state, neutral, DEFAULT_DURATION_SEC, rate),
                     start_time_sec=0.0,
@@ -1862,7 +1970,7 @@ def _collect_poses(args, profile) -> list[Path] | None:
                 f"{design.worst_condition:.3g} over {MAX_CONDITION:g}. Raise "
                 "--poses or --reach, or try another --seed."
             )
-        start = adapter.read_state()
+        start = _start_pose(profile, group, adapter.read_state())
         _gate(profile, group, seed=start).authorize_trajectory(
             list(design.poses), start_time_sec=0.0, period_sec=args.duration
         )
@@ -1881,7 +1989,7 @@ def _collect_poses(args, profile) -> list[Path] | None:
         rounds = [np.full(len(group.joints), scale) for scale in scales]
         for index, pose in enumerate(design.poses):
             print(f"\npose {index}: moving over {args.duration:g} s")
-            state = adapter.read_state()
+            state = _start_pose(profile, group, adapter.read_state())
             gate = _gate(profile, group, seed=state)
             points = gate.authorize_trajectory(
                 _ramp(state, pose, args.duration, rate),
