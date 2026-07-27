@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import hashlib
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -484,11 +485,20 @@ def test_core_package_imports_without_rclpy():
         "import robot_control.cli, robot_control.ros_adapter as adapter\n"
         "print(adapter.__file__)\n"
     )
+    root = Path(__file__).parents[1]
+    # The subprocess gets no conftest, so hand it the same source path a bare
+    # checkout relies on. Without an installed package it would otherwise fail
+    # on `import robot_control` and report that as an rclpy contract violation.
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(root / "src"), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     result = subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True,
         text=True,
-        cwd=Path(__file__).parents[1],
+        cwd=root,
+        env=environment,
     )
 
     assert result.returncode == 0, result.stderr
