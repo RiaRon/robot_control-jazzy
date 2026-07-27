@@ -47,11 +47,11 @@ def test_group_contract_declares_openarm_controllers_and_moveit_groups():
     assert groups["openarm_left_arm"].action == "follow_joint_trajectory"
     assert groups["openarm_left_arm"].tip_link == "openarm_left_hand_tcp"
 
-    # The gripper is driven by parallel_gripper_action_controller, not a
-    # trajectory controller, so the action must be declared rather than assumed.
+    # Humble has no parallel_gripper_action_controller, so every end effector on
+    # this branch — gripper and multi-finger hands alike — takes a trajectory.
     assert groups["openarm_left_gripper"].controller == "left_gripper_controller"
     assert groups["openarm_left_gripper"].moveit_group == "left_gripper"
-    assert groups["openarm_left_gripper"].action == "parallel_gripper_command"
+    assert groups["openarm_left_gripper"].action == "follow_joint_trajectory"
 
 
 def test_group_contract_marks_tesollo_groups_executable_without_moveit():

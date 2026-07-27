@@ -185,8 +185,22 @@ This branch's own vendored controller configuration does not ask for it either:
 `openarm_bringup/config/controllers/openarm_bimanual_controllers.yaml:32`
 declares `left_gripper_controller` as
 `joint_trajectory_controller/JointTrajectoryController`, which serves
-`follow_joint_trajectory`. The profile and the vendored configuration disagree
-about the same controller.
+`follow_joint_trajectory`.
+
+**Resolved** by moving the profile to the action this distribution can serve:
+`openarm_left_gripper` now declares `follow_joint_trajectory`, matching the
+vendored controller. That gives every end effector one contract — the
+two-finger gripper and the Tesollo and RH56F1 hands alike — which is what the
+hands need anyway, since a single-joint gripper action cannot drive them.
+
+The cost is that Humble's `GripperCommand` extras, grasp-force limiting and
+stall detection, are not available through this path. If the two-finger gripper
+later needs them, `position_controllers/GripperActionController` is installed
+here and would be a third action rather than a substitute for this one.
+
+`PARALLEL_GRIPPER_COMMAND` stays in `profile.py`: the neutral core is shared
+with Jazzy, where the controller exists and the profile still uses it. Only the
+profile data differs, and it differs because the distributions do.
 
 ### The neutral core on Python 3.10
 

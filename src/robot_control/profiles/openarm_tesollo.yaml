@@ -32,11 +32,16 @@ groups:
     moveit_group: left_arm
     tip_link: openarm_left_hand_tcp
     effort_controller: left_forward_effort_controller
+  # Humble ships no parallel_gripper_action_controller, and this branch's
+  # vendored configuration runs left_gripper_controller as a
+  # JointTrajectoryController. One action for every end effector — the two-finger
+  # gripper and the multi-finger hands alike — is what this distribution can
+  # actually serve.
   openarm_left_gripper:
     joints: [l_hj_gripper_1]
     controller: left_gripper_controller
     moveit_group: left_gripper
-    action: parallel_gripper_command
+    action: follow_joint_trajectory
   tesollo_abduction:
     joints: [r_hj_thumb_1, r_hj_index_1, r_hj_middle_1, r_hj_ring_1, r_hj_pinky_1]
     controller: joint_trajectory_controller
