@@ -16,3 +16,7 @@ excluded:
   - "*.pyc"
   - "*.pyo"
 local_modifications: []
+patches:
+  - patches/0001-ros2-control-plugin-openarmhw.patch
+post_patch_sha256:
+  urdf/ros2_control/openarm.bimanual.ros2_control.xacro: cd986eb5d951bb69401ba3cae095084a407ae080332f5082184b3e22d5c7348e
