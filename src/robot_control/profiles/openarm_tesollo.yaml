@@ -65,20 +65,20 @@ groups:
     hdgp_group: tesollo_hand_dip
     controller: joint_trajectory_controller
 joints:
-  - {canonical: r_aj_1, source: openarm_right_joint1, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
-  - {canonical: r_aj_2, source: openarm_right_joint2, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
-  - {canonical: r_aj_3, source: openarm_right_joint3, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
-  - {canonical: r_aj_4, source: openarm_right_joint4, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
-  - {canonical: r_aj_5, source: openarm_right_joint5, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
-  - {canonical: r_aj_6, source: openarm_right_joint6, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 20}
-  - {canonical: r_aj_7, source: openarm_right_joint7, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
-  - {canonical: l_aj_1, source: openarm_left_joint1, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
-  - {canonical: l_aj_2, source: openarm_left_joint2, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
-  - {canonical: l_aj_3, source: openarm_left_joint3, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 50}
-  - {canonical: l_aj_4, source: openarm_left_joint4, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 50}
-  - {canonical: l_aj_5, source: openarm_left_joint5, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
-  - {canonical: l_aj_6, source: openarm_left_joint6, sign: 1, unit: rad, lower: -2.0, upper: 2.0, velocity: 2.0, effort: 20}
-  - {canonical: l_aj_7, source: openarm_left_joint7, sign: 1, unit: rad, lower: -3.14, upper: 3.14, velocity: 2.0, effort: 20}
+  - {canonical: r_aj_1, source: openarm_right_joint1, sign: 1, unit: rad, lower: -1.39626, upper: 3.49066, velocity: 2.0, effort: 40}
+  - {canonical: r_aj_2, source: openarm_right_joint2, sign: 1, unit: rad, lower: -0.174533, upper: 3.31612, velocity: 2.0, effort: 40}
+  - {canonical: r_aj_3, source: openarm_right_joint3, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 27}
+  - {canonical: r_aj_4, source: openarm_right_joint4, sign: 1, unit: rad, lower: 0, upper: 2.44346, velocity: 2.0, effort: 27}
+  - {canonical: r_aj_5, source: openarm_right_joint5, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
+  - {canonical: r_aj_6, source: openarm_right_joint6, sign: 1, unit: rad, lower: -0.785398, upper: 0.785398, velocity: 2.0, effort: 7}
+  - {canonical: r_aj_7, source: openarm_right_joint7, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
+  - {canonical: l_aj_1, source: openarm_left_joint1, sign: 1, unit: rad, lower: -3.49066, upper: 1.39626, velocity: 2.0, effort: 40}
+  - {canonical: l_aj_2, source: openarm_left_joint2, sign: 1, unit: rad, lower: -3.31612, upper: 0.174533, velocity: 2.0, effort: 40}
+  - {canonical: l_aj_3, source: openarm_left_joint3, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 27}
+  - {canonical: l_aj_4, source: openarm_left_joint4, sign: 1, unit: rad, lower: 0, upper: 2.44346, velocity: 2.0, effort: 27}
+  - {canonical: l_aj_5, source: openarm_left_joint5, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
+  - {canonical: l_aj_6, source: openarm_left_joint6, sign: 1, unit: rad, lower: -0.785398, upper: 0.785398, velocity: 2.0, effort: 7}
+  - {canonical: l_aj_7, source: openarm_left_joint7, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
   - {canonical: l_hj_gripper_1, source: openarm_left_finger_joint1, sign: 1, unit: rad, lower: 0.0, upper: 0.04, velocity: 0.2, effort: 20}
   - {canonical: r_hj_thumb_1, source: rj_dg_1_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
   - {canonical: r_hj_thumb_2, source: rj_dg_1_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}

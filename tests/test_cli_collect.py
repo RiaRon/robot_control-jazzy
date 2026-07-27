@@ -181,12 +181,19 @@ def test_collect_refuses_a_leg_the_arm_cannot_travel_in_time(
     from robot_control.identification import PoseSet
 
     def far(*_args, **_kwargs):
-        poses = np.array([np.full(7, -1.5), np.full(7, 1.5)])
+        # Both inside the joint limits, so the leg is refused for the speed
+        # it needs rather than for where it ends up.
+        poses = np.array(
+            [
+                [-1.0, 0.1, -1.0, 0.2, -1.0, -0.5, -1.0],
+                [1.0, 3.0, 1.0, 2.0, 1.0, 0.5, 1.0],
+            ]
+        )
         return PoseSet(poses=poses, scales=(0.0, 1.0), condition=np.full(7, 3.0))
 
     monkeypatch.setattr("robot_control.cli.design_pose_set", far)
 
-    # 3.0 rad in 0.01 s is 300 rad/s against the profile's 2.0.
+    # 2.9 rad in 0.01 s is 290 rad/s against the profile's 2.0.
     code = main(_argv(tmp_path, "--execute", "--poses", "2", "--duration", "0.01"))
 
     assert code == 3

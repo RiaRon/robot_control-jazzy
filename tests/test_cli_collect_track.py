@@ -29,7 +29,10 @@ class RecordingArm:
     LAG_SAMPLES = 3
 
     def __init__(self):
-        self.joints = np.zeros(7)
+        # Interior, not zero: r_aj_4's lower stop is 0.0 and r_aj_2's is
+        # -0.175, so an all-zeros pose leaves the excitation nowhere to
+        # swing and the whole track is refused before it is published.
+        self.joints = np.array([0.0, 0.5, 0.0, 0.5, 0.0, 0.0, 0.0])
         self.published = []
         self.trajectories = []
         self.clock_ns = 1_000_000_000
@@ -210,21 +213,21 @@ def test_collect_defaults_to_a_dry_run_that_publishes_nothing(arm, tmp_path, cap
 
 def test_collect_starts_from_where_the_arm_is(arm, tmp_path):
     """Not the midpoint of the range: that is a move to somewhere else first."""
-    arm.joints = np.array([0.4, -0.3, 0.2, 0.1, 0.0, -0.1, 0.3])
+    arm.joints = np.array([0.4, 0.3, 0.2, 0.6, 0.0, -0.1, 0.3])
 
     main(_argv(tmp_path, "--execute"))
 
     np.testing.assert_allclose(arm.published[0], arm.published[0])
     raw = np.load(tmp_path / "run.npz", allow_pickle=False)
     # The first commanded sample is a hold at the starting pose.
-    np.testing.assert_allclose(raw["command"][0], [0.4, -0.3, 0.2, 0.1, 0.0, -0.1, 0.3])
+    np.testing.assert_allclose(raw["command"][0], [0.4, 0.3, 0.2, 0.6, 0.0, -0.1, 0.3])
 
 
 def test_an_excitation_that_leaves_the_envelope_is_refused_before_publishing(
     arm, tmp_path, capsys
 ):
-    """r_aj_2 stops at 2.0 rad, so starting near it and swinging leaves it."""
-    arm.joints = np.array([0.0, 1.98, 0.0, 0.0, 0.0, 0.0, 0.0])
+    """r_aj_2 stops at 3.316 rad, so starting near it and swinging leaves it."""
+    arm.joints = np.array([0.0, 3.30, 0.0, 0.5, 0.0, 0.0, 0.0])
 
     code = main(_argv(tmp_path, "--execute"))
 

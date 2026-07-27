@@ -55,7 +55,13 @@ from .srdf import named_state, repository_root
 from .track import DEFAULT_MAX_GAP_PERIODS, TrackError, normalize_track
 
 
-DEFAULT_DURATION_SEC = 3.0
+# Seconds a commanded repositioning takes by default. Ten rather than three
+# because the arm outran its operator at three: a pose change of about 1.5 rad
+# — an ordinary step between identification poses — went by at 0.5 rad/s, which
+# is faster than anyone reaches an estop. This is the bound that fits, and the
+# joint velocity limit is not: the excitation is a small fast dither whose peak
+# slew a cap low enough to slow a large move would refuse outright.
+DEFAULT_DURATION_SEC = 10.0
 
 # The arms hold position through the DM motors' impedance control, which needs
 # a standing position error to produce holding torque, so a command lands short

@@ -461,7 +461,7 @@ def _reachable_target(chain, q):
 def draggable(monkeypatch):
     from robot_control import ros_adapter
 
-    chain = _stub_chain([0.5] * 7)
+    chain = _stub_chain([0.2] * 7)
     arm = DraggableArm(target=_reachable_target(chain, np.full(7, 0.05)))
     arm.load = chain.gravity_torque(np.zeros(7))
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
@@ -492,7 +492,7 @@ def test_pose_follow_holds_still_when_no_marker_has_been_dragged(capsys, monkeyp
     nothing, so the controller keeps holding where the arm already is."""
     from robot_control import ros_adapter
 
-    chain = _stub_chain([0.5] * 7)
+    chain = _stub_chain([0.2] * 7)
     arm = DraggableArm(target=None)
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
     monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
@@ -551,7 +551,7 @@ def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
     """The regression that a perfect-tracking stub cannot catch."""
     from robot_control import ros_adapter
 
-    chain = _stub_chain([0.5] * 7)
+    chain = _stub_chain([0.2] * 7)
     arm = DroopingDraggableArm(target=_reachable_target(chain, np.full(7, 0.15)))
     arm.load = chain.gravity_torque(np.zeros(7))
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
