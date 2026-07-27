@@ -146,7 +146,7 @@ Jazzy machine. Both were measured rather than reasoned about, and both are fine:
 
 | Prediction | Measured |
 |---|---|
-| `control_msgs.action.ParallelGripperCommand` absent on Humble | present |
+| `control_msgs.action.ParallelGripperCommand` absent on Humble | the **message** is present; the **controller** does not exist |
 | `joint_trajectory_controller` publishes `~/state`, not `~/controller_state` | publishes **both** |
 
 `ros-humble-joint-trajectory-controller` is at `2.53.1-1jammy.20260611`, well
@@ -158,6 +158,35 @@ editing. All nine interfaces import.
 This is a fact about *this installation's* version, not about Humble in general.
 An older `ros2_controllers` predates the rename and would still need the other
 name.
+
+### The gripper break is real, one layer below where it was predicted
+
+`REQUIRED_INTERFACES` passing is not the same as the profile working. The
+message type was backported into Humble's `control_msgs`, so the adapter
+imports — but the controller that *serves* it was not:
+
+```text
+$ ls /opt/ros/humble/share | grep -i parallel   # nothing
+$ apt-cache madison ros-humble-parallel-gripper-action-controller   # no candidate
+```
+
+Humble's `gripper_controllers` offers `position_controllers/GripperActionController`
+and `effort_controllers/GripperActionController`, both serving
+`control_msgs/action/GripperCommand` on `~/gripper_cmd`. There is no Humble
+package providing `parallel_gripper_command` at all.
+
+So `openarm_left_gripper`'s `action: parallel_gripper_command` in the profile
+cannot be satisfied on this distribution, and the failure would arrive as an
+action server that never appears rather than as an import error. The parity
+plan's §3 was right about the outcome and wrong about the mechanism, which is
+why the import check alone was not enough to close it.
+
+This branch's own vendored controller configuration does not ask for it either:
+`openarm_bringup/config/controllers/openarm_bimanual_controllers.yaml:32`
+declares `left_gripper_controller` as
+`joint_trajectory_controller/JointTrajectoryController`, which serves
+`follow_joint_trajectory`. The profile and the vendored configuration disagree
+about the same controller.
 
 ### The neutral core on Python 3.10
 
@@ -217,6 +246,37 @@ Measured on this host's snapshot rather than inferred: `openarm_bimanual.srdf`
 
 and the string `openarm_right_hand_tcp` appears nowhere in the file. The two
 skipped tests are correct to skip, and Task 5 still owns the resolution.
+
+### Finding: this branch's bringup and description do not agree on a layout
+
+`openarm.bimanual.launch.py:69-71` builds its xacro path as
+
+```python
+os.path.join(get_package_share_directory("openarm_description"),
+             "assets", "robot", folder_name, "urdf", file_name)
+```
+
+and defaults to `arm_type: openarm_v2.0`, which `resolve_arm_config` maps to
+`openarm_v2.0/urdf/openarm_v20.urdf.xacro`. This branch's `openarm_description`
+installs `urdf/` and has no `assets/` directory at all; the only robot xacros it
+ships are `urdf/robot/openarm_robot.xacro` and `urdf/robot/v10.urdf.xacro`.
+The default bringup therefore cannot resolve a description — wrong directory,
+and no v2.0 file under any name.
+
+This is the vendor-divergence risk from the parity plan in concrete form. The
+two packages come from different upstreams: `openarm_bringup` from
+`enactic/openarm_ros2` `main` @ `4e837e1`, which expects the newer `assets/`
+layout, and `openarm_description` from
+`divingyoon/teleopration_openarm_tesollo` @ `c8696eb`, which predates it. Each
+is internally consistent; the pairing is not.
+
+For contrast, `sim2real/vendor/openarm` pairs an older bringup that reads
+`urdf/robot/<description_file>` with the same description, and does resolve.
+
+Resolution belongs to Task 5: either re-import `openarm_description` from the
+upstream whose layout matches the bringup, or pin the bringup to the layout this
+description actually ships. Until then no `pose` command can reach hardware
+through this branch's launch files.
 
 ### Not verified: anything needing hardware
 
