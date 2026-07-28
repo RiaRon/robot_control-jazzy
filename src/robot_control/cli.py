@@ -11,6 +11,7 @@ import numpy as np
 
 from .artifacts import (
     ArtifactError,
+    nan_to_null,
     read_hdf5,
     read_static_estimate,
     read_sweep,
@@ -1609,7 +1610,14 @@ def _fit(args, profile) -> int:
             "data; wrong for a loaded one."
         )
 
-    args.output.write_text(json.dumps(payload, indent=2) + "\n")
+    # nan means "not measured" for coulomb_nm/static_bias_nm (and, on an
+    # older fit file read back through this same payload shape, for bias_nm
+    # too) — converted to JSON's own null here rather than the non-standard
+    # `NaN` token plain json.dumps would otherwise write, and rather than
+    # refused: an unmeasured joint is expected, not an error.
+    args.output.write_text(
+        json.dumps(nan_to_null(payload), indent=2, allow_nan=False) + "\n"
+    )
     print(f"fit: {args.output}")
     return 0
 

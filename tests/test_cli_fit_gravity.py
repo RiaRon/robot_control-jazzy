@@ -174,11 +174,21 @@ def test_fit_with_a_static_estimate_reports_physical_parameters(
     assert "bias_nm" in payload
     np.testing.assert_allclose(payload["bias_nm"], 0.0, atol=0.05)
     # The static estimate here is a gravity sweep, which never touches a
-    # staircase — its own Fc and Fo are unmeasured, not zero.
-    assert np.all(np.isnan(payload["coulomb_nm"]))
-    assert np.all(np.isnan(payload["static_bias_nm"]))
+    # staircase — its own Fc and Fo are unmeasured, not zero. json.loads
+    # reads the on-disk null back as None; `np.asarray(..., dtype=float)` —
+    # what every real reader in this codebase does with these keys — turns
+    # it into nan from there.
+    assert payload["coulomb_nm"] == [None] * 7
+    assert np.all(np.isnan(np.asarray(payload["coulomb_nm"], dtype=float)))
+    assert np.all(np.isnan(np.asarray(payload["static_bias_nm"], dtype=float)))
     assert "Fo (N.m)" in out
     assert "landed in bias" not in out
+    # Every joint unmeasured here — read the file back as text, not just
+    # through json.loads, since Python parses both `null` and the
+    # non-standard `NaN` token the same way.
+    text = output.read_text()
+    assert "null" in text
+    assert "NaN" not in text
 
 
 def test_fit_carries_a_static_estimates_own_coulomb_and_bias_through(
@@ -215,6 +225,42 @@ def test_fit_carries_a_static_estimates_own_coulomb_and_bias_through(
     payload = json.loads(output.read_text())
     np.testing.assert_allclose(payload["coulomb_nm"], 0.08)
     np.testing.assert_allclose(payload["static_bias_nm"], 0.3)
+
+
+def test_fit_writes_null_for_a_partially_covered_staircase(
+    monkeypatch, track, urdf, profile, tmp_path
+):
+    """Reproduces the reported case exactly: one joint measured, six not."""
+    import dataclasses
+
+    import robot_control.artifacts as artifacts_module
+
+    static = _static(tmp_path / "static.json", profile)
+    artifact = artifacts_module.read_static_estimate(static, profile)
+    coulomb = np.full(7, np.nan)
+    coulomb[0] = 0.08
+    seeing = dataclasses.replace(
+        artifact,
+        estimate=dataclasses.replace(artifact.estimate, coulomb_nm=coulomb),
+    )
+    monkeypatch.setattr(
+        "robot_control.cli.read_static_estimate", lambda _path, _profile: seeing
+    )
+    output = tmp_path / "estimate.json"
+
+    code = main(
+        ["r2s", "fit", "--track", "t.h5", "--output", str(output),
+         "--static", str(static), "--urdf", str(urdf)]
+    )
+    assert code == 0
+
+    text = output.read_text()
+    assert "null" in text
+    assert "NaN" not in text
+    payload = json.loads(output.read_text())
+    assert payload["coulomb_nm"][0] == pytest.approx(0.08)
+    assert payload["coulomb_nm"][1:] == [None] * 6
+    assert np.all(np.isnan(np.asarray(payload["coulomb_nm"][1:], dtype=float)))
 
 
 def test_fit_without_static_warns_that_any_standing_load_landed_in_bias(

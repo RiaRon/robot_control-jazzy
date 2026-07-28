@@ -234,6 +234,37 @@ def test_a_bundle_predating_the_staircase_fields_reads_them_as_nan(profile, tmp_
     assert np.all(np.isnan(identified.static_bias_nm))
 
 
+def test_a_nan_measurement_writes_null_on_disk_and_reads_back_as_nan(profile, tmp_path):
+    """A joint the staircase never covered is a legitimate, expected state:
+    written as JSON's own null, not the non-standard `NaN` token, and not
+    refused. Reproduces the reviewer's exact case: one joint measured, the
+    rest not.
+    """
+    import dataclasses
+
+    path = tmp_path / "bundle.json"
+    payload = _base(profile)
+    coulomb = np.linspace(0.08, 0.05, 7)
+    coulomb[1:] = np.nan
+    combined = dataclasses.replace(_combined_fully_measured(profile), coulomb_nm=coulomb)
+    payload["groups"][GROUP]["identified"] = identified_block(
+        combined,
+        profile,
+        torque_scale=np.ones(7),
+        sweep_sha256=["a" * 64],
+        track_sha256="c" * 64,
+    )
+
+    bundle = write_bundle(path, payload, profile)
+
+    text = path.read_text()
+    assert "null" in text
+    assert "NaN" not in text
+    identified = bundle.identified[GROUP]
+    assert identified.coulomb_nm[0] == pytest.approx(0.08)
+    assert np.all(np.isnan(identified.coulomb_nm[1:]))
+
+
 def test_a_negative_coulomb_measurement_is_refused(profile, tmp_path):
     """Fc is a friction magnitude; a joint cannot measure a negative one."""
     path = tmp_path / "bundle.json"

@@ -17,6 +17,7 @@ from robot_control.hdgp_export import (
     HDGP_SCHEMA_VERSION,
     HdgpExportError,
     hdgp_calibration,
+    write_hdgp_calibration,
 )
 from robot_control.identification import CombinedEstimate
 from robot_control.profile import load_builtin_profile
@@ -357,6 +358,40 @@ def test_both_bias_measurements_land_in_the_audit_block_unaveraged(tmp_path, pro
     assert audit["bias_nm"] == pytest.approx([0.05] * width)
     assert audit["static_bias_nm"] == pytest.approx([0.3] * width)
     assert "bias" not in body and "bias_nm" not in body
+
+
+def test_an_unmeasured_bias_writes_null_on_disk_not_the_nan_token(tmp_path, profile):
+    """A joint no staircase covered is expected, not an error, and has to
+    reach disk as JSON's own null — the in-memory `hdgp_calibration` return
+    value (checked above) keeps nan; only what's written to disk changes."""
+    width = len(profile.groups["openarm_right_arm"].joints)
+    bundle = _bundle(
+        tmp_path,
+        profile,
+        {
+            "openarm_right_arm": _combined(
+                profile,
+                "openarm_right_arm",
+                stiffness=np.full(width, 50.0),
+                damping=np.full(width, 3.0),
+                # bias (dynamic) measured; static_bias_nm not — the mixed
+                # case the reviewer reproduced.
+                bias=np.full(width, 0.05),
+            )
+        },
+    )
+    hdgp_path = tmp_path / "real2sim.json"
+
+    written = write_hdgp_calibration(hdgp_path, bundle, profile)
+
+    text = hdgp_path.read_text()
+    assert "null" in text
+    assert "NaN" not in text
+    # The function's own return value is untouched by the disk conversion.
+    assert np.all(np.isnan(written["measured"]["openarm_right_arm"]["static_bias_nm"]))
+    reloaded = json.loads(text)
+    static_bias = reloaded["measured"]["openarm_right_arm"]["static_bias_nm"]
+    assert static_bias == [None] * width
 
 
 def test_a_bundle_with_nothing_measured_is_refused(tmp_path, profile):

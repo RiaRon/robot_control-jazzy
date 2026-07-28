@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,30 @@ def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
+
+
+def nan_to_null(value: Any) -> Any:
+    """Recursively replace a float nan with None, everywhere it appears.
+
+    "Not measured" is a legitimate value for several fields elsewhere in this
+    package (a joint no staircase covered, a bias term a fit predates), and it
+    has to reach disk as JSON's own `null` rather than the non-standard `NaN`
+    token plain `json.dumps` writes for a float nan by default — see
+    `_canonical_bytes` above for why a nan must never reach a `json.dumps`
+    call in the first place. `null` round-trips back to nan on its own:
+    `np.asarray([..., None, ...], dtype=float)` already turns a `None` entry
+    into nan, so no matching "null_to_nan" reader is needed.
+
+    Returns a new structure — lists and dicts are rebuilt, never mutated — so
+    a caller that keeps the original around still sees nan, not None.
+    """
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, (list, tuple)):
+        return [nan_to_null(item) for item in value]
+    if isinstance(value, dict):
+        return {key: nan_to_null(item) for key, item in value.items()}
+    return value
 
 
 def _header(kind: str, version: int, profile: RobotProfile) -> dict[str, Any]:

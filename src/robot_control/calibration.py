@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .artifacts import nan_to_null
 from .identification import CombinedEstimate
 from .profile import RobotProfile
 
@@ -236,7 +237,14 @@ def _identified(raw: Any, group_name: str, profile: RobotProfile) -> IdentifiedP
 
 
 def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    # allow_nan=False on purpose, matching artifacts.py's own canonicaliser: a
+    # nan reaching this call would sign and write the non-standard `NaN`
+    # token. `write_bundle` converts any nan in the identified block's Fc/Fo
+    # fields to null before this ever runs, so nothing legitimate should
+    # trip it — a nan that does is a bug elsewhere, not a "not measured".
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
 
 
 def _validate_groups(raw: Mapping[str, Any], profile: RobotProfile) -> None:
@@ -315,7 +323,11 @@ def write_bundle(
 ) -> CalibrationBundle:
     if int(payload.get("schema_version", 0)) != 2:
         raise CalibrationError("only schema v2 may be written")
-    unsigned = dict(payload)
+    # Converted before the checksum is computed, not only before the final
+    # write: the checksum has to sign the same bytes `load_bundle` recomputes
+    # it against on the next read, and null — not nan — is what that read
+    # will find on disk.
+    unsigned = nan_to_null(dict(payload))
     unsigned.pop("checksum_sha256", None)
     out = dict(unsigned)
     out["checksum_sha256"] = hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()

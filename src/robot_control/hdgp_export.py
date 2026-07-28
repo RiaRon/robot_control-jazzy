@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .artifacts import nan_to_null
 from .calibration import CalibrationBundle, IdentifiedParameters
 from .profile import RobotProfile
 
@@ -193,5 +194,14 @@ def write_hdgp_calibration(
     payload = hdgp_calibration(bundle, profile, max_spread=max_spread)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    # nan (bias_nm/static_bias_nm for a joint no staircase, or dynamic fit,
+    # covered) means "not measured", written here as JSON's own null rather
+    # than the non-standard `NaN` token — never a refusal, since an
+    # unmeasured joint is expected. Converted on a copy, on the way to disk
+    # only: the dict this function returns keeps nan, for a caller that reads
+    # it in-process rather than off the file.
+    path.write_text(
+        json.dumps(nan_to_null(payload), indent=2, sort_keys=True, allow_nan=False)
+        + "\n"
+    )
     return payload
