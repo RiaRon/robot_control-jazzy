@@ -141,6 +141,21 @@ def test_it_reports_the_seed_each_joint_needed(arm, tmp_path, capsys):
     assert "r_aj_5: moved under a 0.05 N.m seed" in out
 
 
+def test_a_joint_named_twice_is_refused(arm, tmp_path, capsys):
+    """A joint's rounds are read back as the block between its first and last
+    round carrying torque, so driving one joint twice swallows every joint
+    driven in between — the same fit-poisoning that reading a whole file as
+    one staircase caused, through a different door.
+    """
+    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+                 "--hold-sec", "0.01", "--joint", "r_aj_5", "--joint", "r_aj_5",
+                 "--output", str(tmp_path / "t.json")])
+
+    assert code == 2
+    assert "r_aj_5" in capsys.readouterr().out
+    assert arm.published == []
+
+
 def test_a_dry_run_publishes_nothing(arm, tmp_path):
     assert main(["pose", "torque", "--group", GROUP, "--steps", "3"]) == 0
     assert arm.published == []

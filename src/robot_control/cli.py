@@ -1086,6 +1086,16 @@ def _pose_torque(args, profile) -> int:
                 f"{name!r} is not a joint of {group.name!r}; it has "
                 f"{list(group.joints)}"
             )
+    repeated = sorted({name for name in joints if joints.count(name) > 1})
+    if repeated:
+        # A joint's rounds are read back out of the file as the block between
+        # its first and last round carrying torque, so a joint driven twice
+        # claims every joint driven between its two turns as well.
+        raise ValueError(
+            f"--joint names {', '.join(repeated)} more than once; a joint gets "
+            "one turn per file, since its rounds are read back as one "
+            "contiguous block"
+        )
     if args.hold_sec <= 0:
         raise ValueError("--hold-sec must be positive")
     if args.output is not None and not args.execute:
