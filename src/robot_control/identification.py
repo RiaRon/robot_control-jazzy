@@ -308,7 +308,7 @@ def _frozen_rounds(sweep: GravitySweep, joint: int, noise_rad: float) -> set[int
     first one is where the joint stopped, and nothing says whether that was its
     equilibrium or the edge of the band.
     """
-    applied = sweep.scales[:, joint] * sweep.modelled_torque[:, joint]
+    applied = sweep.applied_torque[:, joint]
     span = float(np.max(applied) - np.min(applied))
     distinct = span * DISTINCT_TORQUE_FRACTION
     order = np.argsort(applied)
@@ -381,8 +381,8 @@ def fit_static_gravity(
                 if index in frozen:
                     continue
                 torque = float(sweep.modelled_torque[index, joint])
-                scale = float(sweep.scales[index, joint])
-                rows.append((torque, -scale * torque, 1.0))
+                published = float(sweep.applied_torque[index, joint])
+                rows.append((torque, -published, 1.0))
                 targets.append(float(sweep.errors[index, joint]))
         used[joint] = len(rows)
 
@@ -396,7 +396,16 @@ def fit_static_gravity(
             )
             continue
         design = np.asarray(rows, dtype=float)
-        condition[joint] = _condition(design)
+        # A joint the model says carries no gravity torque at any used round
+        # has a by_stiffness column of exact zeros: alpha is not merely hard
+        # to pin down, it multiplies nothing and is undefined. Left in, that
+        # column turns a fittable two-parameter design into a design
+        # `_condition` can only ever report as an exact singularity. Fit what
+        # the applied torque actually resolves — stiffness and offset — and
+        # leave the torque-model correction at its unidentified default.
+        has_model = bool(np.any(design[:, 0]))
+        fit_design = design if has_model else design[:, 1:]
+        condition[joint] = _condition(fit_design)
         if not np.isfinite(condition[joint]):
             unidentifiable.append(
                 (name, "no torque was ever fed forward to this joint")
@@ -414,8 +423,12 @@ def fit_static_gravity(
             continue
 
         target = np.asarray(targets, dtype=float)
-        params, _, _, _ = np.linalg.lstsq(design, target, rcond=None)
-        by_stiffness, inverse_stiffness, constant = (float(value) for value in params)
+        params, _, _, _ = np.linalg.lstsq(fit_design, target, rcond=None)
+        if has_model:
+            by_stiffness, inverse_stiffness, constant = (float(value) for value in params)
+        else:
+            by_stiffness = 0.0
+            inverse_stiffness, constant = (float(value) for value in params)
         if inverse_stiffness <= 0:
             unidentifiable.append(
                 (
@@ -429,7 +442,7 @@ def fit_static_gravity(
         stiffness[joint] = 1.0 / inverse_stiffness
         torque_scale[joint] = by_stiffness / inverse_stiffness
         offset[joint] = constant
-        residual[joint] = float(np.sqrt(np.mean((design @ params - target) ** 2)))
+        residual[joint] = float(np.sqrt(np.mean((fit_design @ params - target) ** 2)))
 
     return StaticEstimate(
         joint_names=names,

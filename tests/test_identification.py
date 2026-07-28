@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -6,9 +8,24 @@ from robot_control.identification import (
     GravitySweep,
     build_excitation,
     fit_second_order,
+    fit_static_gravity,
     split_repetitions,
     validate_holdout,
 )
+from robot_control.profile import load_builtin_profile
+
+REAL_SWEEPS = Path(__file__).parent / "data" / "sweeps"
+#: Measured on the right arm, 2026-07-28, and recorded here because a
+#: generalised regression that changes them is a regression, not a refactor.
+EXPECTED_STIFFNESS = {
+    "r_aj_1": 67.23, "r_aj_2": 63.73, "r_aj_3": 89.86, "r_aj_4": 70.26,
+    "r_aj_5": 15.09, "r_aj_6": 11.30, "r_aj_7": 13.40,
+}
+
+
+@pytest.fixture
+def profile():
+    return load_builtin_profile("openarm_tesollo")
 
 
 def test_excitation_contains_step_ramp_hold_and_multisine():
@@ -181,3 +198,41 @@ def test_a_sweep_refuses_an_applied_torque_of_the_wrong_shape():
             applied_torque=np.zeros((2, 3)),
             errors=np.zeros((2, 2)),
         )
+
+
+def test_the_fit_reads_the_applied_torque_rather_than_recomputing_it():
+    """A sweep whose applied torque is not a multiple of its model — which is
+    what a direct-torque excitation produces — must still fit. Recomputing
+    scale times model would read this sweep as having published nothing."""
+    rounds = 5
+    applied = np.linspace(-0.6, 0.6, rounds).reshape(rounds, 1)
+    kp, gravity, offset = 20.0, 0.15, 0.001
+    errors = (gravity - applied) / kp + offset
+
+    sweep = GravitySweep(
+        group="openarm_right_arm",
+        joint_names=("r_aj_5",),
+        poses=np.zeros((rounds, 1)),
+        # The model says this joint carries nothing, and it is wrong.
+        modelled_torque=np.zeros((rounds, 1)),
+        scales=np.zeros((rounds, 1)),
+        applied_torque=applied,
+        errors=errors,
+    )
+
+    estimate = fit_static_gravity([sweep])
+
+    assert estimate.stiffness[0] == pytest.approx(kp, rel=1e-6)
+
+
+def test_the_generalised_regression_reproduces_the_measured_estimate(profile):
+    from robot_control.artifacts import read_sweep
+
+    sweeps = [read_sweep(path, profile) for path in sorted(REAL_SWEEPS.glob("pose*.json"))]
+
+    estimate = fit_static_gravity(sweeps)
+
+    for index, name in enumerate(estimate.joint_names):
+        assert estimate.stiffness[index] == pytest.approx(
+            EXPECTED_STIFFNESS[name], rel=1e-3
+        ), f"{name} moved; the regression change was not an identity"
