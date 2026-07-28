@@ -247,6 +247,41 @@ def test_the_probe_re_extrapolates_once_from_the_torque_it_probed_with():
     assert applied[:, 0].max() == pytest.approx(1.3235, rel=1e-3)
 
 
+def test_the_torque_release_is_held_rather_than_published_once():
+    """`_publish_for` republishes for the seconds it is handed, so that a
+    dropped message cannot silently leave the arm on a stale torque. The
+    release asked for zero seconds and so went out exactly once — the one
+    publish whose loss actually matters, since the adapter tears the node down
+    straight after it and the controller holds its last command forever.
+    """
+    from robot_control.excitation import RELEASE_HOLD_SEC
+
+    arm = _Arm(_Joint(lambda torque: torque / 15.0))
+
+    _drive(arm)
+
+    effort, seconds = arm.calls[-1]
+    assert effort.tolist() == [0.0, 0.0]
+    assert seconds == RELEASE_HOLD_SEC
+    assert RELEASE_HOLD_SEC > 0.0
+
+
+def test_the_torque_is_released_even_when_the_probe_refuses():
+    """A refusal leaves a seed torque published; the release is what takes it
+    off, so it has to be held on that path too."""
+    arm = _Arm(
+        _Joint(lambda torque: torque / 63.7, droop_rad=5.0 / 63.7,
+               band_rad=0.3 / 63.7, latch_rad=0.0, position=0.5)
+    )
+
+    with pytest.raises(ExcitationRefused):
+        _drive(arm, limit=_Limit(effort=40.0))
+
+    effort, seconds = arm.calls[-1]
+    assert effort.tolist() == [0.0, 0.0]
+    assert seconds > 0.0
+
+
 def test_a_deflection_that_lands_inside_the_margin_is_refused():
     """`probe_torque` checks the deflection *asked for* against the room; what
     carries the joint into its stop is the deflection it actually gets. Here

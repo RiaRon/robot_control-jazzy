@@ -28,6 +28,12 @@ SEED_TORQUE_NM = 0.05
 #: ends. Re-extrapolating costs no extra motion — the reading it starts from
 #: was taken anyway, to check this.
 RECHECK_TOLERANCE = 0.10
+#: How long the zero torque at the end of a run is held. Every other publish
+#: is repeated for the time it is held, so that one dropped message cannot
+#: leave the arm on a stale torque; the release is the publish where that
+#: matters most, because the node is torn down straight after it and the
+#: controller goes on holding whatever it last received.
+RELEASE_HOLD_SEC = 0.25
 
 
 class ExcitationRefused(ValueError):
@@ -112,7 +118,12 @@ def probe_torque(
 
 
 def _hold_and_read(adapter, gate, publish, effort, hold_sec, index) -> float:
-    """Publish *effort*, hold it as long as anything else is held, and read."""
+    """Publish *effort*, hold it for *hold_sec* so the joint settles, read it.
+
+    The baseline and the probe are held as long as a staircase round is: a
+    reading taken before the joint has stopped moving is a reading of the
+    transient, and the difference between two of them is what sizes the run.
+    """
     publish(gate.authorize_effort(effort), hold_sec)
     return float(adapter.read_tracking_error()[index])
 
@@ -204,5 +215,5 @@ def measure_staircase(
                 applied.append(effort)
                 errors.append(adapter.read_tracking_error())
     finally:
-        publish(np.zeros(width), 0.0)
+        publish(np.zeros(width), RELEASE_HOLD_SEC)
     return np.asarray(poses), np.asarray(applied), np.asarray(errors)

@@ -1174,9 +1174,8 @@ def _publish_for(adapter, effort, seconds: float) -> None:
 
     ForwardCommandController holds its last command, so one message would do,
     but republishing means a dropped message cannot silently leave the arm on a
-    stale torque. *seconds* of 0.0 is a deliberate one-shot — the torque
-    release at the end of a run — so the first publish cannot wait on the
-    deadline check the way the repeats do.
+    stale torque. The publish comes before the deadline check rather than after
+    it, so *seconds* of 0.0 still puts one message out rather than none.
     """
     deadline = time.monotonic() + seconds
     while True:
