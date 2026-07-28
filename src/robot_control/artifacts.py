@@ -24,8 +24,12 @@ class ArtifactError(RuntimeError):
 #: reader cannot skip it, so this is a meaning change rather than an addition.
 SWEEP_SCHEMA_VERSION = 2
 #: Bumped when a payload's meaning changes, not when a field is added that older
-#: readers can ignore — there are none, so it never has been.
-STATIC_SCHEMA_VERSION = 1
+#: readers can ignore. 2: coulomb_nm/bias_nm joined the payload — each written
+#: only when the fit that produced this estimate actually measured it, so a
+#: gravity-only run (still the common case) writes a version 2 file with
+#: neither key present. `read_static_estimate` below keys off presence, not
+#: off this number, the same way `read_sweep` handles its own version 2.
+STATIC_SCHEMA_VERSION = 2
 
 SWEEP_KIND = "gravity_sweep"
 STATIC_KIND = "static_gravity_estimate"
@@ -279,6 +283,15 @@ def write_static_estimate(
             "rounds_excluded": estimate.excluded.tolist(),
         }
     )
+    # Written only when a staircase fit measured them at all — `None` here
+    # means exactly what an absent key means to the reader below, so there is
+    # nothing to write. When present, nan_to_null per joint rather than a
+    # blanket refusal: a joint no staircase covered is legitimately
+    # unmeasured, unlike the undetermined-alpha case above, which is refused.
+    if estimate.coulomb_nm is not None:
+        payload["coulomb_nm"] = nan_to_null(estimate.coulomb_nm.tolist())
+    if estimate.bias_nm is not None:
+        payload["bias_nm"] = nan_to_null(estimate.bias_nm.tolist())
     _sign_and_write(path, payload)
 
 
@@ -294,7 +307,9 @@ class StaticArtifact:
 
 def read_static_estimate(path: str | Path, profile: RobotProfile) -> StaticArtifact:
     """Read an identified stiffness set with the sweeps it was measured from."""
-    payload = _verify(path, profile, STATIC_KIND, STATIC_SCHEMA_VERSION)
+    # minimum=1: a file predating coulomb_nm/bias_nm (version 1) still loads —
+    # see optional_grid below, which is what actually tells the two apart.
+    payload = _verify(path, profile, STATIC_KIND, STATIC_SCHEMA_VERSION, minimum=1)
     name, names = _group_joints(payload, profile, STATIC_KIND)
 
     def grid(key: str, dtype=float) -> np.ndarray:
@@ -305,6 +320,19 @@ def read_static_estimate(path: str | Path, profile: RobotProfile) -> StaticArtif
                 f"got {values.shape}"
             )
         return values
+
+    def optional_grid(key: str) -> np.ndarray | None:
+        """None when *key* is absent: a version 1 file, or a fit that never
+        ran a staircase — the same "never measured" default `StaticEstimate`
+        itself uses, not a nan-filled array standing in for a distinction the
+        file does not actually carry. `dtype=float` turns a stored `null`
+        (JSON's spelling of the `nan_to_null` conversion the writer applied)
+        back into `nan` for free — the same conversion `read_sweep` relies on
+        needing no matching "null_to_nan" step of its own.
+        """
+        if key not in payload:
+            return None
+        return grid(key)
 
     try:
         estimate = StaticEstimate(
@@ -317,6 +345,8 @@ def read_static_estimate(path: str | Path, profile: RobotProfile) -> StaticArtif
             used=grid("rounds_used", int),
             excluded=grid("rounds_excluded", int),
             unidentifiable=(),
+            coulomb_nm=optional_grid("coulomb_nm"),
+            bias_nm=optional_grid("bias_nm"),
         )
     except (TypeError, ValueError) as error:
         raise ArtifactError(f"malformed static estimate: {error}") from error

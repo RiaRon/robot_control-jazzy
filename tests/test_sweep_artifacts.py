@@ -281,6 +281,76 @@ def test_a_static_estimate_round_trips_through_a_file(profile, tmp_path):
     assert json.loads(path.read_text())["sources"]["sweep_sha256"] == ["a" * 64]
 
 
+def test_a_static_estimate_carries_coulomb_and_bias_through_a_file(profile, tmp_path):
+    """One joint covered by a staircase, six not — the shape `_identify`
+    produces once a staircase covers only one joint of a group."""
+    from robot_control.artifacts import read_static_estimate, write_static_estimate
+
+    width = len(profile.groups[GROUP].joints)
+    coulomb = np.full(width, np.nan)
+    coulomb[0] = 0.08
+    bias = np.full(width, np.nan)
+    bias[0] = 0.3
+    original = dataclasses.replace(_estimate(profile), coulomb_nm=coulomb, bias_nm=bias)
+    path = tmp_path / "static.json"
+
+    write_static_estimate(
+        path, original, profile, group=GROUP, noise_rad=4e-4, sources=["a" * 64]
+    )
+    loaded = read_static_estimate(path, profile).estimate
+
+    assert loaded.coulomb_nm[0] == pytest.approx(0.08)
+    assert loaded.bias_nm[0] == pytest.approx(0.3)
+    assert np.all(np.isnan(loaded.coulomb_nm[1:]))
+    assert np.all(np.isnan(loaded.bias_nm[1:]))
+    # json.loads parses both `null` and the non-standard `NaN` token the same
+    # way, so this has to read the file as raw text to tell them apart.
+    text = path.read_text()
+    assert "null" in text
+    assert "NaN" not in text
+
+
+def test_a_static_estimate_with_no_staircase_never_writes_the_keys_at_all(
+    profile, tmp_path
+):
+    """The common case: a gravity-only run. coulomb_nm/bias_nm stay `None` —
+    `fit_static_gravity` never sets them — and the file this writes carries
+    neither key at all, rather than a version 2 file full of `null`."""
+    from robot_control.artifacts import read_static_estimate, write_static_estimate
+
+    path = tmp_path / "static.json"
+    write_static_estimate(
+        path, _estimate(profile), profile, group=GROUP, noise_rad=4e-4, sources=[]
+    )
+
+    payload = json.loads(path.read_text())
+    assert "coulomb_nm" not in payload
+    assert "bias_nm" not in payload
+    loaded = read_static_estimate(path, profile).estimate
+    assert loaded.coulomb_nm is None
+    assert loaded.bias_nm is None
+
+
+def test_a_version_1_static_estimate_still_loads(profile, tmp_path):
+    """Every static estimate on disk before this task predates coulomb_nm and
+    bias_nm entirely; the reader has to fill None for both rather than
+    refuse, or every file already written stops loading."""
+    from robot_control.artifacts import read_static_estimate, write_static_estimate
+
+    path = tmp_path / "v1.json"
+    write_static_estimate(
+        path, _estimate(profile), profile, group=GROUP, noise_rad=4e-4, sources=[]
+    )
+    payload = json.loads(path.read_text())
+    payload["schema_version"] = 1
+    _resign(path, payload)
+
+    loaded = read_static_estimate(path, profile).estimate
+
+    assert loaded.coulomb_nm is None
+    assert loaded.bias_nm is None
+
+
 def test_an_incomplete_static_estimate_is_never_written(profile, tmp_path):
     """A hole in the file reads back as an answer for the joints it does have."""
     from robot_control.artifacts import write_static_estimate

@@ -126,7 +126,7 @@ def level_track(monkeypatch, profile):
     return _install(monkeypatch, _track(_chain(), loaded=False))
 
 
-def _static(path, profile, stiffness=KP):
+def _static(path, profile, stiffness=KP, coulomb_nm=None, bias_nm=None):
     write_static_estimate(
         path,
         StaticEstimate(
@@ -139,6 +139,8 @@ def _static(path, profile, stiffness=KP):
             used=np.full(7, 12, dtype=int),
             excluded=np.zeros(7, dtype=int),
             unidentifiable=(),
+            coulomb_nm=coulomb_nm,
+            bias_nm=bias_nm,
         ),
         profile,
         group=GROUP,
@@ -191,12 +193,43 @@ def test_fit_with_a_static_estimate_reports_physical_parameters(
     assert "NaN" not in text
 
 
+def test_fit_reads_coulomb_and_bias_from_a_real_static_file(
+    track, urdf, profile, tmp_path, capsys
+):
+    """No monkeypatch: `identify` writes coulomb_nm/bias_nm into the static
+    file when a staircase covered a joint, and `fit --static` has to pick
+    them up through the real `read_static_estimate`, not a stand-in — this is
+    the chain identify -> static file -> fit -> combine -> bundle -> export
+    actually carrying Fc/Fo end to end, the gap this task exists to close."""
+    coulomb = np.full(7, np.nan)
+    coulomb[0] = 0.08
+    bias = np.full(7, np.nan)
+    bias[0] = 0.3
+    static = _static(
+        tmp_path / "static.json", profile, coulomb_nm=coulomb, bias_nm=bias
+    )
+    output = tmp_path / "estimate.json"
+
+    code = main(
+        ["r2s", "fit", "--track", "t.h5", "--output", str(output),
+         "--static", str(static), "--urdf", str(urdf)]
+    )
+
+    assert code == 0, capsys.readouterr().out
+    payload = json.loads(output.read_text())
+    assert payload["coulomb_nm"][0] == pytest.approx(0.08)
+    assert payload["coulomb_nm"][1:] == [None] * 6
+    assert payload["static_bias_nm"][0] == pytest.approx(0.3)
+    assert payload["static_bias_nm"][1:] == [None] * 6
+
+
 def test_fit_carries_a_static_estimates_own_coulomb_and_bias_through(
     monkeypatch, track, urdf, profile, tmp_path, capsys
 ):
-    """Plumbing only: the file round trip for a staircase-backed static
-    estimate does not exist yet (`write_static_estimate` refuses one), so this
-    exercises `_fit` with a `StaticEstimate` built in-process instead."""
+    """Redundant with the real round trip above by design: this isolates
+    `_fit`/`combine`'s own handling of a populated `StaticEstimate` from
+    whatever `read_static_estimate` does, so a future change to either one
+    still has a test that pins the other alone."""
     import dataclasses
 
     import robot_control.artifacts as artifacts_module
