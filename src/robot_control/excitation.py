@@ -60,6 +60,19 @@ MOVED_RAD = 1e-6
 #: The cost is a joint whose real motion is under the floor escalating one more
 #: step, which is the conservative direction.
 MOTION_NOISE_MARGIN = 5.0
+#: How far the next seed carries the joint, as a multiple of the travel the
+#: current one produced. `x(2s) = x(s) + s/kp` and `s/kp >= x(s)`, so doubling
+#: the seed goes at least twice as far. Once the escalation has doubled at least
+#: once, the seed before this one failed to move the joint, which pins the
+#: friction it has to overcome at `>= s/2` and so `s/kp >= 2 x(s)`: at least
+#: three times as far.
+#:
+#: Both are lower bounds, and there is no upper bound to be had — a joint that
+#: has only just broken loose says nothing about kp on its own, since the same
+#: reading fits any (kp, Fc) along a line. So this predicts what can be
+#: predicted, and every reading is checked against the room besides.
+NEXT_SEED_TRAVEL = 2.0
+NEXT_SEED_TRAVEL_AFTER_DOUBLING = 3.0
 #: How far the deflection the probed torque actually achieved may miss the one
 #: asked for before the probe extrapolates a second time, from that better
 #: measurement. A linear spring hits the target exactly; a miss means the seed
@@ -185,7 +198,7 @@ def _hold_and_read(adapter, gate, publish, effort, hold_sec, index) -> float:
 
 def _seed_response(
     adapter, gate, publish, *,
-    index, width, effort_limit_nm, hold_sec, joint, baseline, noise_rad,
+    index, width, effort_limit_nm, hold_sec, joint, baseline, noise_rad, room,
 ) -> tuple[float, float]:
     """Find a seed the joint moves under, and the deflection it is worth.
 
@@ -237,6 +250,24 @@ def _seed_response(
             "accept that this one cannot be probed"
         )
 
+    def refuse_room(torque_nm: float, travelled: float) -> ExcitationRefused:
+        return ExcitationRefused(
+            f"{joint} travelled {travelled:.3f} rad under {torque_nm:g} N.m, "
+            f"past the {room:.3f} rad this pose leaves before its "
+            f"{MARGIN_RAD:g} rad margin; move to a pose with more room"
+        )
+
+    def refuse_room_ahead(
+        torque_nm: float, travelled: float, reach: float
+    ) -> ExcitationRefused:
+        return ExcitationRefused(
+            f"{joint} travelled {travelled:.3f} rad under {torque_nm:g} N.m, "
+            f"and the next seed is {2.0 * torque_nm:g} N.m, under which it "
+            f"travels at least {reach:g} times as far — {reach * travelled:.3f} "
+            f"rad, past the {room:.3f} rad this pose leaves before its "
+            f"{MARGIN_RAD:g} rad margin; move to a pose with more room"
+        )
+
     def read(torque_nm: float) -> float:
         effort = np.zeros(width)
         effort[index] = torque_nm
@@ -245,9 +276,20 @@ def _seed_response(
     # Never below MOVED_RAD, so `--noise 0` still guards the division.
     moved_rad = max(MOTION_NOISE_MARGIN * noise_rad, MOVED_RAD)
     seed_nm = SEED_TORQUE_NM
-    for _ in range(MAX_SEED_DOUBLINGS + 1):
+    for doubling in range(MAX_SEED_DOUBLINGS + 1):
         reading = read(seed_nm)
-        broke_loose = abs(reading - baseline) >= moved_rad
+        travelled = abs(reading - baseline)
+        # Position first, as in probe_torque: a pose with no room is a pose
+        # problem. Nothing else here bounds where the escalation puts the
+        # joint — the request-side check is on a deflection it may never
+        # reach, and the achieved-room check comes after the probe, several
+        # publishes later.
+        if travelled > room:
+            raise refuse_room(seed_nm, travelled)
+        reach = NEXT_SEED_TRAVEL_AFTER_DOUBLING if doubling else NEXT_SEED_TRAVEL
+        if reach * travelled > room:
+            raise refuse_room_ahead(seed_nm, travelled, reach)
+        broke_loose = travelled >= moved_rad
         if 2.0 * seed_nm > ceiling_nm:
             # Whether the joint moved or not: the confirming step is as much a
             # part of the escalation as a retry is, and neither may publish
@@ -255,7 +297,12 @@ def _seed_response(
             # what the operator is told, not whether this refuses.
             raise refuse_unconfirmed(seed_nm) if broke_loose else refuse_stuck(seed_nm)
         if broke_loose:
-            return seed_nm, read(2.0 * seed_nm) - reading
+            confirmed = read(2.0 * seed_nm)
+            # The bound above was a lower one, so where the joint actually
+            # ended up still has to be read before the probe torque follows it.
+            if abs(confirmed - baseline) > room:
+                raise refuse_room(2.0 * seed_nm, abs(confirmed - baseline))
+            return seed_nm, confirmed - reading
         seed_nm *= 2.0
     raise ExcitationRefused(
         f"{joint} moved less than {moved_rad:.2g} rad under every seed from "
@@ -286,10 +333,12 @@ def _probe_peak(
     # Read where the arm stands, not where the torque has carried it: the room
     # to a stop is a property of the pose the operator chose.
     position = float(adapter.read_state()[index])
+    room = _room_to_stop(position, limit.lower, limit.upper)
     seed_nm, response = _seed_response(
         adapter, gate, publish,
         index=index, width=width, effort_limit_nm=limit.effort,
         hold_sec=hold_sec, joint=joint, baseline=baseline, noise_rad=noise_rad,
+        room=room,
     )
 
     bounds = dict(
@@ -310,7 +359,6 @@ def _probe_peak(
     achieved = abs(
         _hold_and_read(adapter, gate, publish, probe, hold_sec, index) - baseline
     )
-    room = _room_to_stop(position, limit.lower, limit.upper)
     if achieved > room:
         raise ExcitationRefused(
             f"{joint} moved {achieved:.3f} rad under {peak:.3f} N.m, past the "

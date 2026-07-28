@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from robot_control.excitation import ExcitationRefused, measure_staircase, probe_torque
+from robot_control.identification import DEFAULT_NOISE_RAD
 
 BOUNDS = dict(
     effort_limit_nm=7.0, position_rad=0.0, lower_rad=-1.57, upper_rad=1.57,
@@ -332,8 +333,6 @@ def test_encoder_noise_does_not_read_as_a_joint_that_moved():
     N.m here, before any deflection has actually been measured. The re-check
     only corrects the torque after that one has gone out.
     """
-    from robot_control.identification import DEFAULT_NOISE_RAD
-
     rng = np.random.default_rng(20260728)
     for _ in range(12):
         arm = _Arm(
@@ -550,6 +549,33 @@ def test_the_torque_is_released_even_when_the_probe_refuses():
     effort, seconds = arm.calls[-1]
     assert effort.tolist() == [0.0, 0.0]
     assert seconds > 0.0
+
+
+def test_the_escalation_stops_before_it_walks_the_joint_into_its_margin():
+    """Room is checked on the deflection asked for and on the one the probe
+    achieved. The escalation's own publishes sit between those two checks and
+    were checked by neither.
+
+    kp 15.1, Fc 0.45, +-0.26 rad of travel, so 0.06 rad of room: the 0.05 rad
+    asked for passes the request-side check, and then the escalation's
+    confirming step at 1.6 N.m carries the joint 0.0762 rad — 27% into the
+    0.20 rad margin — before the achieved-room check refuses after the fact.
+    kp is unknown while escalating, which is exactly why this is the place the
+    arm can be walked somewhere nobody asked for.
+
+    It is predictable, though. The joint travelled 0.0232 rad under 0.8 N.m
+    and had stood still under 0.4, which pins x(2s) >= 3 x(s) = 0.0695 against
+    0.06 rad of room. That is a lower bound, so it is enough to refuse on.
+    """
+    arm = _Arm(_Joint(lambda torque: torque / 15.1, band_rad=0.45 / 15.1,
+                      latch_rad=0.0))
+
+    with pytest.raises(ExcitationRefused, match=r"r_aj_5.*margin"):
+        _drive(arm, limit=_Limit(effort=7.0, lower=-0.26, upper=0.26),
+               noise_rad=DEFAULT_NOISE_RAD)
+
+    loudest = max(abs(float(effort[0])) for effort, _seconds in arm.calls)
+    assert loudest == pytest.approx(0.8), "the 1.6 N.m step must not go out"
 
 
 def test_a_deflection_that_lands_inside_the_margin_is_refused():
