@@ -20,7 +20,22 @@ MAX_PROBE_FRACTION = 0.25
 #: into its stop is held by the stop, and reads as stiction.
 MARGIN_RAD = 0.20
 #: The first push, small enough to be safe on the stiffest joint in the arm.
+#: It is also smaller than the dry friction of every joint on it (0.10 N.m at
+#: the wrist, 0.30 at the shoulder), so on its own it moves nothing: a joint
+#: latched inside its stiction band stays there until the seed exceeds Fc. So
+#: the seed doubles until the joint moves, rather than being a flag — the
+#: number an operator would have to guess is Fc, which is what the run exists
+#: to measure. The escalation measures it instead: a joint that stood still at
+#: one seed and moved at the next has its Fc bracketed between the two, and
+#: that bracket is reported.
 SEED_TORQUE_NM = 0.05
+#: How many times the seed may double. Bounded so that a joint which is not
+#: listening at all — unpowered, braked, miswired — cannot be walked up to its
+#: rating one publish at a time while it reads as very stiff.
+MAX_SEED_DOUBLINGS = 5
+#: Below this a reading is the sensor's own noise rather than a response, and a
+#: stiffness extrapolated from it is a division by nothing.
+MOVED_RAD = 1e-6
 #: How far the deflection the probed torque actually achieved may miss the one
 #: asked for before the probe extrapolates a second time, from that better
 #: measurement. A linear spring hits the target exactly; a miss means the seed
@@ -84,7 +99,7 @@ def probe_torque(
             f"{joint} was asked for a {deflection_rad:g} rad deflection; "
             "deflection_rad is a magnitude and must be positive"
         )
-    if abs(seed_deflection_rad) < 1e-6:
+    if abs(seed_deflection_rad) < MOVED_RAD:
         raise ExcitationRefused(
             f"{joint} did not move under {seed_torque_nm:g} N.m, so its "
             "stiffness cannot be extrapolated; raise the seed torque"
@@ -128,11 +143,73 @@ def _hold_and_read(adapter, gate, publish, effort, hold_sec, index) -> float:
     return float(adapter.read_tracking_error()[index])
 
 
+def _seed_response(
+    adapter, gate, publish, *,
+    index, width, effort_limit_nm, hold_sec, joint, baseline,
+) -> tuple[float, float]:
+    """Find a seed the joint moves under, and the deflection it is worth.
+
+    Returns the smallest seed that moved the joint and, for that same torque
+    taken as an increment, the deflection it produced.
+
+    Two stages, and the second is not optional. The escalation doubles from
+    `SEED_TORQUE_NM` until the joint moves, comparing against *baseline*, the
+    reading at zero torque: a seed that failed to move the joint left it
+    exactly where the baseline found it, so one baseline stands for every step.
+    But the seed that finally moves it is by construction only just past Fc,
+    and the deflection it shows is `(seed - Fc)/kp` rather than `seed/kp` — a
+    small difference of two close numbers, which extrapolates to an enormous
+    torque. On the loaded shoulder (kp 63.7, Fc 0.3) the 0.4 N.m seed that
+    breaks it loose asks for 12.74 N.m against a true 3.19.
+
+    So the seed is doubled once more and the two readings are differenced. Both
+    were taken moving the same way, so the Coulomb offset is the same in both
+    and cancels, leaving `seed/kp` exactly — the same trick as reading against
+    a zero-torque baseline to cancel gravity, one level down.
+    """
+    ceiling_nm = MAX_PROBE_FRACTION * effort_limit_nm
+
+    def refuse_ceiling(largest_nm: float) -> ExcitationRefused:
+        return ExcitationRefused(
+            f"{joint} needs a seed over the {ceiling_nm:.3f} N.m ceiling the "
+            f"probe refuses at ({MAX_PROBE_FRACTION:.0%} of its "
+            f"{effort_limit_nm:g} N.m rating): {largest_nm:g} N.m is as far as "
+            f"the escalation may go and the next step would be "
+            f"{2.0 * largest_nm:g} N.m. Its dry friction is more than a "
+            "quarter of what the joint is rated for, which is a finding about "
+            "the joint rather than a run to retry with a bigger number"
+        )
+
+    def read(torque_nm: float) -> float:
+        effort = np.zeros(width)
+        effort[index] = torque_nm
+        return _hold_and_read(adapter, gate, publish, effort, hold_sec, index)
+
+    seed_nm = SEED_TORQUE_NM
+    for _ in range(MAX_SEED_DOUBLINGS + 1):
+        moved = read(seed_nm)
+        if 2.0 * seed_nm > ceiling_nm:
+            # Whether the joint moved or not: the confirming step below is as
+            # much a part of the escalation as a retry is, and neither may
+            # publish what the probe would reject.
+            raise refuse_ceiling(seed_nm)
+        if abs(moved - baseline) >= MOVED_RAD:
+            return seed_nm, read(2.0 * seed_nm) - moved
+        seed_nm *= 2.0
+    raise ExcitationRefused(
+        f"{joint} held still under every seed from {SEED_TORQUE_NM:g} to "
+        f"{seed_nm / 2.0:g} N.m, {MAX_SEED_DOUBLINGS} doublings and the cap. A "
+        "joint that has not moved by then is not a stiff joint, it is one that "
+        "is not listening: check that its controller is running, that it is "
+        "not braked, and that the effort command is reaching it"
+    )
+
+
 def _probe_peak(
     adapter, gate, publish, *,
     index, width, limit, deflection_rad, hold_sec, joint,
-) -> float:
-    """Size the staircase for one joint: seed it, extrapolate, re-check once.
+) -> tuple[float, float]:
+    """Size the staircase for one joint, and report the seed that moved it.
 
     Every deflection here is a difference from the reading at zero torque.
     A tracking error on its own is the controller's droop — (tau_gravity -
@@ -145,9 +222,11 @@ def _probe_peak(
     # Read where the arm stands, not where the torque has carried it: the room
     # to a stop is a property of the pose the operator chose.
     position = float(adapter.read_state()[index])
-    seed = np.zeros(width)
-    seed[index] = SEED_TORQUE_NM
-    response = _hold_and_read(adapter, gate, publish, seed, hold_sec, index) - baseline
+    seed_nm, response = _seed_response(
+        adapter, gate, publish,
+        index=index, width=width, effort_limit_nm=limit.effort,
+        hold_sec=hold_sec, joint=joint, baseline=baseline,
+    )
 
     bounds = dict(
         deflection_rad=deflection_rad,
@@ -157,8 +236,9 @@ def _probe_peak(
         upper_rad=limit.upper,
         joint=joint,
     )
+    # The seed that moved it, not the one the escalation started from.
     peak = probe_torque(
-        seed_torque_nm=SEED_TORQUE_NM, seed_deflection_rad=response, **bounds
+        seed_torque_nm=seed_nm, seed_deflection_rad=response, **bounds
     )
 
     probe = np.zeros(width)
@@ -175,22 +255,26 @@ def _probe_peak(
             "the seed said it was, so ask for a smaller deflection"
         )
     if abs(achieved - deflection_rad) <= RECHECK_TOLERANCE * deflection_rad:
-        return peak
+        return peak, seed_nm
     # Once, and then it is used. This extrapolation starts from a deflection
     # near the one wanted rather than from a seed the width of a stiction band,
     # so checking it in turn would be a loop with nothing to make it terminate.
+    # A seed the escalation had to raise is exactly the case that lands here:
+    # its response under-reports the elastic deflection by the whole band.
     return probe_torque(
         seed_torque_nm=peak, seed_deflection_rad=achieved, **bounds
-    )
+    ), seed_nm
 
 
 def measure_staircase(
-    adapter, gate, group, *, joints, limits, deflection_rad, steps, hold_sec, publish
+    adapter, gate, group, *, joints, limits, deflection_rad, steps, hold_sec,
+    publish, announce=lambda _line: None,
 ):
     """Drive each joint through its staircase and collect the rounds.
 
-    *publish* is a callable taking (effort, seconds); the caller owns how a
-    torque is held, so this stays free of ROS and of wall-clock policy.
+    *publish* is a callable taking (effort, seconds) and *announce* one taking
+    a line of text; the caller owns how a torque is held and where a line goes,
+    so this stays free of ROS and of wall-clock policy.
 
     Every joint but the one under test receives zero. The vendor hardware runs
     MIT mode, so the position loop is still holding the whole arm while one
@@ -201,10 +285,18 @@ def measure_staircase(
     try:
         for name in joints:
             index = group.joints.index(name)
-            peak = _probe_peak(
+            peak, seed_nm = _probe_peak(
                 adapter, gate, publish,
                 index=index, width=width, limit=limits[index],
                 deflection_rad=deflection_rad, hold_sec=hold_sec, joint=name,
+            )
+            # The seed is worth saying out loud: the joint stood still at half
+            # of it and moved at it, which brackets its dry friction, and the
+            # ratio between joints is the first look at the arm's stiction a
+            # run gives.
+            announce(
+                f"  {name}: moved under a {seed_nm:g} N.m seed, staircase peak "
+                f"{peak:.3f} N.m"
             )
             for value in staircase(peak, steps):
                 effort = np.zeros(width)

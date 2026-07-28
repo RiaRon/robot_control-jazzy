@@ -1111,6 +1111,10 @@ def _pose_torque(args, profile) -> int:
             joints=joints, limits=limits, deflection_rad=args.deflection,
             steps=args.steps, hold_sec=args.hold_sec,
             publish=lambda effort, seconds: _publish_for(adapter, effort, seconds),
+            # A joint's seed is only known once it has been probed, and the run
+            # is minutes long, so it is reported as it is measured rather than
+            # collected up and printed at the end.
+            announce=print,
         )
         # The real gravity torque at each round's measured pose — the same
         # column a gravity sweep's alpha multiplies — so torque and gravity

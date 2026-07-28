@@ -176,13 +176,19 @@ class _Arm:
         return np.array([self.joint.error(float(self.effort[0])), 0.0])
 
 
-def _drive(arm, *, deflection_rad=0.05, limit=None, steps=5):
+def _drive(arm, *, deflection_rad=0.05, limit=None, steps=5, announce=None):
     return measure_staircase(
         arm, _Gate(), _Group(),
         joints=["r_aj_5"], limits=[limit or _Limit(), _Limit()],
         deflection_rad=deflection_rad, steps=steps, hold_sec=0.0,
         publish=arm.publish,
+        **({} if announce is None else {"announce": announce}),
     )
+
+
+def _immovable(kp):
+    """A joint whose stiction band no seed in the escalation can cross."""
+    return _Joint(lambda torque: torque / kp, band_rad=100.0 / kp, latch_rad=0.0)
 
 
 def _softens_beyond(knee, kp_below, kp_above):
@@ -215,22 +221,29 @@ def test_the_probe_sizes_the_torque_from_what_the_seed_itself_moved():
     assert applied[:, 0].max() == pytest.approx(0.75, rel=1e-3)
 
 
-def test_a_joint_the_seed_cannot_break_loose_is_refused():
-    """r_aj_2 carrying a load: kp 63.7, 5 N.m of gravity, Fc 0.3 N.m. The seed
-    shifts this joint's equilibrium by 0.00078 rad and its stiction band is
-    0.0047 rad wide, so unless it happens to be latched against the edge the
-    joint does not move at all and there is nothing to extrapolate from.
+def test_the_loaded_shoulder_the_seed_cannot_break_loose_is_escalated_to():
+    """r_aj_2 carrying a load: kp 63.7, 5 N.m of gravity, Fc 0.3 N.m. The
+    0.05 N.m seed shifts its equilibrium by 0.00078 rad against a 0.0047 rad
+    stiction band, so it does not move at all — and the droop hides that
+    completely, reading +0.078 rad either way, which is what the probe used to
+    size a staircase from.
 
-    The droop hides that completely: the tracking error reads +0.078 rad either
-    way, which is what the probe used to size a staircase from.
+    Reading the seed against a zero-torque baseline turns that into an honest
+    refusal, and the escalation turns the refusal into a measurement: 0.4 N.m
+    is the seed this joint needs. The true torque for 0.05 rad of real travel
+    is kp*d + Fc = 3.485 N.m — the friction has to be broken as well as the
+    spring bent — and the probe lands within a tenth of it.
     """
     arm = _Arm(
         _Joint(lambda torque: torque / 63.7, droop_rad=5.0 / 63.7,
                band_rad=0.3 / 63.7, latch_rad=0.0, position=0.5)
     )
 
-    with pytest.raises(ExcitationRefused, match=r"r_aj_5.*did not move"):
-        _drive(arm, limit=_Limit(effort=40.0))
+    _poses, applied, _errors = _drive(arm, limit=_Limit(effort=40.0))
+
+    published = [float(effort[0]) for effort, _seconds in arm.calls]
+    assert published[:5] == [0.0, 0.05, 0.10, 0.20, 0.40]
+    assert applied[:, 0].max() == pytest.approx(3.485, rel=0.1)
 
 
 def test_the_probe_re_extrapolates_once_from_the_torque_it_probed_with():
@@ -245,6 +258,80 @@ def test_the_probe_re_extrapolates_once_from_the_torque_it_probed_with():
     _poses, applied, _errors = _drive(arm)
 
     assert applied[:, 0].max() == pytest.approx(1.3235, rel=1e-3)
+
+
+def test_the_seed_doubles_until_the_joint_breaks_loose():
+    """A seed inside the stiction band moves the joint not at all, and the
+    0.05 N.m seed is inside every band on this arm. Fc 0.12 N.m here (a shade
+    over the 0.10 the review measured at the wrist, to keep the 0.10 seed off
+    the knife edge): 0.05 and 0.10 leave it standing, 0.20 breaks it loose.
+
+    0.40 follows as the confirming step: differencing the two readings that
+    both moved cancels the Coulomb offset the first one carries on its own.
+    The staircase then wants kp*d + Fc = 0.875 N.m, since a joint at rest has
+    to have its friction broken as well as its spring bent to travel 0.05 rad.
+    """
+    arm = _Arm(
+        _Joint(lambda torque: torque / 15.1, droop_rad=0.03 / 15.1,
+               band_rad=0.12 / 15.1, latch_rad=0.0)
+    )
+
+    _poses, applied, _errors = _drive(arm, limit=_Limit(effort=10.0))
+
+    published = [float(effort[0]) for effort, _seconds in arm.calls]
+    assert published[:5] == [0.0, 0.05, 0.10, 0.20, 0.40]
+    assert applied[:, 0].max() == pytest.approx(0.875, rel=0.05)
+
+
+def test_the_smallest_seed_that_moved_the_joint_is_announced():
+    """It is the run's first measurement of the joint's stiction: the joint
+    stood still at half this torque and moved at this one."""
+    arm = _Arm(
+        _Joint(lambda torque: torque / 15.1, droop_rad=0.03 / 15.1,
+               band_rad=0.12 / 15.1, latch_rad=0.0)
+    )
+    said = []
+
+    _drive(arm, limit=_Limit(effort=10.0), announce=said.append)
+
+    assert len(said) == 1
+    assert "r_aj_5" in said[0] and "0.2 N.m seed" in said[0]
+
+
+def test_the_escalation_stops_at_the_ceiling_the_probe_itself_refuses_at():
+    """The escalation may never ask for a torque `probe_torque` would reject,
+    so it stops at the same 25% of the joint's rating. Rated 2 N.m, that
+    ceiling is 0.5: the seed reaches 0.4 and the next double would clear it.
+
+    The refusal names both, because a joint whose stiction is more than a
+    quarter of its rating is a finding about the joint rather than a run to
+    retry with a bigger number.
+    """
+    arm = _Arm(_immovable(15.1))
+
+    with pytest.raises(ExcitationRefused, match=r"r_aj_5.*0\.500 N\.m ceiling"):
+        _drive(arm, limit=_Limit(effort=2.0))
+
+    published = [float(effort[0]) for effort, _seconds in arm.calls]
+    assert published[:5] == [0.0, 0.05, 0.10, 0.20, 0.40]
+
+
+def test_the_escalation_is_capped_before_it_reaches_a_generous_ceiling():
+    """Rated 40 N.m the ceiling is 10, which doubling would take a while to
+    reach — and a joint that has not moved by the cap is not a stiff joint,
+    it is one that is not listening. The cap is what stops a wiring fault
+    walking a joint up to its rating one publish at a time.
+    """
+    from robot_control.excitation import MAX_SEED_DOUBLINGS
+
+    arm = _Arm(_immovable(63.7))
+
+    with pytest.raises(ExcitationRefused, match=r"r_aj_5.*doubling"):
+        _drive(arm, limit=_Limit(effort=40.0))
+
+    seeds = [float(effort[0]) for effort, _seconds in arm.calls if effort[0] > 0]
+    assert len(seeds) == MAX_SEED_DOUBLINGS + 1
+    assert seeds[-1] == pytest.approx(0.05 * 2**MAX_SEED_DOUBLINGS)
 
 
 def test_the_torque_release_is_held_rather_than_published_once():
@@ -267,12 +354,9 @@ def test_the_torque_release_is_held_rather_than_published_once():
 
 
 def test_the_torque_is_released_even_when_the_probe_refuses():
-    """A refusal leaves a seed torque published; the release is what takes it
-    off, so it has to be held on that path too."""
-    arm = _Arm(
-        _Joint(lambda torque: torque / 63.7, droop_rad=5.0 / 63.7,
-               band_rad=0.3 / 63.7, latch_rad=0.0, position=0.5)
-    )
+    """A refusal leaves the last seed of the escalation published; the release
+    is what takes it off, so it has to be held on that path too."""
+    arm = _Arm(_immovable(63.7))
 
     with pytest.raises(ExcitationRefused):
         _drive(arm, limit=_Limit(effort=40.0))

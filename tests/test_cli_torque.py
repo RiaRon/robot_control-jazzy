@@ -126,6 +126,21 @@ def test_the_sweep_it_writes_records_the_torque_and_not_a_scale(arm, tmp_path, p
     assert np.ptp(sweep.applied_torque[:, 4]) > 0
 
 
+def test_it_reports_the_seed_each_joint_needed(arm, tmp_path, capsys):
+    """The smallest seed that moved a joint is the first measurement of that
+    joint's dry friction the run produces — it stood still at half of it — so
+    an operator watching should see it per joint, and see the ratio between
+    joints, rather than have to work it out afterwards. This stub arm has no
+    friction at all, so every joint moves under the first seed.
+    """
+    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+          "--hold-sec", "0.01", "--output", str(tmp_path / "t.json")])
+
+    out = capsys.readouterr().out
+    assert out.count("N.m seed") == len(KP)
+    assert "r_aj_5: moved under a 0.05 N.m seed" in out
+
+
 def test_a_dry_run_publishes_nothing(arm, tmp_path):
     assert main(["pose", "torque", "--group", GROUP, "--steps", "3"]) == 0
     assert arm.published == []
