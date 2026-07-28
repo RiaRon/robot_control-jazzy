@@ -83,3 +83,22 @@ def test_it_refuses_a_non_positive_deflection_rad(deflection_rad):
             deflection_rad=deflection_rad, seed_torque_nm=0.05,
             seed_deflection_rad=0.004, **BOUNDS
         )
+
+
+def test_the_staircase_climbs_and_comes_back_without_repeating_the_peak():
+    """Both directions of travel, because the gap between the ascending and
+    descending branches is what measures Coulomb friction. A single direction
+    traces one branch and measures nothing about it."""
+    from robot_control.excitation import staircase
+
+    values = staircase(peak_nm=0.6, steps=4)
+
+    assert values == pytest.approx([-0.6, -0.2, 0.2, 0.6, 0.2, -0.2, -0.6])
+    assert len(values) == 2 * 4 - 1
+
+
+def test_the_staircase_needs_at_least_two_points_per_branch():
+    from robot_control.excitation import ExcitationRefused, staircase
+
+    with pytest.raises(ExcitationRefused, match="steps"):
+        staircase(peak_nm=0.6, steps=1)

@@ -24,6 +24,20 @@ class ExcitationRefused(ValueError):
     """A torque the experiment will not publish, naming the bound it broke."""
 
 
+def staircase(peak_nm: float, steps: int) -> list[float]:
+    """Torques from -peak to +peak and back, one list, in visiting order.
+
+    Both directions because a joint held by dry friction sits at a different
+    equilibrium depending on which way it last moved, and the distance between
+    those two equilibria is the measurement.
+    """
+    if steps < 2:
+        raise ExcitationRefused(f"a staircase needs at least 2 steps, got {steps}")
+    span = 2.0 * peak_nm
+    up = [-peak_nm + span * index / (steps - 1) for index in range(steps)]
+    return up + up[-2::-1]
+
+
 def probe_torque(
     *,
     deflection_rad: float,
