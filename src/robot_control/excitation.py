@@ -41,9 +41,12 @@ SEED_TORQUE_NM = 0.05
 #: How many times the seed may double. Bounded so that a joint which is not
 #: listening at all — unpowered, braked, miswired — cannot be walked up to its
 #: rating one publish at a time while it reads as very stiff. Five doublings
-#: reach 1.6 N.m, which covers Fc up to 0.8 N.m for a joint latched at the far
-#: edge of its band and up to 1.6 for one latched at the near edge. Every joint
-#: on this arm sits at Fc <= 0.30.
+#: reach a 1.6 N.m seed — and 3.2 N.m actually published, since the seed that
+#: moves the joint is confirmed at twice itself wherever the rating allows;
+#: that step is bounded by the ceiling and announced, but it is what goes out.
+#: A 1.6 N.m seed covers Fc up to 0.8 N.m for a joint latched at the far edge
+#: of its band and up to 1.6 for one latched at the near edge. Every joint on
+#: this arm sits at Fc <= 0.30.
 MAX_SEED_DOUBLINGS = 5
 #: A divide-by-zero guard, and nothing more: below this the extrapolation
 #: `deflection * seed / response` has no denominator worth the name. It is far

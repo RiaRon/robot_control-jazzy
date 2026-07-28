@@ -705,6 +705,13 @@ EOF
 
 ### Task 6: `robotctl pose torque`
 
+> **Superseded in part.** The test code below uses `--steps 3`, which the CLI
+> now refuses: the minimum that can be fitted is 4. A staircase's first torque
+> is published and not recorded, and at exactly 3 steps the first *recorded*
+> round carries zero torque, leaving the rising branch one round short. This
+> brief is kept as the record of what the task specified; do not copy the
+> invocations out of it. See `MIN_STAIRCASE_STEPS` and the tests as they stand.
+
 **Files:**
 - Modify: `src/robot_control/cli.py` (parser in `_add_pose`, dispatch in `_pose`, new `_pose_torque`)
 - Modify: `src/robot_control/excitation.py` (measurement loop)
