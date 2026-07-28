@@ -158,6 +158,28 @@ def test_a_staircase_too_short_to_fit_is_refused(arm, tmp_path, capsys):
     assert arm.published == []
 
 
+@pytest.mark.parametrize("noise", ["0", "-1"])
+def test_a_non_positive_noise_is_refused(arm, tmp_path, capsys, noise):
+    """`--noise 0` puts the motion test back on the 1e-6 divide-by-zero guard,
+    which is exactly the defect the noise floor was added to fix: encoder
+    dither reads as motion, the escalation returns at the first seed, and a
+    torque extrapolated from noise is published before any deflection has been
+    measured. On the jittered shoulder that put 7.19 N.m on a joint whose true
+    answer is 3.485.
+
+    `identify --noise 0` is harmless, so an operator can carry a benign habit
+    onto the one command that publishes torque. This is the command where it
+    has to be refused.
+    """
+    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
+                 "--hold-sec", "0.01", "--noise", noise,
+                 "--output", str(tmp_path / "t.json")])
+
+    assert code == 2
+    assert "--noise" in capsys.readouterr().out
+    assert arm.published == []
+
+
 def test_a_joint_named_twice_is_refused(arm, tmp_path, capsys):
     """A joint's rounds are read back as the block between its first and last
     round carrying torque, so driving one joint twice swallows every joint

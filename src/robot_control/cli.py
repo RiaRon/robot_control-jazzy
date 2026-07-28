@@ -47,7 +47,11 @@ from .identification import (
     split_repetitions,
     validate_holdout,
 )
-from .excitation import MIN_STAIRCASE_STEPS, measure_staircase
+from .excitation import (
+    MIN_STAIRCASE_STEPS,
+    MOTION_NOISE_MARGIN,
+    measure_staircase,
+)
 from .hdgp_export import (
     DEFAULT_MAX_SPREAD,
     HdgpExportError,
@@ -464,9 +468,13 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         "--noise",
         type=float,
         default=DEFAULT_NOISE_RAD,
-        help="radians below which a joint counts as not having moved; the "
-        "seed doubles until it moves by more than this, so an encoder coarser "
-        "than the default one needs it raised",
+        # Not the threshold itself, unlike identify's flag of the same name:
+        # the escalation needs the reading to clear the noise by a margin, and
+        # saying "below which a joint counts as not having moved" here would
+        # understate what the seed has to achieve by that factor.
+        help=f"the encoder's own noise, in radians. A joint counts as having "
+        f"moved when its reading changes by {MOTION_NOISE_MARGIN:g}x this, and "
+        "the seed doubles until it does, so a coarser encoder needs it raised",
     )
     torque.add_argument("--output", type=Path)
     torque.add_argument("--execute", action="store_true")
@@ -1106,6 +1114,17 @@ def _pose_torque(args, profile) -> int:
         )
     if args.hold_sec <= 0:
         raise ValueError("--hold-sec must be positive")
+    if args.noise <= 0:
+        # A zero floor puts the motion test back on the divide-by-zero guard,
+        # where encoder dither reads as a joint that moved and the torque
+        # extrapolated from it is published before anything has measured a
+        # deflection. `identify --noise 0` only drops fewer rounds; here it
+        # commands the arm.
+        raise ValueError(
+            f"--noise must be positive, got {args.noise:g}; it is the encoder "
+            "noise the seed has to be seen through, and without it dither "
+            "reads as motion and sizes a torque from nothing"
+        )
     if args.steps < MIN_STAIRCASE_STEPS:
         raise ValueError(
             f"--steps {args.steps} writes a sweep that cannot be fitted; the "
