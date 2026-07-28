@@ -91,16 +91,38 @@ tau_ff` in one packet — so the position loop continues to hold the whole arm
 while one joint is pushed against it. Nothing is commanded to a new position.
 
 **Sizing the torque.** kp is the unknown, so `tau_max` cannot be computed up
-front; it is probed. For each joint: publish a small seed torque, read the
-deflection, extrapolate to `--deflection`, and re-check once. Three bounds
-refuse rather than clamp, because a torque large enough to trip one is not a
-measurement anyone asked for:
+front; it is probed. Every deflection in the probe is a *difference between two
+readings*, never a reading on its own: a tracking error is
+`(tau_gravity − tau_applied)/kp + c`, so most of it is the load the joint is
+carrying and the stiction holding it, and only what changed when a torque
+arrived says anything about kp. For each joint:
+
+- read the tracking error at zero torque, held as long as any other round;
+- publish the seed torque and read again. A seed inside the joint's stiction
+  band moves it not at all, and `SEED_TORQUE_NM` (0.05) is below every Fc on
+  this arm, so the seed doubles until the joint moves — bounded by
+  `MAX_PROBE_FRACTION` of the rating and by `MAX_SEED_DOUBLINGS`, refusing at
+  either. The smallest seed that moved the joint is reported: it stood still at
+  half that torque, so its Fc is bracketed between the two;
+- double that seed once more and difference the two readings. Both were taken
+  moving the same way, so the Coulomb offset cancels and the difference is the
+  elastic `seed/kp`. Extrapolating from the breaking-loose reading alone would
+  divide by `(seed − Fc)/kp` and run away;
+- extrapolate to `--deflection`, publish that torque, and re-check once against
+  the zero-torque baseline. If the deflection achieved misses what was asked by
+  more than `RECHECK_TOLERANCE`, extrapolate once more from that
+  better-conditioned measurement and use it. Once, not until it converges.
+
+Three bounds refuse rather than clamp, because a torque large enough to trip
+one is not a measurement anyone asked for:
 
 - the profile's effort limit for that joint;
 - `MAX_PROBE_FRACTION` (0.25) of that limit, so a runaway extrapolation from a
   near-zero seed deflection cannot ask for the joint's full rating;
 - the deflection must not carry the joint within `MARGIN_RAD` (0.20) of a
-  position limit, since a joint pressed into its stop reads as stiction.
+  position limit, since a joint pressed into its stop reads as stiction. This is
+  checked against the deflection asked for, and again against the one the probe
+  measured — the ceiling above only bounds torque, not travel.
 
 The probe runs once per joint at the first pose and the resulting torques are
 reused at later poses. kp is a property of the drive, not of the pose, and
