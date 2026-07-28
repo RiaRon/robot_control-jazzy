@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .identification import DEFAULT_NOISE_RAD
+
 #: Ceiling on the probe, as a fraction of the joint's rating. A seed that
 #: barely moves extrapolates to an enormous torque; the joint is rated for it
 #: and the experiment is not.
@@ -33,9 +35,23 @@ SEED_TORQUE_NM = 0.05
 #: listening at all — unpowered, braked, miswired — cannot be walked up to its
 #: rating one publish at a time while it reads as very stiff.
 MAX_SEED_DOUBLINGS = 5
-#: Below this a reading is the sensor's own noise rather than a response, and a
-#: stiffness extrapolated from it is a division by nothing.
+#: A divide-by-zero guard, and nothing more: below this the extrapolation
+#: `deflection * seed / response` has no denominator worth the name. It is far
+#: under any real encoder's noise, so it must not be used to decide whether a
+#: joint moved — `MOTION_NOISE_MARGIN` on the measured noise floor is what
+#: decides that.
 MOVED_RAD = 1e-6
+#: How many times the encoder's noise a reading must change by before the
+#: escalation calls it motion. The test is on the difference of two readings,
+#: whose noise is sqrt(2) times one reading's, so this is 3.5 sigma on the
+#: quantity actually being tested — under one false "it moved" in two thousand
+#: seeds. It has to be this conservative: a seed that reads as motion when the
+#: joint is stuck extrapolates a stiffness from pure noise, and the torque that
+#: comes out is published before anything has measured a deflection.
+#:
+#: The cost is a joint whose real motion is under the floor escalating one more
+#: step, which is the conservative direction.
+MOTION_NOISE_MARGIN = 5.0
 #: How far the deflection the probed torque actually achieved may miss the one
 #: asked for before the probe extrapolates a second time, from that better
 #: measurement. A linear spring hits the target exactly; a miss means the seed
@@ -145,7 +161,7 @@ def _hold_and_read(adapter, gate, publish, effort, hold_sec, index) -> float:
 
 def _seed_response(
     adapter, gate, publish, *,
-    index, width, effort_limit_nm, hold_sec, joint, baseline,
+    index, width, effort_limit_nm, hold_sec, joint, baseline, noise_rad,
 ) -> tuple[float, float]:
     """Find a seed the joint moves under, and the deflection it is worth.
 
@@ -185,6 +201,8 @@ def _seed_response(
         effort[index] = torque_nm
         return _hold_and_read(adapter, gate, publish, effort, hold_sec, index)
 
+    # Never below MOVED_RAD, so `--noise 0` still guards the division.
+    moved_rad = max(MOTION_NOISE_MARGIN * noise_rad, MOVED_RAD)
     seed_nm = SEED_TORQUE_NM
     for _ in range(MAX_SEED_DOUBLINGS + 1):
         moved = read(seed_nm)
@@ -193,21 +211,24 @@ def _seed_response(
             # much a part of the escalation as a retry is, and neither may
             # publish what the probe would reject.
             raise refuse_ceiling(seed_nm)
-        if abs(moved - baseline) >= MOVED_RAD:
+        if abs(moved - baseline) >= moved_rad:
             return seed_nm, read(2.0 * seed_nm) - moved
         seed_nm *= 2.0
     raise ExcitationRefused(
-        f"{joint} held still under every seed from {SEED_TORQUE_NM:g} to "
-        f"{seed_nm / 2.0:g} N.m, {MAX_SEED_DOUBLINGS} doublings and the cap. A "
-        "joint that has not moved by then is not a stiff joint, it is one that "
-        "is not listening: check that its controller is running, that it is "
-        "not braked, and that the effort command is reaching it"
+        f"{joint} moved less than {moved_rad:.2g} rad under every seed from "
+        f"{SEED_TORQUE_NM:g} to {seed_nm / 2.0:g} N.m — {MAX_SEED_DOUBLINGS} "
+        f"doublings, which is MAX_SEED_DOUBLINGS in excitation.py and the only "
+        "place that number can be raised. A joint that has not moved by then "
+        "is usually not a stiff joint but one that is not listening: check "
+        "that its controller is running, that it is not braked, and that the "
+        f"effort command is reaching it. If it is genuinely that stiff, its Fc "
+        f"is above {seed_nm / 4.0:g} N.m and this arm cannot probe it"
     )
 
 
 def _probe_peak(
     adapter, gate, publish, *,
-    index, width, limit, deflection_rad, hold_sec, joint,
+    index, width, limit, deflection_rad, hold_sec, joint, noise_rad,
 ) -> tuple[float, float]:
     """Size the staircase for one joint, and report the seed that moved it.
 
@@ -225,7 +246,7 @@ def _probe_peak(
     seed_nm, response = _seed_response(
         adapter, gate, publish,
         index=index, width=width, effort_limit_nm=limit.effort,
-        hold_sec=hold_sec, joint=joint, baseline=baseline,
+        hold_sec=hold_sec, joint=joint, baseline=baseline, noise_rad=noise_rad,
     )
 
     bounds = dict(
@@ -268,13 +289,15 @@ def _probe_peak(
 
 def measure_staircase(
     adapter, gate, group, *, joints, limits, deflection_rad, steps, hold_sec,
-    publish, announce=lambda _line: None,
+    publish, announce=lambda _line: None, noise_rad=DEFAULT_NOISE_RAD,
 ):
     """Drive each joint through its staircase and collect the rounds.
 
     *publish* is a callable taking (effort, seconds) and *announce* one taking
     a line of text; the caller owns how a torque is held and where a line goes,
-    so this stays free of ROS and of wall-clock policy.
+    so this stays free of ROS and of wall-clock policy. *noise_rad* is the
+    encoder's own noise, the same figure `identify` takes, and it is what
+    decides whether a seed moved the joint at all.
 
     Every joint but the one under test receives zero. The vendor hardware runs
     MIT mode, so the position loop is still holding the whole arm while one
@@ -289,6 +312,7 @@ def measure_staircase(
                 adapter, gate, publish,
                 index=index, width=width, limit=limits[index],
                 deflection_rad=deflection_rad, hold_sec=hold_sec, joint=name,
+                noise_rad=noise_rad,
             )
             # The seed is worth saying out loud: the joint stood still at half
             # of it and moved at it, which brackets its dry friction, and the

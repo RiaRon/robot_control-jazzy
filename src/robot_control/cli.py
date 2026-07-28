@@ -460,6 +460,14 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help="canonical joint to excite; repeatable. Default: every joint",
     )
     torque.add_argument("--hold-sec", type=float, default=DEFAULT_HOLD_SEC)
+    torque.add_argument(
+        "--noise",
+        type=float,
+        default=DEFAULT_NOISE_RAD,
+        help="radians below which a joint counts as not having moved; the "
+        "seed doubles until it moves by more than this, so an encoder coarser "
+        "than the default one needs it raised",
+    )
     torque.add_argument("--output", type=Path)
     torque.add_argument("--execute", action="store_true")
 
@@ -1125,6 +1133,7 @@ def _pose_torque(args, profile) -> int:
             # is minutes long, so it is reported as it is measured rather than
             # collected up and printed at the end.
             announce=print,
+            noise_rad=args.noise,
         )
         # The real gravity torque at each round's measured pose — the same
         # column a gravity sweep's alpha multiplies — so torque and gravity

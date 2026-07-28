@@ -139,13 +139,15 @@ class _Joint:
 
     def __init__(
         self, deflection, *, droop_rad=0.0, band_rad=0.0, latch_rad=None,
-        position=0.0,
+        position=0.0, jitter_rad=0.0, rng=None,
     ):
         self.deflection = deflection
         self.droop_rad = droop_rad
         self.band_rad = band_rad
         self.latch_rad = band_rad if latch_rad is None else latch_rad
         self.position = position
+        self.jitter_rad = jitter_rad
+        self.rng = rng
         self.held = None
 
     def error(self, torque):
@@ -154,7 +156,11 @@ class _Joint:
             self.held = target + self.latch_rad
         elif abs(target - self.held) > self.band_rad:
             self.held = target + np.sign(self.held - target) * self.band_rad
-        return self.held
+        # On the reading, not on the latch: the joint is where it is, the
+        # encoder is what is uncertain about it.
+        if self.jitter_rad <= 0.0:
+            return self.held
+        return self.held + self.rng.normal(0.0, self.jitter_rad)
 
 
 class _Arm:
@@ -281,6 +287,37 @@ def test_the_seed_doubles_until_the_joint_breaks_loose():
     published = [float(effort[0]) for effort, _seconds in arm.calls]
     assert published[:5] == [0.0, 0.05, 0.10, 0.20, 0.40]
     assert applied[:, 0].max() == pytest.approx(0.875, rel=0.05)
+
+
+def test_encoder_noise_does_not_read_as_a_joint_that_moved():
+    """One count of the 14-bit encoder is `DEFAULT_NOISE_RAD`, and it clears a
+    1e-6 rad "did it move" test every time. This joint is stuck — r_aj_2's Fc
+    0.30 is six times the seed — but on dither alone the escalation returns at
+    the first seed and extrapolates a stiffness from noise.
+
+    Two things then go wrong, and the second is the serious one. The escalation
+    never runs, so every joint announces a 0.05 N.m seed and reports nothing
+    about its stiction. And the failure is not fail-safe: a noise reading can
+    size the probe publish anywhere up to a quarter of the joint's rating, 10
+    N.m here, before any deflection has actually been measured. The re-check
+    only corrects the torque after that one has gone out.
+    """
+    from robot_control.identification import DEFAULT_NOISE_RAD
+
+    rng = np.random.default_rng(20260728)
+    for _ in range(12):
+        arm = _Arm(
+            _Joint(lambda torque: torque / 63.7, droop_rad=5.0 / 63.7,
+                   band_rad=0.3 / 63.7, latch_rad=0.0, position=0.5,
+                   jitter_rad=DEFAULT_NOISE_RAD, rng=rng)
+        )
+        said = []
+
+        _drive(arm, limit=_Limit(effort=40.0), announce=said.append)
+
+        assert "0.05 N.m seed" not in said[0], said[0]
+        loudest = max(abs(float(effort[0])) for effort, _seconds in arm.calls)
+        assert loudest < 2 * 3.485, f"published {loudest:.3f} N.m"
 
 
 def test_the_smallest_seed_that_moved_the_joint_is_announced():
