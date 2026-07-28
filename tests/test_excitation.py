@@ -259,9 +259,16 @@ def test_the_loaded_shoulder_the_seed_cannot_break_loose_is_escalated_to():
 
     Reading the seed against a zero-torque baseline turns that into an honest
     refusal, and the escalation turns the refusal into a measurement: 0.4 N.m
-    is the seed this joint needs. The true torque for 0.05 rad of real travel
-    is kp*d + Fc = 3.485 N.m — the friction has to be broken as well as the
-    spring bent — and the probe lands within a tenth of it.
+    is the seed this joint needs.
+
+    The peak is kp*d = 3.185 N.m, the elastic torque. The torque for 0.05 rad
+    of *travel* is kp*d + Fc = 3.485, since the friction has to be broken as
+    well as the spring bent, and the re-check is what would add it — but the
+    3.185 N.m probe achieves 0.04529 rad, a 9.4% miss against a
+    RECHECK_TOLERANCE of 10%, so it does not fire. That is the tolerance doing
+    what it is set to do, not an error: both torques give a staircase whose
+    steps clear the stiction band. Asserted where the code actually lands
+    rather than at a target it does not reach.
     """
     arm = _Arm(
         _Joint(lambda torque: torque / 63.7, droop_rad=5.0 / 63.7,
@@ -272,7 +279,7 @@ def test_the_loaded_shoulder_the_seed_cannot_break_loose_is_escalated_to():
 
     published = [float(effort[0]) for effort, _seconds in arm.calls]
     assert published[:5] == [0.0, 0.05, 0.10, 0.20, 0.40]
-    assert applied[:, 0].max() == pytest.approx(3.485, rel=0.1)
+    assert applied[:, 0].max() == pytest.approx(63.7 * 0.05, rel=1e-9)
 
 
 def test_the_probe_re_extrapolates_once_from_the_torque_it_probed_with():
@@ -509,8 +516,18 @@ def test_a_deflection_that_lands_inside_the_margin_is_refused():
     carries the joint into its stop is the deflection it actually gets. Here
     the joint goes slack past 0.1 N.m, so the 0.05 rad request measures out at
     1.31 rad against the 0.25 rad this pose has to spare.
+
+    The release is checked here too, and this is the path where it matters
+    most: the probe torque is still standing when the refusal is raised, which
+    on a real joint is up to a quarter of its rating. The doubling-cap refusal
+    covered by `test_the_torque_is_released_even_when_the_probe_refuses` is the
+    opposite case, where only the smallest torque of the run is out.
     """
     arm = _Arm(_Joint(_softens_beyond(0.1, 15.0, 0.5)))
 
     with pytest.raises(ExcitationRefused, match=r"r_aj_5.*margin"):
         _drive(arm, limit=_Limit(lower=-0.45, upper=0.45))
+
+    effort, seconds = arm.calls[-1]
+    assert effort.tolist() == [0.0, 0.0]
+    assert seconds > 0.0

@@ -27,13 +27,21 @@ MARGIN_RAD = 0.20
 #: latched inside its stiction band stays there until the seed exceeds Fc. So
 #: the seed doubles until the joint moves, rather than being a flag — the
 #: number an operator would have to guess is Fc, which is what the run exists
-#: to measure. The escalation measures it instead: a joint that stood still at
-#: one seed and moved at the next has its Fc bracketed between the two, and
-#: that bracket is reported.
+#: to measure. The escalation measures a bound on it instead: a joint sitting
+#: anywhere in its band moves once the seed passes `Fc - c*kp`, which is 2 Fc
+#: when it is latched at the far edge and 0 at the near one, so a seed that
+#: failed puts a floor under Fc at half itself and a seed that succeeded says
+#: nothing on its own. What is reported is therefore a floor, not a bracket:
+#: the joint stood still under half the announced seed, so Fc is at least a
+#: quarter of it. It also means the same joint at the same pose can want a
+#: different seed depending on which way it was last moved.
 SEED_TORQUE_NM = 0.05
 #: How many times the seed may double. Bounded so that a joint which is not
 #: listening at all — unpowered, braked, miswired — cannot be walked up to its
-#: rating one publish at a time while it reads as very stiff.
+#: rating one publish at a time while it reads as very stiff. Five doublings
+#: reach 1.6 N.m, which covers Fc up to 0.8 N.m for a joint latched at the far
+#: edge of its band and up to 1.6 for one latched at the near edge. Every joint
+#: on this arm sits at Fc <= 0.30.
 MAX_SEED_DOUBLINGS = 5
 #: A divide-by-zero guard, and nothing more: below this the extrapolation
 #: `deflection * seed / response` has no denominator worth the name. It is far
@@ -341,9 +349,9 @@ def measure_staircase(
                 noise_rad=noise_rad,
             )
             # The seed is worth saying out loud: the joint stood still under
-            # half of it, which puts a floor under its dry friction, and the
-            # ratio between joints is the first look at the arm's stiction a
-            # run gives.
+            # half of it, so its dry friction is at least a quarter of what is
+            # printed (see SEED_TORQUE_NM), and the ratio between joints is the
+            # first look at the arm's stiction a run gives.
             announce(
                 f"  {name}: moved under a {seed_nm:g} N.m seed, staircase peak "
                 f"{peak:.3f} N.m"
