@@ -1490,6 +1490,95 @@ noting which joints the staircase covered.
 
 ---
 
+### Task 11: Let `identify` run the staircase fit too
+
+Added after Task 9, whose review exposed the gap. Task 10's Step 5 already
+expects "Fc and Fo reported for every joint the staircase covered", but no task
+wires `fit_staircase` into `identify`. Without this the staircase measures Fc
+and Fo and nothing carries them: `_identify` calls only `fit_static_gravity`,
+which leaves `coulomb_nm` and `bias_nm` unset, while `fit_staircase`'s own
+estimate has an all-NaN `torque_scale` and `write_static_estimate` refuses it.
+
+**Files:**
+- Modify: `src/robot_control/cli.py` (`_identify`, `_report_static`)
+- Test: `tests/test_cli_identify.py`
+
+**Interfaces:**
+- Consumes: `fit_static_gravity`, `fit_staircase` (Task 7),
+  `StaticEstimate.coulomb_nm` / `.bias_nm`.
+- Produces: no new public function. `identify` writes an estimate whose
+  `coulomb_nm` and `bias_nm` are populated for the joints a staircase covered.
+
+- [ ] **Step 1: Write the failing test**
+
+Two tests in `tests/test_cli_identify.py`, using that file's existing fixtures.
+One drives `main(["r2s", "identify", ...])` over a mix of gravity sweeps and one
+staircase sweep and asserts the written estimate carries a finite `coulomb_nm`
+for the staircase's joint and NaN elsewhere. One asserts that a run with no
+staircase sweep still succeeds and writes the same numbers it wrote before —
+the regression guard, since every existing caller passes gravity sweeps only.
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Expected: the first fails because `coulomb_nm` is `None` on the estimate
+`fit_static_gravity` returned.
+
+- [ ] **Step 3: Split the sweeps and fit both ways**
+
+In `_identify`, after `measured` is read and before `fit_static_gravity`:
+
+- A staircase sweep is one whose `scales` are all zero **and** whose
+  `applied_torque` varies. `pose torque` writes exactly that: it publishes no
+  fraction of the model, so `scales` is zeros, and the staircase is the whole
+  point of the run. Checking both conditions keeps a degenerate gravity sweep —
+  every round at scale zero, which excites nothing — from being mistaken for one.
+- `fit_static_gravity` keeps receiving **every** sweep, gravity and staircase
+  alike. That is the joint fit the spec's A3 describes: gravity sweeps vary the
+  model column and pin `alpha`, staircase sweeps vary the applied-torque column
+  and pin `kp`. It is also what keeps `torque_scale` finite, so the result can
+  still be written.
+- `fit_staircase` receives only the staircase sweeps, and only if there are any.
+  Its `stiffness` is a second opinion, not the record; take only `coulomb_nm`
+  and `bias_nm` from it and fold them into the gravity fit's estimate with
+  `dataclasses.replace`.
+- A joint the staircase could not identify keeps NaN in those two fields. That
+  must **not** fail the whole run: `fit_staircase`'s `unidentifiable` entries are
+  about Fc and Fo alone, and the existing refusal on `estimate.unidentifiable`
+  belongs to the gravity fit, which owns `kp`. Print the staircase's reasons,
+  then continue.
+- If `fit_staircase` raises `FitError`, report it and continue with the gravity
+  fit's estimate rather than losing the whole run.
+
+- [ ] **Step 4: Report the two stiffness measurements side by side**
+
+`_report_static` gains `Fc` and `Fo` columns, and prints the staircase's own
+stiffness beside the gravity fit's where both exist. The spec's rule for the two
+Coulomb measurements applies here for the same reason: a large disagreement is
+evidence about the model rather than about the arm, and silently preferring one
+would hide it. Use the file's existing `'—'` convention for a joint with no
+staircase value.
+
+- [ ] **Step 5: Run the whole suite**
+
+Run: `python3 -m pytest -q`. Report the count.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/robot_control/cli.py tests/test_cli_identify.py
+git commit -F - <<'EOF'
+feat: identify가 계단 적합도 함께 돌린다
+
+계단이 Fc와 Fo를 재도 실어 나를 그릇이 없었다. identify는 fit_static_gravity만
+불렀고, fit_staircase의 추정치는 torque_scale이 전부 NaN이라 저장이 거부된다.
+스윕을 갈라 중력·계단 전부를 중력 적합에(스펙 A3의 결합 적합), 계단만 계단
+적합에 넣고 Fc·Fo만 가져와 합친다. kp는 중력 적합 쪽이 기록이고 계단의 kp는
+나란히 보고만 한다 — 크게 어긋나면 그건 팔이 아니라 모델에 대한 증거다.
+EOF
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage:** A1 → Tasks 4, 5, 6. A2 → Tasks 1, 2. A3 → Task 3. B1 →
