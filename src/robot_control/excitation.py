@@ -75,6 +75,15 @@ RECHECK_TOLERANCE = 0.10
 RELEASE_HOLD_SEC = 0.25
 
 
+#: Fewest staircase steps a run can be fitted from. `staircase` needs only 2 to
+#: build a list, but the fit needs two rounds on each branch after the arrival
+#: is dropped, and at exactly 3 the first recorded torque is the staircase's own
+#: zero (-peak, 0, +peak, 0, -peak): the fitter trims a leading zero-torque
+#: round as belonging to no joint's block, which leaves the rising branch with
+#: one. 4 and up are fitted exactly.
+MIN_STAIRCASE_STEPS = 4
+
+
 class ExcitationRefused(ValueError):
     """A torque the experiment will not publish, naming the bound it broke."""
 

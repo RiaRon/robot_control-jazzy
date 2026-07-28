@@ -47,7 +47,7 @@ from .identification import (
     split_repetitions,
     validate_holdout,
 )
-from .excitation import measure_staircase
+from .excitation import MIN_STAIRCASE_STEPS, measure_staircase
 from .hdgp_export import (
     DEFAULT_MAX_SPREAD,
     HdgpExportError,
@@ -1106,6 +1106,14 @@ def _pose_torque(args, profile) -> int:
         )
     if args.hold_sec <= 0:
         raise ValueError("--hold-sec must be positive")
+    if args.steps < MIN_STAIRCASE_STEPS:
+        raise ValueError(
+            f"--steps {args.steps} writes a sweep that cannot be fitted; the "
+            f"fewest that can is {MIN_STAIRCASE_STEPS}. Each branch needs two "
+            "rounds, and the first torque is not recorded — the joint arrives "
+            "at it from the probe travelling the wrong way for that branch — "
+            "so a shorter run costs a trip to the robot and produces nothing"
+        )
     if args.output is not None and not args.execute:
         raise ValueError(
             "--output records what the arm measured, so it needs --execute; a "

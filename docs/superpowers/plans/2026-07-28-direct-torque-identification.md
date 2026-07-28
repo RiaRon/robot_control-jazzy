@@ -1450,7 +1450,7 @@ Bring up with `use_fake_hardware:=false`, then `robotctl pose ready --execute`,
 then:
 
 ```bash
-robotctl pose torque --group openarm_right_arm --joint r_aj_5 --steps 3
+robotctl pose torque --group openarm_right_arm --joint r_aj_5 --steps 4
 ```
 Expected: prints the plan and "DRY RUN: nothing published". The arm does not move.
 
@@ -1458,10 +1458,10 @@ Expected: prints the plan and "DRY RUN: nothing published". The arm does not mov
 
 ```bash
 ./ros_ws/load_effort_controllers.sh right
-robotctl pose torque --group openarm_right_arm --joint r_aj_5 --steps 3 \
+robotctl pose torque --group openarm_right_arm --joint r_aj_5 --steps 4 \
     --execute --output ~/r2s/sweeps/torque0.json
 ```
-Expected: the probe converges, five rounds run, "torque released" prints, and
+Expected: the probe converges, six rounds run, "torque released" prints, and
 the arm ends where it started. Watch the joint: it should rock a few degrees
 either side, not lunge.
 

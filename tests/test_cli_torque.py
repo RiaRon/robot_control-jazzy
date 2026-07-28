@@ -95,7 +95,7 @@ def profile():
 
 def test_it_drives_one_joint_at_a_time(arm, tmp_path):
     code = main(["pose", "torque", "--group", GROUP, "--execute",
-                 "--steps", "3", "--hold-sec", "0.01",
+                 "--steps", "4", "--hold-sec", "0.01",
                  "--output", str(tmp_path / "t.json")])
 
     assert code == 0
@@ -107,7 +107,7 @@ def test_it_drives_one_joint_at_a_time(arm, tmp_path):
 
 
 def test_it_releases_the_torque_when_it_finishes(arm, tmp_path):
-    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
           "--hold-sec", "0.01", "--output", str(tmp_path / "t.json")])
 
     assert arm.published[-1].tolist() == [0.0] * 7
@@ -117,14 +117,14 @@ def test_the_sweep_it_writes_records_the_torque_and_not_a_scale(arm, tmp_path, p
     from robot_control.artifacts import read_sweep
 
     output = tmp_path / "t.json"
-    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
           "--hold-sec", "0.01", "--joint", "r_aj_5", "--output", str(output)])
 
     sweep = read_sweep(output, profile)
     # One fewer than the staircase's 2*steps - 1 torques: the joint arrives at
     # the first one from the probe, travelling the wrong way for the branch it
     # would be read on, so it is held but not recorded.
-    assert sweep.rounds == 2 * 3 - 2
+    assert sweep.rounds == 2 * 4 - 2
     assert np.count_nonzero(sweep.scales) == 0
     assert np.ptp(sweep.applied_torque[:, 4]) > 0
 
@@ -136,12 +136,26 @@ def test_it_reports_the_seed_each_joint_needed(arm, tmp_path, capsys):
     joints, rather than have to work it out afterwards. This stub arm has no
     friction at all, so every joint moves under the first seed.
     """
-    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+    main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
           "--hold-sec", "0.01", "--output", str(tmp_path / "t.json")])
 
     out = capsys.readouterr().out
     assert out.count("N.m seed") == len(KP)
     assert "r_aj_5: moved under a 0.05 N.m seed" in out
+
+
+def test_a_staircase_too_short_to_fit_is_refused(arm, tmp_path, capsys):
+    """--steps 3 writes a sweep that cannot be fitted: its first recorded round
+    carries zero torque, which leaves the rising branch one round short. The
+    run is refused at the desk rather than discovered after a trip to the
+    robot, on the fit that comes hours later.
+    """
+    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+                 "--hold-sec", "0.01", "--output", str(tmp_path / "t.json")])
+
+    assert code == 2
+    assert "--steps" in capsys.readouterr().out
+    assert arm.published == []
 
 
 def test_a_joint_named_twice_is_refused(arm, tmp_path, capsys):
@@ -150,7 +164,7 @@ def test_a_joint_named_twice_is_refused(arm, tmp_path, capsys):
     driven in between — the same fit-poisoning that reading a whole file as
     one staircase caused, through a different door.
     """
-    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "3",
+    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
                  "--hold-sec", "0.01", "--joint", "r_aj_5", "--joint", "r_aj_5",
                  "--output", str(tmp_path / "t.json")])
 
@@ -160,5 +174,5 @@ def test_a_joint_named_twice_is_refused(arm, tmp_path, capsys):
 
 
 def test_a_dry_run_publishes_nothing(arm, tmp_path):
-    assert main(["pose", "torque", "--group", GROUP, "--steps", "3"]) == 0
+    assert main(["pose", "torque", "--group", GROUP, "--steps", "4"]) == 0
     assert arm.published == []

@@ -86,8 +86,10 @@ robotctl pose torque --group openarm_right_arm --execute \
   sits on the descending equilibrium, a full `2 Fc/kp` off the ascending line
   the fit would read it on. It is held like any other round and not recorded,
   which leaves every recorded round reached moving the way its branch says.
-  `--steps 3` is therefore the smallest run that gives each branch the two
-  rounds the fit needs.
+  `--steps 4` is the smallest run that can be fitted, and anything below it is
+  refused: each branch needs two rounds, and at exactly 3 the first recorded
+  torque is the staircase's own zero, which the fit trims as belonging to no
+  joint's block, leaving the rising branch with one.
 - `--joint` (repeatable, default every joint in the group): which joints to
   excite.
 
@@ -108,8 +110,11 @@ arrived says anything about kp. For each joint:
   band moves it not at all, and `SEED_TORQUE_NM` (0.05) is below every Fc on
   this arm, so the seed doubles until the joint moves — bounded by
   `MAX_PROBE_FRACTION` of the rating and by `MAX_SEED_DOUBLINGS`, refusing at
-  either. The smallest seed that moved the joint is reported: it stood still at
-  half that torque, so its Fc is bracketed between the two;
+  either. The smallest seed that moved the joint is reported: it stood still
+  under half that torque, which puts a floor under its Fc at a quarter of it.
+  A floor and not a bracket — a joint latched at the near edge of its band
+  moves under any seed at all, so the seed that succeeded bounds nothing by
+  itself;
 - double that seed once more and difference the two readings. Both were taken
   moving the same way, so the Coulomb offset cancels and the difference is the
   elastic `seed/kp`. Extrapolating from the breaking-loose reading alone would
@@ -270,7 +275,7 @@ Unit, against the existing pytest suite (381 passing today):
 
 Hardware, on the right arm, in order:
 
-1. `pose torque` at one pose, `--steps 3`, one wrist joint, dry run first.
+1. `pose torque` at one pose, `--steps 4`, one wrist joint, dry run first.
 2. The same with `--execute`, confirming the probe converges and the arm returns
    to its start.
 3. A full run at three poses, fitted jointly with the nine gravity sweeps, with

@@ -463,11 +463,52 @@ def test_what_a_run_records_inverts_back_to_the_joint_it_drove(
     assert estimate.coulomb_nm[0] == pytest.approx(coulomb, rel=1e-9)
 
 
+@pytest.mark.parametrize("steps", [4, 5, 7])
+def test_every_staircase_length_the_cli_allows_fits(steps):
+    """The shortest run `pose torque` accepts has to be one that can be fitted,
+    which is what MIN_STAIRCASE_STEPS is for."""
+    from robot_control.excitation import MIN_STAIRCASE_STEPS
+
+    assert steps >= MIN_STAIRCASE_STEPS
+    arm = _Arm(
+        _Joint(lambda torque: torque / 15.1, droop_rad=0.03 / 15.1,
+               band_rad=0.10 / 15.1, latch_rad=0.0)
+    )
+
+    estimate = _fit(*_drive(arm, steps=steps, limit=_Limit(effort=10.0)))
+
+    assert estimate.stiffness[0] == pytest.approx(15.1, rel=1e-9)
+    assert estimate.coulomb_nm[0] == pytest.approx(0.10, rel=1e-9)
+
+
+def test_a_three_step_staircase_records_a_sweep_that_cannot_be_fitted():
+    """Why the minimum is 4 rather than 3. At steps=3, and only there, the
+    staircase's second torque is its zero: -peak, 0, +peak, 0, -peak. Drop the
+    arrival and the first *recorded* round carries no torque, so
+    `_driven_rounds` trims it as belonging to no joint's block, and what is
+    left is 1 rising round against the two a line needs.
+
+    Pinned because the run would otherwise write a file that `identify` fits
+    to nan and `write_static_estimate` then refuses — a wasted trip to the
+    robot, discovered at the desk.
+    """
+    arm = _Arm(
+        _Joint(lambda torque: torque / 15.1, droop_rad=0.03 / 15.1,
+               band_rad=0.10 / 15.1, latch_rad=0.0)
+    )
+
+    _poses, applied, _errors = _drive(arm, steps=3, limit=_Limit(effort=10.0))
+    estimate = _fit(_poses, applied, _errors)
+
+    assert applied[0, 0] == 0.0
+    assert np.isnan(estimate.stiffness[0])
+    assert any("1 rising" in reason for _name, reason in estimate.unidentifiable)
+
+
 def test_the_arrival_at_the_first_torque_is_held_but_not_recorded():
     """A staircase of `steps` visits 2*steps - 1 torques and records one fewer,
     because the first is where the joint arrives from the probe rather than a
-    round it was measured at. Both branches keep steps - 1 rounds, so the
-    fitter's two-per-branch minimum still admits --steps 3.
+    round it was measured at. Both branches keep steps - 1 rounds.
     """
     arm = _Arm(_Joint(lambda torque: torque / 15.0))
 
