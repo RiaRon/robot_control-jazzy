@@ -165,7 +165,10 @@ class StaticEstimate:
     joint_names: tuple[str, ...]
     #: kp, N.m/rad.
     stiffness: np.ndarray
-    #: alpha: the factor the modelled gravity torque was wrong by.
+    #: alpha: the factor the modelled gravity torque was wrong by. ``nan`` for
+    #: a joint whose model was zero at every used round even when stiffness
+    #: was still identified from the applied torque: alpha multiplies that
+    #: zero model, so no value of it is distinguishable from any other.
     torque_scale: np.ndarray
     #: c, rad: the scale-independent standing error, which is where stiction is.
     offset: np.ndarray
@@ -398,11 +401,19 @@ def fit_static_gravity(
         design = np.asarray(rows, dtype=float)
         # A joint the model says carries no gravity torque at any used round
         # has a by_stiffness column of exact zeros: alpha is not merely hard
-        # to pin down, it multiplies nothing and is undefined. Left in, that
-        # column turns a fittable two-parameter design into a design
-        # `_condition` can only ever report as an exact singularity. Fit what
-        # the applied torque actually resolves — stiffness and offset — and
-        # leave the torque-model correction at its unidentified default.
+        # to pin down, it multiplies nothing, so every value fits the data
+        # equally well and none of them is "the" answer. Left in, that column
+        # turns a fittable two-parameter design into one `_condition` can only
+        # ever report as an exact singularity. Fit what the applied torque
+        # actually resolves — stiffness and offset — and leave the
+        # torque-model correction at its unidentified default, `nan`, same as
+        # every other parameter this function cannot pin down.
+        #
+        # This only catches the column being bit-exact zero. A model that is
+        # merely small — the realistic case for, say, a wrist near-aligned
+        # with gravity — still takes the three-column path below and lives or
+        # dies by `max_condition`, unchanged from before this function read
+        # applied_torque directly.
         has_model = bool(np.any(design[:, 0]))
         fit_design = design if has_model else design[:, 1:]
         condition[joint] = _condition(fit_design)
@@ -427,7 +438,7 @@ def fit_static_gravity(
         if has_model:
             by_stiffness, inverse_stiffness, constant = (float(value) for value in params)
         else:
-            by_stiffness = 0.0
+            by_stiffness = float("nan")
             inverse_stiffness, constant = (float(value) for value in params)
         if inverse_stiffness <= 0:
             unidentifiable.append(

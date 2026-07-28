@@ -1319,14 +1319,21 @@ def _identify(args, profile) -> int:
         )
         return REFUSED
 
-    write_static_estimate(
-        args.output,
-        estimate,
-        profile,
-        group=measured[0].group,
-        noise_rad=args.noise,
-        sources=[sweep_sha256(sweep) for sweep in measured],
-    )
+    try:
+        write_static_estimate(
+            args.output,
+            estimate,
+            profile,
+            group=measured[0].group,
+            noise_rad=args.noise,
+            sources=[sweep_sha256(sweep) for sweep in measured],
+        )
+    except ArtifactError as error:
+        # A joint can pass the `unidentifiable` gate above (its stiffness fit
+        # succeeded) and still leave the writer refusing: torque_scale
+        # undetermined, which the gate above cannot see from stiffness alone.
+        print(f"refused: {error}")
+        return REFUSED
     print(f"identify: {args.output}")
     return 0
 
@@ -2080,8 +2087,14 @@ def _report_static(estimate, poses: int) -> None:
         if not np.isfinite(stiffness):
             print(f"  {name:<16} {'—':>12}")
             continue
+        # alpha alone can be nan here even though stiffness was identified:
+        # a joint whose model was zero at every used round. Same "—" the
+        # fully-unidentified row above uses, not a bare nan next to numbers
+        # that are all real answers.
+        alpha = estimate.torque_scale[index]
+        alpha_column = f"{alpha:7.3f}" if np.isfinite(alpha) else f"{'—':>7}"
         print(
-            f"  {name:<16} {stiffness:12.2f} {estimate.torque_scale[index]:7.3f} "
+            f"  {name:<16} {stiffness:12.2f} {alpha_column} "
             f"{estimate.offset[index]:+14.5f} {estimate.residual_rmse[index]:15.5f} "
             f"{estimate.condition[index]:6.1f} {estimate.used[index]:7d} "
             f"{estimate.excluded[index]:7d}"

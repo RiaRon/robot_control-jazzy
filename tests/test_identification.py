@@ -223,6 +223,9 @@ def test_the_fit_reads_the_applied_torque_rather_than_recomputing_it():
     estimate = fit_static_gravity([sweep])
 
     assert estimate.stiffness[0] == pytest.approx(kp, rel=1e-6)
+    # alpha multiplies a column of exact zeros here: no value of it changes
+    # the prediction, so it is genuinely undefined rather than merely 0.
+    assert np.isnan(estimate.torque_scale[0])
 
 
 def test_the_generalised_regression_reproduces_the_measured_estimate(profile):

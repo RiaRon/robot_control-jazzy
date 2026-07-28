@@ -139,6 +139,71 @@ def test_identify_requires_an_output(tmp_path, profile, capsys):
     assert "--output" in capsys.readouterr().out
 
 
+def _poses_with_zero_model_joint(tmp_path, profile, joint, torques=(1.0, 3.0, 5.0)):
+    """Poses like `_poses`, except one joint's model is exactly zero at every
+    round and its applied torque instead sweeps independently — the direct-
+    torque scenario Task 3 exists for, where stiffness is identifiable but the
+    torque-model correction (alpha) genuinely is not."""
+    joints = profile.groups[GROUP].joints
+    width = len(joints)
+    kp, alpha, offset = _truth(width)
+    index = joints.index(joint)
+    zero_applied = np.linspace(-0.6, 0.6, len(SCALES))
+
+    paths = []
+    for pose_index, torque in enumerate(torques):
+        path = tmp_path / f"pose{pose_index}.json"
+        pose_torques = np.full(width, torque) * np.linspace(1.0, 2.0, width)
+        modelled = np.tile(pose_torques, (len(SCALES), 1))
+        grid = np.array([[scale] * width for scale in SCALES])
+        applied = grid * modelled
+        modelled[:, index] = 0.0
+        applied[:, index] = zero_applied
+        errors = (alpha - grid) * modelled / kp + offset
+        errors[:, index] = -applied[:, index] / kp[index] + offset[index]
+        write_sweep(
+            path,
+            GravitySweep(
+                group=GROUP,
+                joint_names=joints,
+                poses=np.zeros_like(modelled),
+                modelled_torque=modelled,
+                scales=grid,
+                applied_torque=applied,
+                errors=errors,
+            ),
+            profile,
+        )
+        paths.append(str(path))
+    return paths
+
+
+def test_identify_reports_but_refuses_to_write_an_undetermined_alpha(
+    tmp_path, profile, capsys
+):
+    """r_aj_5's model is zero at every round: its stiffness is still
+    identified from the applied torque directly, but alpha multiplies a zero
+    column and is genuinely undetermined, not merely 0. The report must show
+    it the same way it already shows any other unidentified value — not a
+    bare 'nan' next to plausible numbers — and the file must not be written,
+    since a hole in torque_scale is exactly the kind of hole `_identify`'s own
+    docstring says it refuses rather than reports."""
+    output = tmp_path / "static.json"
+    paths = _poses_with_zero_model_joint(tmp_path, profile, joint="r_aj_5")
+
+    code = main(_argv(paths, output))
+
+    out = capsys.readouterr().out
+    assert "r_aj_5" in out
+    assert "nan" not in out.lower()
+    kp, _alpha, _offset = _truth(len(profile.groups[GROUP].joints))
+    zero_index = profile.groups[GROUP].joints.index("r_aj_5")
+    # Its stiffness is still reported: this is not the fully-unidentified path.
+    assert f"{kp[zero_index]:.2f}" in out
+    assert code == 3
+    assert not output.exists()
+
+
 def test_identify_refuses_a_sweep_from_another_asset(tmp_path, profile, capsys):
     output = tmp_path / "static.json"
     paths = _poses(tmp_path, profile)

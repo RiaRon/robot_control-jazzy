@@ -297,6 +297,29 @@ def test_an_incomplete_static_estimate_is_never_written(profile, tmp_path):
     assert not path.exists()
 
 
+def test_a_static_estimate_with_undetermined_alpha_is_never_written(profile, tmp_path):
+    """torque_scale can be nan for a joint that is not in `unidentifiable` at
+    all -- its stiffness fit succeeded, only alpha (a zero-model column) did
+    not. Writing that nan would crash the json encoder rather than refuse
+    cleanly, since json.dumps(allow_nan=False) does not raise ArtifactError."""
+    from robot_control.artifacts import write_static_estimate
+
+    original = _estimate(profile)
+    holed = dataclasses.replace(
+        original,
+        torque_scale=np.where(
+            np.arange(len(original.joint_names)) == 2, np.nan, original.torque_scale
+        ),
+    )
+    path = tmp_path / "static.json"
+
+    with pytest.raises(ArtifactError, match="r_aj_3"):
+        write_static_estimate(
+            path, holed, profile, group=GROUP, noise_rad=4e-4, sources=[]
+        )
+    assert not path.exists()
+
+
 def test_a_static_estimate_is_refused_against_another_asset(profile, tmp_path):
     from robot_control.artifacts import read_static_estimate, write_static_estimate
 

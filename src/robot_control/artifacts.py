@@ -222,6 +222,22 @@ def write_static_estimate(
             "refusing to write an incomplete estimate; unidentified: "
             + ", ".join(name for name, _reason in estimate.unidentifiable)
         )
+    # A joint can clear the check above (its stiffness fit succeeded) with
+    # torque_scale still nan: its gravity model was zero at every used round,
+    # so alpha was never determined. `unidentifiable` does not see this hole —
+    # by the definitions above the joint *was* identified — but `_fit`'s
+    # gravity column would still read the nan back as a number.
+    undetermined_alpha = [
+        name
+        for index, name in enumerate(estimate.joint_names)
+        if not np.isfinite(estimate.torque_scale[index])
+    ]
+    if undetermined_alpha:
+        raise ArtifactError(
+            "refusing to write an incomplete estimate; torque_scale "
+            "undetermined (gravity model was zero at every used round): "
+            + ", ".join(undetermined_alpha)
+        )
     payload = _header(STATIC_KIND, STATIC_SCHEMA_VERSION, profile)
     payload.update(
         {
