@@ -377,6 +377,29 @@ def test_the_escalation_stops_at_the_ceiling_the_probe_itself_refuses_at():
     assert published[:5] == [0.0, 0.05, 0.10, 0.20, 0.40]
 
 
+def test_a_joint_that_moves_but_cannot_be_confirmed_is_not_called_stuck():
+    """Rated 2 N.m the ceiling is 0.5, and this joint (Fc 0.35) breaks loose at
+    0.4 — under the ceiling — but its confirming step at 0.8 is over it. There
+    is still no measurement to be had, because extrapolating from the
+    breaking-loose reading alone divides by (seed - Fc).
+
+    The refusal has to say that, though, and not that the joint held still or
+    that its friction exceeds a quarter of its rating. Both are false here —
+    0.35 is 17% of 2 N.m — and an operator reading them concludes the joint is
+    faulty and goes looking for a fault that is not there.
+    """
+    arm = _Arm(_Joint(lambda torque: torque / 15.1, band_rad=0.35 / 15.1,
+                      latch_rad=0.0))
+
+    with pytest.raises(ExcitationRefused) as refusal:
+        _drive(arm, limit=_Limit(effort=2.0))
+
+    said = str(refusal.value)
+    assert "moved under 0.4 N.m" in said, said
+    assert "held still" not in said, said
+    assert "more than a quarter" not in said, said
+
+
 def test_the_escalation_is_capped_before_it_reaches_a_generous_ceiling():
     """Rated 40 N.m the ceiling is 10, which doubling would take a while to
     reach — and a joint that has not moved by the cap is not a stiff joint,

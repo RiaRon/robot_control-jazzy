@@ -192,15 +192,32 @@ def _seed_response(
     """
     ceiling_nm = MAX_PROBE_FRACTION * effort_limit_nm
 
-    def refuse_ceiling(largest_nm: float) -> ExcitationRefused:
-        return ExcitationRefused(
-            f"{joint} needs a seed over the {ceiling_nm:.3f} N.m ceiling the "
+    def at_ceiling(seed_nm: float) -> str:
+        return (
+            f"{2.0 * seed_nm:g} N.m, over the {ceiling_nm:.3f} N.m ceiling the "
             f"probe refuses at ({MAX_PROBE_FRACTION:.0%} of its "
-            f"{effort_limit_nm:g} N.m rating): {largest_nm:g} N.m is as far as "
-            f"the escalation may go and the next step would be "
-            f"{2.0 * largest_nm:g} N.m. Its dry friction is more than a "
-            "quarter of what the joint is rated for, which is a finding about "
-            "the joint rather than a run to retry with a bigger number"
+            f"{effort_limit_nm:g} N.m rating)"
+        )
+
+    def refuse_stuck(seed_nm: float) -> ExcitationRefused:
+        return ExcitationRefused(
+            f"{joint} held still under seeds up to {seed_nm:g} N.m and the "
+            f"next would be {at_ceiling(seed_nm)}. Its dry friction is more "
+            "than a quarter of what the joint is rated for, which is a finding "
+            "about the joint rather than a run to retry with a bigger number"
+        )
+
+    def refuse_unconfirmed(seed_nm: float) -> ExcitationRefused:
+        # Distinct from `refuse_stuck` because both of that message's claims
+        # would be false here: this joint moved, and its friction can be well
+        # under a quarter of the rating and still land on this branch.
+        return ExcitationRefused(
+            f"{joint} moved under {seed_nm:g} N.m, but sizing its staircase "
+            f"needs a second reading at {at_ceiling(seed_nm)}. The first "
+            "reading alone carries the joint's whole dry friction, and "
+            "extrapolating from it divides by (seed - Fc), so there is no "
+            "measurement to be had at this pose: raise the joint's rating or "
+            "accept that this one cannot be probed"
         )
 
     def read(torque_nm: float) -> float:
@@ -212,14 +229,16 @@ def _seed_response(
     moved_rad = max(MOTION_NOISE_MARGIN * noise_rad, MOVED_RAD)
     seed_nm = SEED_TORQUE_NM
     for _ in range(MAX_SEED_DOUBLINGS + 1):
-        moved = read(seed_nm)
+        reading = read(seed_nm)
+        broke_loose = abs(reading - baseline) >= moved_rad
         if 2.0 * seed_nm > ceiling_nm:
-            # Whether the joint moved or not: the confirming step below is as
-            # much a part of the escalation as a retry is, and neither may
-            # publish what the probe would reject.
-            raise refuse_ceiling(seed_nm)
-        if abs(moved - baseline) >= moved_rad:
-            return seed_nm, read(2.0 * seed_nm) - moved
+            # Whether the joint moved or not: the confirming step is as much a
+            # part of the escalation as a retry is, and neither may publish
+            # what the probe would reject. Which of the two happened decides
+            # what the operator is told, not whether this refuses.
+            raise refuse_unconfirmed(seed_nm) if broke_loose else refuse_stuck(seed_nm)
+        if broke_loose:
+            return seed_nm, read(2.0 * seed_nm) - reading
         seed_nm *= 2.0
     raise ExcitationRefused(
         f"{joint} moved less than {moved_rad:.2g} rad under every seed from "
