@@ -55,8 +55,11 @@ def probe_torque(
     wanted = abs(deflection_rad * seed_torque_nm / seed_deflection_rad)
 
     # Position first: a pose with no room is a pose problem, not a torque one.
+    # The staircase deflects the joint to both sides of position_rad, so the
+    # tighter of the two sides is what binds, regardless of which side this
+    # particular step is headed for.
     room = min(position_rad - lower_rad, upper_rad - position_rad) - MARGIN_RAD
-    if abs(deflection_rad) > room:
+    if deflection_rad > room:
         raise ExcitationRefused(
             f"{joint} has {room:.3f} rad to a position limit before its "
             f"{MARGIN_RAD:g} rad margin, less than the {deflection_rad:g} rad "
