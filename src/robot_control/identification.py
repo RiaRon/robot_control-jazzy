@@ -88,6 +88,19 @@ class CombinedEstimate:
     #: rebuilds this from a fit file predating this field (`r2s bundle`
     #: reading an older `--fit` JSON) has no bias to report, not a zero one.
     bias: np.ndarray | None = None
+    #: Fc, N.m: the static fit's own measurement, carried through unscaled —
+    #: it is already a torque, not a per-inertia coefficient like `friction`.
+    #: None when the static fit behind this estimate never measured one (a
+    #: gravity-sweep StaticEstimate never touches a staircase at all) or when
+    #: rebuilt from a fit file predating this field.
+    coulomb_nm: np.ndarray | None = None
+    #: Fo + tau_gravity(pose), N.m: the static fit's own bias, carried through
+    #: unscaled. Distinct from `bias` above, which is Fo alone scaled by the
+    #: dynamic fit's inertia — this one still has the pose's gravity torque in
+    #: it, because it is where the staircase's midline crosses zero rather
+    #: than a term the gravity column separated out. None for the same
+    #: reasons as `coulomb_nm`.
+    static_bias_nm: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -919,6 +932,11 @@ def combine(
         stiffness=static.stiffness.copy(),
         inertia_from_gravity=from_gravity,
         disagreement=np.abs(from_gravity - inertia) / inertia,
+        # Passed through as-is rather than scaled: these two are already
+        # torques, measured directly by the static fit, not ratios to an
+        # inertia this function's arithmetic would need to remove.
+        coulomb_nm=static.coulomb_nm,
+        static_bias_nm=static.bias_nm,
     )
 
 

@@ -159,7 +159,8 @@ def test_fit_with_a_static_estimate_reports_physical_parameters(
          "--static", str(static), "--urdf", str(urdf)]
     )
 
-    assert code == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert code == 0, out
     payload = json.loads(output.read_text())
     np.testing.assert_allclose(payload["inertia_kg_m2"], INERTIA, rtol=0.05)
     np.testing.assert_allclose(payload["damping_nm_s_per_rad"], DAMPING, rtol=0.05)
@@ -168,6 +169,65 @@ def test_fit_with_a_static_estimate_reports_physical_parameters(
     # The second, independent route to the same inertia.
     np.testing.assert_allclose(payload["inertia_from_gravity_kg_m2"], INERTIA, rtol=0.05)
     assert max(payload["inertia_disagreement"]) < 0.05
+    # Fo, computed by `combine` alongside everything above; the track's own
+    # simulation carries no bias term, so it should come back near zero.
+    assert "bias_nm" in payload
+    np.testing.assert_allclose(payload["bias_nm"], 0.0, atol=0.05)
+    # The static estimate here is a gravity sweep, which never touches a
+    # staircase — its own Fc and Fo are unmeasured, not zero.
+    assert np.all(np.isnan(payload["coulomb_nm"]))
+    assert np.all(np.isnan(payload["static_bias_nm"]))
+    assert "Fo (N.m)" in out
+    assert "landed in bias" not in out
+
+
+def test_fit_carries_a_static_estimates_own_coulomb_and_bias_through(
+    monkeypatch, track, urdf, profile, tmp_path, capsys
+):
+    """Plumbing only: the file round trip for a staircase-backed static
+    estimate does not exist yet (`write_static_estimate` refuses one), so this
+    exercises `_fit` with a `StaticEstimate` built in-process instead."""
+    import dataclasses
+
+    import robot_control.artifacts as artifacts_module
+
+    static = _static(tmp_path / "static.json", profile)
+    artifact = artifacts_module.read_static_estimate(static, profile)
+    seeing = dataclasses.replace(
+        artifact,
+        estimate=dataclasses.replace(
+            artifact.estimate,
+            coulomb_nm=np.full(7, 0.08),
+            bias_nm=np.full(7, 0.3),
+        ),
+    )
+    monkeypatch.setattr(
+        "robot_control.cli.read_static_estimate", lambda _path, _profile: seeing
+    )
+    output = tmp_path / "estimate.json"
+
+    code = main(
+        ["r2s", "fit", "--track", "t.h5", "--output", str(output),
+         "--static", str(static), "--urdf", str(urdf)]
+    )
+
+    assert code == 0, capsys.readouterr().out
+    payload = json.loads(output.read_text())
+    np.testing.assert_allclose(payload["coulomb_nm"], 0.08)
+    np.testing.assert_allclose(payload["static_bias_nm"], 0.3)
+
+
+def test_fit_without_static_warns_that_any_standing_load_landed_in_bias(
+    level_track, tmp_path, capsys
+):
+    output = tmp_path / "estimate.json"
+
+    code = main(["r2s", "fit", "--track", "t.h5", "--output", str(output)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "landed in bias" in out
+    assert "--static" in out
 
 
 def test_fit_without_a_static_estimate_writes_what_it_always_did(

@@ -1564,6 +1564,7 @@ def _fit(args, profile) -> int:
                 "that is not the arm on the track, or a track with a load on it."
             )
             return REFUSED
+        width = len(group.joints)
         payload.update(
             {
                 "group": group.name,
@@ -1577,7 +1578,35 @@ def _fit(args, profile) -> int:
                 # Carried through so r2s bundle can cite the whole chain without
                 # being handed the static estimate a second time.
                 "sweep_sha256": list(artifact.sweep_sha256),
+                # Fo: always produced by `combine`, whatever the static
+                # estimate was.
+                "bias_nm": combined.bias.tolist(),
+                # Fc and Fo + tau_gravity, straight from the static fit. nan
+                # per joint when it never carried them — a gravity sweep never
+                # touches a staircase at all — rather than left out, so a
+                # reader does not have to know which fit produced this file to
+                # know these were not measured.
+                "coulomb_nm": (
+                    combined.coulomb_nm.tolist()
+                    if combined.coulomb_nm is not None
+                    else np.full(width, np.nan).tolist()
+                ),
+                "static_bias_nm": (
+                    combined.static_bias_nm.tolist()
+                    if combined.static_bias_nm is not None
+                    else np.full(width, np.nan).tolist()
+                ),
             }
+        )
+    else:
+        # The bias column that replaced the old refusal (see fit_second_order)
+        # absorbs a standing load without complaint, so a loaded joint fitted
+        # this way gets a fit that runs clean and is wrong.
+        print(
+            "note: fit ran without a gravity column (no --static/--urdf), so "
+            "any standing load on this track has landed in bias rather than "
+            "being separated from it. Fine for a level joint or synthetic "
+            "data; wrong for a loaded one."
         )
 
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
@@ -2030,6 +2059,20 @@ def _bundle(args, profile) -> int:
                 fit["inertia_from_gravity_kg_m2"], dtype=float
             ),
             disagreement=np.asarray(fit["inertia_disagreement"], dtype=float),
+            # Optional: a fit file written before these three fields existed
+            # has none of them, and identified_block leaves out what it is
+            # not given rather than fabricate a nan-filled array for it.
+            bias=(
+                np.asarray(fit["bias_nm"], dtype=float) if "bias_nm" in fit else None
+            ),
+            coulomb_nm=(
+                np.asarray(fit["coulomb_nm"], dtype=float)
+                if "coulomb_nm" in fit else None
+            ),
+            static_bias_nm=(
+                np.asarray(fit["static_bias_nm"], dtype=float)
+                if "static_bias_nm" in fit else None
+            ),
         )
         try:
             payload["groups"][name]["identified"] = identified_block(
@@ -2069,17 +2112,35 @@ def _bundle(args, profile) -> int:
 
 def _report_combined(combined) -> None:
     print(
-        "  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   "
+        "  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   Fo (N.m)   "
         "kp (N.m/rad)   J from gravity   gap"
     )
     for index, name in enumerate(combined.joint_names):
         print(
             f"  {name:<16} {combined.inertia[index]:9.5f} "
             f"{combined.damping[index]:11.4f} {combined.friction[index]:13.4f} "
+            f"{combined.bias[index]:9.4f} "
             f"{combined.stiffness[index]:14.2f} "
             f"{combined.inertia_from_gravity[index]:16.5f} "
             f"{combined.disagreement[index]:5.1%}"
         )
+
+
+def _report_identified_friction(bundle) -> None:
+    """Print both Coulomb measurements a bundle carries, per group and joint.
+
+    A large gap between them is evidence about the model rather than about the
+    arm — see hdgp_export's own comment on the same choice — and printing only
+    the one export would pick from would hide that gap here too.
+    """
+    for name in sorted(bundle.identified):
+        params = bundle.identified[name]
+        coulomb = ", ".join(
+            f"{value:.4f}" if np.isfinite(value) else "—"
+            for value in params.coulomb_nm
+        )
+        dynamic = ", ".join(f"{value:.4f}" for value in params.friction)
+        print(f"  {name}: coulomb_nm=[{coulomb}] dynamic_friction_nm=[{dynamic}]")
 
 
 def _collect_poses(args, profile) -> list[Path] | None:
@@ -2316,6 +2377,7 @@ def main(argv: list[str] | None = None) -> int:
             "  identified parameters: "
             + (", ".join(sorted(bundle.identified)) or "none")
         )
+        _report_identified_friction(bundle)
         for name, value in sorted(metrics.items()):
             print(f"  {name}: {value:.5g}")
         return 0 if result.status == "validated" else 3

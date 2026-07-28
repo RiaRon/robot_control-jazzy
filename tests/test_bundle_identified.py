@@ -70,6 +70,20 @@ def _base(profile):
     }
 
 
+def _combined_fully_measured(profile, group=GROUP):
+    """A CombinedEstimate as `combine` would return with a staircase behind it."""
+    import dataclasses
+
+    combined = _combined(profile, group)
+    width = len(combined.joint_names)
+    return dataclasses.replace(
+        combined,
+        bias=np.linspace(0.05, 0.02, width),
+        coulomb_nm=np.linspace(0.08, 0.05, width),
+        static_bias_nm=np.linspace(0.3, 0.1, width),
+    )
+
+
 def _with_identified(profile, **overrides):
     payload = _base(profile)
     block = identified_block(
@@ -183,6 +197,59 @@ def test_parameters_with_no_provenance_are_refused(profile, tmp_path):
     path.write_text(json.dumps(payload))
 
     with pytest.raises(CalibrationError, match="provenance"):
+        load_bundle(path, profile)
+
+
+def test_the_bundle_carries_the_staircase_measurements_through(profile, tmp_path):
+    """Fc, Fo and the static bias are additive fields: written when the
+    CombinedEstimate behind the block carries them."""
+    path = tmp_path / "bundle.json"
+    payload = _base(profile)
+    payload["groups"][GROUP]["identified"] = identified_block(
+        _combined_fully_measured(profile),
+        profile,
+        torque_scale=np.ones(7),
+        sweep_sha256=["a" * 64, "b" * 64],
+        track_sha256="c" * 64,
+    )
+
+    bundle = write_bundle(path, payload, profile)
+
+    identified = bundle.identified[GROUP]
+    np.testing.assert_allclose(identified.bias, np.linspace(0.05, 0.02, 7))
+    np.testing.assert_allclose(identified.coulomb_nm, np.linspace(0.08, 0.05, 7))
+    np.testing.assert_allclose(identified.static_bias_nm, np.linspace(0.3, 0.1, 7))
+
+
+def test_a_bundle_predating_the_staircase_fields_reads_them_as_nan(profile, tmp_path):
+    """Additive, like the rest of the identified block: an older bundle has
+    nothing to say about Fc or Fo, not a zero."""
+    path = tmp_path / "bundle.json"
+
+    bundle = write_bundle(path, _with_identified(profile), profile)
+
+    identified = bundle.identified[GROUP]
+    assert np.all(np.isnan(identified.coulomb_nm))
+    assert np.all(np.isnan(identified.bias))
+    assert np.all(np.isnan(identified.static_bias_nm))
+
+
+def test_a_negative_coulomb_measurement_is_refused(profile, tmp_path):
+    """Fc is a friction magnitude; a joint cannot measure a negative one."""
+    path = tmp_path / "bundle.json"
+    payload = _base(profile)
+    block = identified_block(
+        _combined_fully_measured(profile),
+        profile,
+        torque_scale=np.ones(7),
+        sweep_sha256=["a" * 64],
+        track_sha256="c" * 64,
+    )
+    block["coulomb_nm"][2] = -0.01
+    payload["groups"][GROUP]["identified"] = block
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(CalibrationError, match="coulomb_nm"):
         load_bundle(path, profile)
 
 

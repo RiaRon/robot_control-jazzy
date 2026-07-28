@@ -53,10 +53,16 @@ def _group_payload(
     delay_steps: int,
     max_spread: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    # Two measurements of one quantity, and they are not equally good. The
+    # staircase reads it directly at rest under a torque we chose; the dynamic
+    # coefficient is a regression over a track where it competes with damping.
+    coulomb = np.where(
+        np.isnan(identified.coulomb_nm), identified.friction, identified.coulomb_nm
+    )
     gains = {
         "stiffness": identified.stiffness,
         "damping": identified.damping,
-        "joint_friction": identified.friction,
+        "joint_friction": coulomb,
     }
     collapsed: dict[str, float] = {}
     spread: dict[str, float] = {}
@@ -87,10 +93,25 @@ def _group_payload(
         "joint_names": list(identified.joint_names),
         "stiffness_nm_per_rad": identified.stiffness.tolist(),
         "damping_nm_s_per_rad": identified.damping.tolist(),
-        "friction_nm": identified.friction.tolist(),
+        # The per-joint source of joint_friction above: measured where the
+        # staircase reached the joint, the dynamic coefficient elsewhere.
+        "friction_nm": coulomb.tolist(),
+        # The dynamic regression's own coefficient, kept alongside the
+        # measurement of record rather than only feeding into it, so a large
+        # gap between the two is visible here rather than only inferable.
+        "dynamic_friction_nm": identified.friction.tolist(),
         # No hdgp entry point exists for inertia, so this block is the only
         # place the measurement survives the conversion at all.
         "inertia_kg_m2": identified.inertia.tolist(),
+        # Fo: the dynamic fit's own bias term, scaled by its inertia. Also has
+        # no hdgp entry point — an ImplicitActuatorCfg has no constant torque
+        # offset field — so this is the only place it survives either.
+        "bias_nm": identified.bias.tolist(),
+        # Fo + tau_gravity(pose): the static fit's own bias, still carrying
+        # the gravity torque at the pose it was measured at. Not the same
+        # number as bias_nm above, and not averaged with it — a gap between
+        # them is evidence about the gravity model, not noise to smooth over.
+        "static_bias_nm": identified.static_bias_nm.tolist(),
         "spread": {key: float(value) for key, value in spread.items()},
         "provenance": {
             "sweep_sha256": list(identified.sweep_sha256),

@@ -27,7 +27,17 @@ def profile():
     return load_builtin_profile("openarm_tesollo")
 
 
-def _combined(profile, group, *, stiffness, damping, friction=0.2):
+def _combined(
+    profile,
+    group,
+    *,
+    stiffness,
+    damping,
+    friction=0.2,
+    coulomb_nm=None,
+    bias=None,
+    static_bias_nm=None,
+):
     joints = profile.groups[group].joints
     width = len(joints)
     return CombinedEstimate(
@@ -38,6 +48,11 @@ def _combined(profile, group, *, stiffness, damping, friction=0.2):
         stiffness=np.asarray(stiffness, dtype=float),
         inertia_from_gravity=np.full(width, 0.1),
         disagreement=np.zeros(width),
+        bias=None if bias is None else np.asarray(bias, dtype=float),
+        coulomb_nm=None if coulomb_nm is None else np.asarray(coulomb_nm, dtype=float),
+        static_bias_nm=(
+            None if static_bias_nm is None else np.asarray(static_bias_nm, dtype=float)
+        ),
     )
 
 
@@ -232,6 +247,116 @@ def test_the_written_file_is_what_hdgps_loader_accepts(tmp_path, profile):
         for key in ("stiffness", "damping", "joint_friction"):
             assert isinstance(body[key], float)
         assert isinstance(body["delay_steps"], int)
+
+
+def test_the_static_coulomb_measurement_is_what_export_writes(tmp_path, profile):
+    """Two measurements of one quantity. The staircase measures it directly —
+    a known torque, at rest, at the moment the joint breaks free — and the
+    dynamic fit infers it as a regression coefficient over a moving track."""
+    width = len(profile.groups["openarm_right_arm"].joints)
+    bundle = _bundle(
+        tmp_path,
+        profile,
+        {
+            "openarm_right_arm": _combined(
+                profile,
+                "openarm_right_arm",
+                stiffness=np.full(width, 50.0),
+                damping=np.full(width, 3.0),
+                friction=0.31,
+                coulomb_nm=np.full(width, 0.08),
+            )
+        },
+    )
+
+    payload = hdgp_calibration(bundle, profile)
+
+    body = payload["groups"]["openarm_right_arm"]
+    audit = payload["measured"]["openarm_right_arm"]
+    assert body["joint_friction"] == pytest.approx(0.08)
+    assert audit["dynamic_friction_nm"] == pytest.approx([0.31] * width)
+
+
+def test_a_joint_no_staircase_covered_falls_back_to_the_dynamic_coefficient(
+    tmp_path, profile
+):
+    width = len(profile.groups["openarm_right_arm"].joints)
+    bundle = _bundle(
+        tmp_path,
+        profile,
+        {
+            "openarm_right_arm": _combined(
+                profile,
+                "openarm_right_arm",
+                stiffness=np.full(width, 50.0),
+                damping=np.full(width, 3.0),
+                friction=0.31,
+                coulomb_nm=np.full(width, np.nan),
+            )
+        },
+    )
+
+    body = hdgp_calibration(bundle, profile)["groups"]["openarm_right_arm"]
+
+    assert body["joint_friction"] == pytest.approx(0.31)
+
+
+def test_each_joint_uses_its_own_source_when_the_staircase_only_covered_some(
+    tmp_path, profile
+):
+    width = len(profile.groups["openarm_right_arm"].joints)
+    coulomb = np.full(width, np.nan)
+    coulomb[0] = 0.08
+    bundle = _bundle(
+        tmp_path,
+        profile,
+        {
+            "openarm_right_arm": _combined(
+                profile,
+                "openarm_right_arm",
+                stiffness=np.full(width, 50.0),
+                damping=np.full(width, 3.0),
+                friction=0.31,
+                coulomb_nm=coulomb,
+            )
+        },
+    )
+
+    audit = hdgp_calibration(bundle, profile)["measured"]["openarm_right_arm"]
+
+    # friction_nm is the per-joint source of the collapsed joint_friction
+    # scalar, so it carries the same per-joint choice: measured where the
+    # staircase reached the joint, the dynamic coefficient elsewhere.
+    assert audit["friction_nm"][0] == pytest.approx(0.08)
+    assert audit["friction_nm"][1] == pytest.approx(0.31)
+
+
+def test_both_bias_measurements_land_in_the_audit_block_unaveraged(tmp_path, profile):
+    """Fo (dynamic) and Fo + tau_gravity (static) are not the same number, and
+    hdgp has no field for either, so both only ever survive here."""
+    width = len(profile.groups["openarm_right_arm"].joints)
+    bundle = _bundle(
+        tmp_path,
+        profile,
+        {
+            "openarm_right_arm": _combined(
+                profile,
+                "openarm_right_arm",
+                stiffness=np.full(width, 50.0),
+                damping=np.full(width, 3.0),
+                bias=np.full(width, 0.05),
+                static_bias_nm=np.full(width, 0.3),
+            )
+        },
+    )
+
+    payload = hdgp_calibration(bundle, profile)
+    body = payload["groups"]["openarm_right_arm"]
+    audit = payload["measured"]["openarm_right_arm"]
+
+    assert audit["bias_nm"] == pytest.approx([0.05] * width)
+    assert audit["static_bias_nm"] == pytest.approx([0.3] * width)
+    assert "bias" not in body and "bias_nm" not in body
 
 
 def test_a_bundle_with_nothing_measured_is_refused(tmp_path, profile):

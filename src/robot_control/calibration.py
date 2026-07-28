@@ -50,6 +50,21 @@ class IdentifiedParameters:
     inertia_disagreement: np.ndarray
     sweep_sha256: tuple[str, ...]
     track_sha256: str
+    #: Fc, N.m: the static fit's own direct measurement, nan per joint where
+    #: no staircase covered it or the block predates this field. Kept beside
+    #: `friction` — the dynamic fit's own coefficient — rather than merged
+    #: into it: averaging the two would hide a disagreement between them that
+    #: is evidence about the model rather than the arm.
+    coulomb_nm: np.ndarray
+    #: Fo, N.m: the dynamic fit's own bias term, scaled by the same inertia as
+    #: `friction`. nan where the block predates this field.
+    bias: np.ndarray
+    #: Fo + tau_gravity(pose), N.m: the static fit's own bias. Distinct from
+    #: `bias` above, which is Fo alone — this one still carries the pose's
+    #: gravity torque, since it is where the staircase's midline crosses zero
+    #: rather than a term the gravity column separated out. nan where the
+    #: block predates this field or no staircase covered the joint.
+    static_bias_nm: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -80,6 +95,18 @@ _IDENTIFIED_FIELDS = (
     ("inertia_disagreement", "inertia_disagreement", True),
 )
 
+#: Measured arrays that may legitimately carry nan — a joint no staircase
+#: covered — and may be absent altogether from a block written before they
+#: existed. Kept apart from `_IDENTIFIED_FIELDS`: that loop's finite check
+#: would reject the nan that is these fields' whole point. The third element
+#: is the floor a finite entry must clear, or None where the quantity is a
+#: signed offset rather than a magnitude.
+_OPTIONAL_IDENTIFIED_FIELDS = (
+    ("coulomb_nm", "coulomb_nm", 0.0),
+    ("bias_nm", "bias", None),
+    ("static_bias_nm", "static_bias_nm", None),
+)
+
 
 def identified_block(
     combined: CombinedEstimate,
@@ -93,7 +120,7 @@ def identified_block(
     torque_scale = np.asarray(torque_scale, dtype=float)
     if torque_scale.shape != combined.inertia.shape:
         raise CalibrationError("torque_scale must carry one value per joint")
-    return {
+    block = {
         "joint_names": list(combined.joint_names),
         "inertia_kg_m2": combined.inertia.tolist(),
         "damping_nm_s_per_rad": combined.damping.tolist(),
@@ -116,6 +143,18 @@ def identified_block(
             "track_sha256": str(track_sha256),
         },
     }
+    # Written only when the estimate carries them: a fit file predating these
+    # fields, or one built from a static estimate with no staircase behind it
+    # at all, has none to report, and an absent key reads back as nan rather
+    # than a fabricated zero.
+    for key, value in (
+        ("coulomb_nm", combined.coulomb_nm),
+        ("bias_nm", combined.bias),
+        ("static_bias_nm", combined.static_bias_nm),
+    ):
+        if value is not None:
+            block[key] = np.asarray(value, dtype=float).tolist()
+    return block
 
 
 def _identified(raw: Any, group_name: str, profile: RobotProfile) -> IdentifiedParameters:
@@ -163,6 +202,28 @@ def _identified(raw: Any, group_name: str, profile: RobotProfile) -> IdentifiedP
         if np.any(array < floor):
             raise CalibrationError(
                 f"{where}: {key} carries {array.min():g}, which is not physical"
+            )
+        values[field] = array
+
+    for key, field, floor in _OPTIONAL_IDENTIFIED_FIELDS:
+        if key not in raw:
+            # Absent rather than nan-filled in the file: a block written
+            # before this field existed, or from a static estimate that never
+            # measured it. Read back as nan, the same as a joint this run's
+            # own staircase never covered — not a fabricated zero.
+            values[field] = np.full(len(joints), np.nan)
+            continue
+        array = np.asarray(raw.get(key), dtype=float)
+        if array.shape != (len(joints),):
+            raise CalibrationError(
+                f"{where}: {key} must carry one value per joint, "
+                f"{len(joints)} of them"
+            )
+        finite = np.isfinite(array)
+        if floor is not None and finite.any() and np.any(array[finite] < floor):
+            raise CalibrationError(
+                f"{where}: {key} carries {float(np.nanmin(array)):g}, which is "
+                "not physical"
             )
         values[field] = array
 

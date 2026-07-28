@@ -180,6 +180,36 @@ def test_without_a_gravity_column_there_is_nothing_to_cross_check():
     assert np.all(combined.inertia > 0)
 
 
+def test_combine_carries_the_static_fits_own_coulomb_and_bias_through():
+    """kp/k gives the physical Fc and Fo from the dynamic side; these two are
+    the static fit's own numbers, passed through unscaled rather than derived
+    from anything `combine` itself computes.
+    """
+    import dataclasses
+
+    time, command, measured, torque = _track()
+    dynamic = fit_second_order(time, command, measured, gravity_torque=torque)
+    static = dataclasses.replace(
+        _static(), coulomb_nm=np.array([0.08, 0.05]), bias_nm=np.array([0.3, -0.1])
+    )
+
+    combined = combine(static, dynamic, ("a", "b"))
+
+    np.testing.assert_allclose(combined.coulomb_nm, [0.08, 0.05])
+    np.testing.assert_allclose(combined.static_bias_nm, [0.3, -0.1])
+
+
+def test_combine_carries_nothing_when_the_static_fit_never_measured_them():
+    """A gravity-sweep static estimate never touches a staircase at all."""
+    time, command, measured, torque = _track()
+    dynamic = fit_second_order(time, command, measured, gravity_torque=torque)
+
+    combined = combine(_static(), dynamic, ("a", "b"))
+
+    assert combined.coulomb_nm is None
+    assert combined.static_bias_nm is None
+
+
 def test_combining_fits_of_different_widths_is_refused():
     time, command, measured, torque = _track()
     dynamic = fit_second_order(time, command, measured, gravity_torque=torque)

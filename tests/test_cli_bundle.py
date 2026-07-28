@@ -96,6 +96,46 @@ def test_bundle_merges_the_parameters_and_their_provenance(base, tmp_path, capsy
     assert GROUP in capsys.readouterr().out
 
 
+def test_bundle_carries_the_staircase_measurements_through(base, tmp_path, capsys):
+    output = tmp_path / "bundled.json"
+    fit = _fit(
+        tmp_path / "right.json",
+        bias_nm=np.linspace(0.05, 0.02, 7).tolist(),
+        coulomb_nm=np.linspace(0.08, 0.05, 7).tolist(),
+        static_bias_nm=np.linspace(0.3, 0.1, 7).tolist(),
+    )
+
+    code = main(
+        ["r2s", "bundle", "--base", str(base), "--output", str(output),
+         "--fit", str(fit)]
+    )
+
+    assert code == 0, capsys.readouterr().out
+    identified = json.loads(output.read_text())["groups"][GROUP]["identified"]
+    np.testing.assert_allclose(identified["bias_nm"], np.linspace(0.05, 0.02, 7))
+    np.testing.assert_allclose(identified["coulomb_nm"], np.linspace(0.08, 0.05, 7))
+    np.testing.assert_allclose(identified["static_bias_nm"], np.linspace(0.3, 0.1, 7))
+
+
+def test_bundle_from_a_fit_predating_the_staircase_fields_still_works(
+    base, tmp_path, capsys
+):
+    """Additive: a fit file written before Fc and Fo existed bundles the same
+    as it always did, with nothing fabricated for the fields it never had."""
+    output = tmp_path / "bundled.json"
+
+    code = main(
+        ["r2s", "bundle", "--base", str(base), "--output", str(output),
+         "--fit", str(_fit(tmp_path / "right.json"))]
+    )
+
+    assert code == 0, capsys.readouterr().out
+    identified = json.loads(output.read_text())["groups"][GROUP]["identified"]
+    assert "bias_nm" not in identified
+    assert "coulomb_nm" not in identified
+    assert "static_bias_nm" not in identified
+
+
 def test_bundle_takes_one_fit_per_group(base, tmp_path, capsys):
     output = tmp_path / "bundled.json"
 
@@ -193,6 +233,28 @@ def test_validate_reports_which_groups_carry_parameters(base, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "identified parameters" in out
     assert GROUP in out
+
+
+def test_validate_reports_both_friction_measurements(base, tmp_path, capsys):
+    """A large disagreement is evidence about the model rather than about the
+    arm, and preferring one silently would hide it."""
+    bundled = tmp_path / "bundled.json"
+    main(
+        ["r2s", "bundle", "--base", str(base), "--output", str(bundled),
+         "--fit", str(_fit(tmp_path / "right.json", coulomb_nm=[0.08] * 7))]
+    )
+    capsys.readouterr()
+
+    code = main(
+        ["r2s", "validate", "--bundle", str(bundled),
+         "--metrics", str(_metrics(tmp_path / "m.json")),
+         "--output", str(tmp_path / "verdict.json")]
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "coulomb" in out and "dynamic_friction" in out
+    assert "0.0800" in out
 
 
 def test_an_exported_bundle_carries_the_parameters(base, tmp_path, capsys):
