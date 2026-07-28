@@ -539,6 +539,26 @@ def fit_staircase(sweeps: Sequence[GravitySweep]) -> StaticEstimate:
             )
             continue
 
+        # A branch whose applied torque never varies is a column of one
+        # repeated value: `polyfit` treats it as rank deficient and returns
+        # its minimum-norm solution rather than refusing, so the check has to
+        # happen here rather than be left to `polyfit` to catch. Mirrors
+        # `fit_static_gravity`'s "no torque was ever fed forward" refusal,
+        # for the same reason: a column with no spread cannot separate a
+        # slope from an intercept.
+        degenerate = [
+            label
+            for label, branch in zip(("rising", "falling"), (rising, falling))
+            if float(np.ptp([torque for torque, _ in branch])) <= 0.0
+        ]
+        if degenerate:
+            unidentifiable.append(
+                (name, f"the applied torque never varied within the "
+                       f"{' and '.join(degenerate)} branch, so its slope is not "
+                       "constrained by the data")
+            )
+            continue
+
         fits = []
         for branch in (rising, falling):
             torques = np.array([value for value, _ in branch])
@@ -579,8 +599,13 @@ def fit_staircase(sweeps: Sequence[GravitySweep]) -> StaticEstimate:
         # alpha is a statement about the gravity model; this fit never
         # consulted one, so nothing distinguishes one value of it from another.
         torque_scale=np.full(width, np.nan),
+        # No separate offset term here: the two branches' intercepts already
+        # carry the scale-independent standing error, reported as bias_nm.
         offset=np.full(width, np.nan),
         residual_rmse=residual,
+        # Conditioning is meaningless for a two-branch OLS with no shared
+        # design matrix to condition; the degenerate-torque check above is
+        # this fit's equivalent guard, not a gap in coverage.
         condition=np.full(width, np.nan),
         used=used,
         excluded=np.zeros(width, dtype=int),

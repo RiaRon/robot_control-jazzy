@@ -289,3 +289,76 @@ def test_a_joint_whose_branches_disagree_in_slope_is_not_identified():
 
     assert np.isnan(estimate.stiffness[0])
     assert any("r_aj_5" == name for name, _ in estimate.unidentifiable)
+
+
+def test_a_branch_whose_applied_torque_never_varies_is_not_identified():
+    """A branch built entirely from one applied torque carries no
+    torque-deflection information at all: `np.polyfit` on a constant-x
+    column is rank deficient and returns its minimum-norm solution — a
+    number, not a measurement — instead of refusing. This must be caught
+    before the fit runs, not left to be caught by luck downstream (the
+    slopes-must-be-negative and branches-must-agree checks that follow).
+
+    Two sweeps are needed to build it: within one sweep the peak round is
+    always the last rising point and the first falling point, so a single
+    sweep cannot make both branches constant. Here every sweep's peak sits
+    at round 0 (applied[0] = 0.5 is already that sweep's maximum), so its
+    rising branch is the single point (0.5, error) and its falling branch
+    is the two points at -0.3; stacking two such sweeps for the same joint
+    gives a rising branch of two rounds both at 0.5 N.m and a falling
+    branch of four rounds all at -0.3 N.m — two branches, neither carrying
+    any spread in torque at all.
+    """
+    applied = np.array([0.5, -0.3, -0.3]).reshape(-1, 1)
+    kwargs = dict(
+        group="openarm_right_arm",
+        joint_names=("r_aj_5",),
+        poses=np.zeros((3, 1)),
+        modelled_torque=np.zeros((3, 1)),
+        scales=np.zeros((3, 1)),
+        applied_torque=applied,
+    )
+    sweep_a = GravitySweep(errors=np.array([0.05, 0.04, 0.03]).reshape(-1, 1), **kwargs)
+    sweep_b = GravitySweep(errors=np.array([0.06, 0.02, 0.01]).reshape(-1, 1), **kwargs)
+
+    estimate = fit_staircase([sweep_a, sweep_b])
+
+    assert np.isnan(estimate.stiffness[0])
+    assert any("r_aj_5" == name for name, _ in estimate.unidentifiable)
+
+
+def test_the_staircase_reports_the_bias_from_genuinely_stuck_rounds():
+    """The gravity fit's docstring warns that rounds inside the stiction
+    band are dropped as noise; this fitter's whole reason to exist is that
+    for a staircase they are not noise, they are the measurement. This
+    fixture (kp=15, coulomb=0.08, gravity=0.2, peak=0.24, steps=7) has a
+    torque step of 2*0.24/6 = 0.08 N.m, exactly the Coulomb friction, so two
+    consecutive falling rounds hold the same 0.002667 rad error while the
+    applied torque steps from +0.16 to +0.08 N.m — a horizontal run in the
+    torque/deflection plane, not a point on either branch's line.
+
+    A straight OLS fit through a partly-horizontal branch is measurably
+    biased, and the point of this test is to measure it rather than assume
+    it away. Run directly (not tuned to pass): stiffness comes out 16.154
+    against a true 15 (+7.7%), coulomb 0.0759 against 0.08 (-5.1%), bias
+    0.2256 against 0.2 (+12.8%). The tolerances below sit just above those
+    measured numbers, so this pins the bias that exists.
+
+    Only the falling branch can carry stuck rounds here: on a monotonic
+    ramp the joint is already at the friction boundary from the previous
+    round, so every round's torque change moves it again (the algebra is in
+    fit_staircase's own rising-branch reasoning) — freezing needs a
+    direction reversal to open the band back up, and a single staircase
+    cycle has exactly one reversal, at the start of the falling branch.
+    """
+    sweep = _staircase_sweep(kp=15.0, coulomb=0.08, gravity=0.2, peak=0.24, steps=7)
+
+    estimate = fit_staircase([sweep])
+
+    assert not np.isnan(estimate.stiffness[0]), "expected a biased fit, not a refusal"
+    assert estimate.stiffness[0] == pytest.approx(15.0, rel=0.08)
+    assert estimate.coulomb_nm[0] == pytest.approx(0.08, rel=0.06)
+    assert estimate.bias_nm[0] == pytest.approx(0.2, rel=0.13)
+    # The clean fixture (no in-band rounds) fits to float precision; a
+    # genuinely stuck branch does not, and residual_rmse says so.
+    assert estimate.residual_rmse[0] > 5e-4
