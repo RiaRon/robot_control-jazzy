@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from robot_control.identification import (
+    FRICTION_SHARPNESS,
     FitError,
     SecondOrderEstimate,
     fit_second_order,
@@ -20,6 +21,8 @@ from robot_control.identification import (
 KP = np.array([20.0, 8.0])
 DAMPING = np.array([1.5, 0.6])
 FRICTION = np.array([0.4, 0.15])
+#: Fo, small next to FRICTION as it is at the wrist this stands in for.
+BIAS = np.array([0.05, 0.02])
 INERTIA = np.array([0.35, 0.08])
 LOAD = np.array([2.5, 0.9])
 STEP = 1e-3
@@ -47,7 +50,8 @@ def _run(seed=0):
         acceleration = (
             KP * (command[index] - position)
             - DAMPING * velocity
-            - FRICTION * np.sign(velocity)
+            - FRICTION * np.tanh(FRICTION_SHARPNESS * velocity)
+            - BIAS
             - torque[index]
         ) / INERTIA
         velocity = velocity + STEP * acceleration
@@ -99,6 +103,7 @@ def test_a_wrong_model_scores_badly_rather_than_raising(fitted):
         fitted.stiffness * 0.3,
         fitted.damping * 3.0,
         fitted.friction,
+        fitted.bias,
         fitted.residual_rmse,
         fitted.inverse_inertia,
     )

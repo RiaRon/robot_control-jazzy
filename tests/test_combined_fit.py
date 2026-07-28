@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from robot_control.identification import (
+    FRICTION_SHARPNESS,
     FitError,
     SecondOrderEstimate,
     StaticEstimate,
@@ -22,6 +23,9 @@ from robot_control.identification import (
 KP = np.array([20.0, 8.0])
 DAMPING = np.array([1.5, 0.6])
 FRICTION = np.array([0.4, 0.15])
+#: Fo. Small next to FRICTION on purpose: at the wrist this is what makes it
+#: visible at all — a bias comparable to or larger than the Coulomb term.
+BIAS = np.array([0.05, 0.02])
 INERTIA = np.array([0.35, 0.08])
 LOAD = np.array([2.5, 0.9])
 STEP = 1e-3
@@ -51,7 +55,8 @@ def _track():
         acceleration = (
             KP * (command[index] - position)
             - DAMPING * velocity
-            - FRICTION * np.sign(velocity)
+            - FRICTION * np.tanh(FRICTION_SHARPNESS * velocity)
+            - BIAS
             - torque[index]
         ) / INERTIA
         velocity = velocity + STEP * acceleration
@@ -68,20 +73,28 @@ def test_the_gravity_term_recovers_the_inverse_inertia():
     np.testing.assert_allclose(estimate.stiffness, KP / INERTIA, rtol=1e-3)
     np.testing.assert_allclose(estimate.damping, DAMPING / INERTIA, rtol=1e-2)
     np.testing.assert_allclose(estimate.friction, FRICTION / INERTIA, rtol=1e-2)
+    np.testing.assert_allclose(estimate.bias, BIAS / INERTIA, rtol=1e-2)
     np.testing.assert_allclose(estimate.inverse_inertia, 1.0 / INERTIA, rtol=1e-2)
 
 
-def test_without_the_gravity_term_the_standing_load_lands_in_the_stiffness():
-    """The bug this term fixes: the regression has nowhere else to put the load."""
+def test_without_the_gravity_term_the_standing_load_lands_in_the_bias():
+    """The bug this term fixes: the regression used to have nowhere but the
+    stiffness column to put a standing load. Now it has a better sink — a
+    constant column — so a near-constant load (this one varies only mildly,
+    by cos(position) around a small angle) lands there instead, leaving
+    stiffness only mildly distorted. The bias this produces is not the true
+    Fo, though: it is Fo plus the load's mean, and the two are not separable
+    without the gravity column that tells them apart.
+    """
     time, command, measured, _torque = _track()
 
     blind = fit_second_order(time, command, measured)
 
     assert blind.inverse_inertia is None
-    truth = KP / INERTIA
-    assert np.all(np.abs(blind.stiffness - truth) / truth > 0.05), (
-        "the load has to distort something, and the stiffness column is where it "
-        "goes; if this passes, the track no longer carries a standing load"
+    truth = BIAS / INERTIA
+    assert np.all(np.abs(blind.bias - truth) / truth > 5.0), (
+        "the load has to distort something, and the bias column is where it "
+        "goes now; if this passes, the track no longer carries a standing load"
     )
     assert np.all(blind.residual_rmse > 0)
 
@@ -126,6 +139,7 @@ def test_combining_the_two_fits_recovers_the_physical_parameters():
     np.testing.assert_allclose(combined.inertia, INERTIA, rtol=1e-2)
     np.testing.assert_allclose(combined.damping, DAMPING, rtol=2e-2)
     np.testing.assert_allclose(combined.friction, FRICTION, rtol=2e-2)
+    np.testing.assert_allclose(combined.bias, BIAS, rtol=2e-2)
     np.testing.assert_allclose(combined.stiffness, KP, rtol=1e-9)
 
 
@@ -173,6 +187,7 @@ def test_combining_fits_of_different_widths_is_refused():
         dynamic.stiffness[:1],
         dynamic.damping[:1],
         dynamic.friction[:1],
+        dynamic.bias[:1],
         dynamic.residual_rmse[:1],
         dynamic.inverse_inertia[:1],
     )

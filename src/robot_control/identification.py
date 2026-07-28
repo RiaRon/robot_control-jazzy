@@ -33,18 +33,29 @@ MAX_CONDITION = 200.0
 MAX_INERTIA_DISAGREEMENT = 0.25
 
 
+#: (rad/s)^-1. The friction term reaches 76% of Fc at 0.01 rad/s. A constant
+#: rather than a fitted parameter because nothing in this pipeline observes it:
+#: the static staircase holds the arm still, and identifying a transition
+#: sharpness needs a low-speed velocity sweep that does not exist yet. Named so
+#: that when someone measures it there is one place to put it.
+FRICTION_SHARPNESS = 100.0
+
+
 @dataclass(frozen=True)
 class SecondOrderEstimate:
     """The dynamic fit, with every parameter divided by an inertia.
 
-    ``qdd = k (q_cmd - q) - d qd - f sign(qd) - g tau_g(q)`` gives
-    ``k = kp/J``, ``d = b/J``, ``f = tau_f/J`` and ``g = 1/J``. Only the last
-    carries the inertia on its own, and only when a gravity column was supplied.
+    ``qdd = k (q_cmd - q) - d qd - f tanh(FRICTION_SHARPNESS qd) - o - g tau_g(q)``
+    gives ``k = kp/J``, ``d = b/J``, ``f = Fc/J``, ``o = Fo/J`` and ``g = 1/J``.
+    Only the last carries the inertia on its own, and only when a gravity
+    column was supplied.
     """
 
     stiffness: np.ndarray
     damping: np.ndarray
     friction: np.ndarray
+    #: Fo/J: the constant offset the old sign(qd)-only model had no column for.
+    bias: np.ndarray
     residual_rmse: np.ndarray
     #: 1/J, or None when the fit ran without a gravity column.
     inverse_inertia: np.ndarray | None = None
@@ -73,6 +84,10 @@ class CombinedEstimate:
     inertia_from_gravity: np.ndarray
     #: Relative gap between the two inertias, or nan with no gravity column.
     disagreement: np.ndarray
+    #: Fo, N.m. Defaults to None rather than being required: a caller that
+    #: rebuilds this from a fit file predating this field (`r2s bundle`
+    #: reading an older `--fit` JSON) has no bias to report, not a zero one.
+    bias: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -740,7 +755,8 @@ def fit_second_order(
     *,
     gravity_torque: np.ndarray | None = None,
 ) -> SecondOrderEstimate:
-    """Fit ``qdd = k(q_cmd-q) - d qd - f sign(qd) - g tau_g(q)`` per joint.
+    """Fit ``qdd = k(q_cmd-q) - d qd - f tanh(FRICTION_SHARPNESS qd) - o - g tau_g(q)``
+    per joint.
 
     *gravity_torque* is the load acting against each joint at each sample, in
     N.m, already corrected by the ``alpha`` a static fit measured. Supplying it
@@ -789,7 +805,12 @@ def _second_order_rows(run) -> tuple[list[np.ndarray], list[np.ndarray]]:
     for joint in range(command.shape[1]):
         error = command[1:-1, joint] - measured[1:-1, joint]
         prior_velocity = velocity[:-1, joint]
-        columns = [error, -prior_velocity, -np.sign(prior_velocity)]
+        columns = [
+            error,
+            -prior_velocity,
+            -np.tanh(FRICTION_SHARPNESS * prior_velocity),
+            -np.ones_like(error),
+        ]
         if gravity_torque is not None:
             # Aligned with `error`, which reads the same window of samples.
             columns.append(-gravity_torque[1:-1, joint])
@@ -830,8 +851,9 @@ def fit_second_order_runs(runs) -> SecondOrderEstimate:
     stiffness = np.empty(width)
     damping = np.empty(width)
     friction = np.empty(width)
+    bias = np.empty(width)
     residual = np.empty(width)
-    with_gravity = columns.pop() == 4
+    with_gravity = columns.pop() == 5
     inverse_inertia = np.empty(width) if with_gravity else None
     for joint in range(width):
         design = np.vstack([designs[joint] for designs, _targets in per_run])
@@ -840,18 +862,18 @@ def fit_second_order_runs(runs) -> SecondOrderEstimate:
         if rank < 2 or params[0] <= 0 or params[1] < 0:
             raise FitError(f"unidentifiable dynamics for joint {joint}")
         if with_gravity:
-            if params[3] <= 0:
+            if params[4] <= 0:
                 raise FitError(
                     f"joint {joint} accelerates towards its load rather than away "
                     "from it, so the gravity column has the wrong sign or the "
                     "wrong chain"
                 )
-            inverse_inertia[joint] = params[3]
+            inverse_inertia[joint] = params[4]
         prediction = design @ params
-        stiffness[joint], damping[joint], friction[joint] = params[:3]
+        stiffness[joint], damping[joint], friction[joint], bias[joint] = params[:4]
         residual[joint] = float(np.sqrt(np.mean((prediction - target) ** 2)))
     return SecondOrderEstimate(
-        stiffness, damping, friction, residual, inverse_inertia
+        stiffness, damping, friction, bias, residual, inverse_inertia
     )
 
 
@@ -893,6 +915,7 @@ def combine(
         inertia=inertia,
         damping=dynamic.damping * inertia,
         friction=dynamic.friction * inertia,
+        bias=dynamic.bias * inertia,
         stiffness=static.stiffness.copy(),
         inertia_from_gravity=from_gravity,
         disagreement=np.abs(from_gravity - inertia) / inertia,
@@ -976,7 +999,8 @@ def predict_second_order(
         acceleration = (
             estimate.stiffness * (command[index] - position)
             - estimate.damping * velocity
-            - estimate.friction * np.sign(velocity)
+            - estimate.friction * np.tanh(FRICTION_SHARPNESS * velocity)
+            - estimate.bias
         )
         if gravity_torque is not None:
             acceleration = acceleration - estimate.inverse_inertia * gravity_torque[index]

@@ -184,22 +184,27 @@ def test_fit_without_a_static_estimate_writes_what_it_always_did(
     }
 
 
-def test_a_loaded_track_cannot_be_fitted_without_the_gravity_term(
+def test_a_loaded_track_without_the_gravity_term_gives_a_badly_wrong_fit(
     track, tmp_path, capsys
 ):
-    """Sharper than a distorted estimate: on this arm it does not fit at all.
-
-    The regression has nowhere to put a standing load but the stiffness and
-    damping columns, and here that drives one of them out of the range the fit
-    accepts. A weaker load would instead give a plausible wrong number.
+    """Used to refuse outright: the regression had nowhere to put a standing
+    load but the stiffness and damping columns, and drove one of them out of
+    the range the fit accepts. The bias column is a new, better sink for it,
+    so the fit no longer refuses — but a per-joint constant cannot reproduce a
+    pose-dependent gravity torque either, and what it cannot absorb still
+    lands in stiffness, badly.
     """
     output = tmp_path / "estimate.json"
 
     code = main(["r2s", "fit", "--track", "t.h5", "--output", str(output)])
 
-    assert code == 2
-    assert "unidentifiable dynamics" in capsys.readouterr().out
-    assert not output.exists()
+    assert code == 0, capsys.readouterr().out
+    payload = json.loads(output.read_text())
+    relative_error = np.abs(np.array(payload["stiffness"]) - KP) / KP
+    assert np.all(relative_error > 0.05), (
+        "the load still has to distort something; if this passes, the track "
+        "no longer carries a standing load"
+    )
 
 
 def test_fit_static_needs_a_urdf(track, profile, tmp_path, capsys):

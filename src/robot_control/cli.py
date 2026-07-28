@@ -1751,10 +1751,15 @@ def _estimate_from_fit(path: Path, group) -> SecondOrderEstimate:
     inverse = None
     if "inertia_kg_m2" in payload:
         inverse = 1.0 / column("inertia_kg_m2")
+    # "r2s fit" does not write this key yet (Fo's export is a later task), so
+    # every fit file on disk predates it; zero is what an absent bias term
+    # means, not a placeholder for a missing measurement.
+    bias = column("bias") if "bias" in payload else np.zeros(width)
     return SecondOrderEstimate(
         column("stiffness"),
         column("damping"),
         column("friction"),
+        bias,
         column("residual_rmse"),
         inverse,
     )

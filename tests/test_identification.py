@@ -152,6 +152,60 @@ def test_second_order_fit_recovers_synthetic_stiffness_and_damping():
     assert abs(estimate.damping[0] - damping) / damping < 0.1
 
 
+#: Fixture for the friction/bias design tests below: one joint, 100 Hz, 200
+#: samples spanning exactly one period, so the sinusoid's velocity sweeps
+#: through zero rather than merely touching it once.
+_FRICTION_FIXTURE_RATE = 100.0
+_FRICTION_FIXTURE_SAMPLES = 200
+TIME = np.arange(_FRICTION_FIXTURE_SAMPLES) / _FRICTION_FIXTURE_RATE
+_FRICTION_FIXTURE_PHASE = (
+    2 * np.pi * TIME / (_FRICTION_FIXTURE_SAMPLES / _FRICTION_FIXTURE_RATE)
+)
+COMMAND = np.zeros((_FRICTION_FIXTURE_SAMPLES, 1))
+MEASURED = (0.01 * np.sin(_FRICTION_FIXTURE_PHASE)).reshape(-1, 1)
+#: Scaled 500x so |v| stays far above 1/FRICTION_SHARPNESS even at the two
+#: samples nearest the sinusoid's velocity zero-crossings (measured minimum
+#: |v| ~0.25 rad/s against a ~0.038 rad/s bound for tanh(100v) to match
+#: sign(v) within atol=1e-3 — see task-8-report.md for the derivation).
+FAST_MEASURED = (5.0 * np.sin(_FRICTION_FIXTURE_PHASE)).reshape(-1, 1)
+
+
+def test_the_friction_term_is_smooth_through_zero_velocity():
+    """sign() is discontinuous exactly where a held pose lives, so it cannot
+    represent the band the arm has. The static fit works around that by
+    discarding rounds inside the band; the dynamic model should not need to."""
+    from robot_control.identification import _second_order_rows
+
+    designs, _ = _second_order_rows((TIME, COMMAND, MEASURED, None))
+
+    column = designs[0][:, 2]
+    assert np.all(np.abs(column) <= 1.0)
+    assert np.any((np.abs(column) > 0.01) & (np.abs(column) < 0.99)), (
+        "a sign column is only ever -1, 0 or 1; a tanh column has values "
+        "between, and those are the samples near zero velocity"
+    )
+
+
+def test_the_dynamic_design_carries_a_bias_column():
+    """Fo has nowhere to go without it, and at the wrist — where the real
+    gravity torque is about 0.2 N.m — a bias of similar size dominates."""
+    from robot_control.identification import _second_order_rows
+
+    designs, _ = _second_order_rows((TIME, COMMAND, MEASURED, None))
+
+    assert designs[0].shape[1] == 4
+    assert np.allclose(designs[0][:, 3], -1.0)
+
+
+def test_far_from_zero_velocity_tanh_matches_the_old_sign_model():
+    from robot_control.identification import _second_order_rows
+
+    designs, _ = _second_order_rows((TIME, COMMAND, FAST_MEASURED, None))
+
+    velocity = np.diff(FAST_MEASURED, axis=0)[:-1, 0]
+    assert np.allclose(designs[0][:, 2], -np.sign(velocity), atol=1e-3)
+
+
 def test_holdout_gates_and_model_inadequate_status():
     assert validate_holdout(
         openarm_rmse_rad=0.02,
