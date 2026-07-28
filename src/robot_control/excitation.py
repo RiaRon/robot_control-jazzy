@@ -10,6 +10,8 @@ controller's droop, mostly gravity, and says nothing about kp.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from .identification import DEFAULT_NOISE_RAD
@@ -185,6 +187,41 @@ def probe_torque(
     return wanted
 
 
+def _outside_room(
+    joint: str, torque_nm: float, travelled: float, room: float
+) -> ExcitationRefused:
+    """The refusal for a joint carried into its position margin, wherever the
+    torque that did it came from — a seed, the confirming step, or a round of
+    the staircase itself."""
+    return ExcitationRefused(
+        f"{joint} travelled {travelled:.3f} rad under {torque_nm:g} N.m, past "
+        f"the {room:.3f} rad this pose leaves before its {MARGIN_RAD:g} rad "
+        "margin; move to a pose with more room"
+    )
+
+
+@dataclass(frozen=True)
+class _Probe:
+    """A sized staircase, and what the rounds have to be measured against.
+
+    `baseline_rad` and `room_rad` are carried out of the probe because the
+    staircase needs them: every round is a publish, and the reading it takes
+    anyway is what says whether that publish has carried the joint into its
+    margin.
+    """
+
+    peak_nm: float
+    #: The smallest seed that moved the joint.
+    seed_nm: float
+    #: The largest torque published while sizing, which is not the peak: the
+    #: first extrapolation is published to be measured, and the second one, if
+    #: it is taken, can be smaller.
+    loudest_nm: float
+    #: The reading at zero torque, and the travel this pose allows from it.
+    baseline_rad: float
+    room_rad: float
+
+
 def _effort(width: int, index: int, value: float) -> np.ndarray:
     """A whole-group effort with *value* on one joint and zero on the rest."""
     effort = np.zeros(width)
@@ -257,13 +294,6 @@ def _seed_response(
             "accept that this one cannot be probed"
         )
 
-    def refuse_room(torque_nm: float, travelled: float) -> ExcitationRefused:
-        return ExcitationRefused(
-            f"{joint} travelled {travelled:.3f} rad under {torque_nm:g} N.m, "
-            f"past the {room:.3f} rad this pose leaves before its "
-            f"{MARGIN_RAD:g} rad margin; move to a pose with more room"
-        )
-
     def refuse_room_ahead(
         torque_nm: float, travelled: float, reach: float
     ) -> ExcitationRefused:
@@ -292,7 +322,7 @@ def _seed_response(
         # reach, and the achieved-room check comes after the probe, several
         # publishes later.
         if travelled > room:
-            raise refuse_room(seed_nm, travelled)
+            raise _outside_room(joint, seed_nm, travelled, room)
         reach = NEXT_SEED_TRAVEL_AFTER_DOUBLING if doubling else NEXT_SEED_TRAVEL
         if reach * travelled > room:
             raise refuse_room_ahead(seed_nm, travelled, reach)
@@ -308,7 +338,9 @@ def _seed_response(
             # The bound above was a lower one, so where the joint actually
             # ended up still has to be read before the probe torque follows it.
             if abs(confirmed - baseline) > room:
-                raise refuse_room(2.0 * seed_nm, abs(confirmed - baseline))
+                raise _outside_room(
+                    joint, 2.0 * seed_nm, abs(confirmed - baseline), room
+                )
             return seed_nm, confirmed - reading
         seed_nm *= 2.0
     raise ExcitationRefused(
@@ -326,11 +358,8 @@ def _seed_response(
 def _probe_peak(
     adapter, gate, publish, *,
     index, width, limit, deflection_rad, hold_sec, joint, noise_rad,
-) -> tuple[float, float, float]:
-    """Size the staircase for one joint: the peak, the seed that moved it, and
-    the largest torque published on the way — which is not the peak, since the
-    first extrapolation is published to be measured and the second one, if it
-    is taken, can be smaller.
+) -> _Probe:
+    """Size the staircase for one joint.
 
     Every deflection here is a difference from the reading at zero torque.
     A tracking error on its own is the controller's droop — (tau_gravity -
@@ -377,17 +406,43 @@ def _probe_peak(
             "the seed said it was, so ask for a smaller deflection"
         )
     # The escalation's last publish is the confirming step at twice the seed.
-    loudest_nm = max(2.0 * seed_nm, peak)
+    sized = dict(
+        seed_nm=seed_nm,
+        loudest_nm=max(2.0 * seed_nm, peak),
+        baseline_rad=baseline,
+        room_rad=room,
+    )
     if abs(achieved - deflection_rad) <= RECHECK_TOLERANCE * deflection_rad:
-        return peak, seed_nm, loudest_nm
+        return _Probe(peak_nm=peak, **sized)
     # Once, and then it is used. This extrapolation starts from a deflection
     # near the one wanted rather than from a seed the width of a stiction band,
     # so checking it in turn would be a loop with nothing to make it terminate.
     # A seed the escalation had to raise is exactly the case that lands here:
     # its response under-reports the elastic deflection by the whole band.
-    return probe_torque(
-        seed_torque_nm=peak, seed_deflection_rad=achieved, **bounds
-    ), seed_nm, loudest_nm
+    #
+    # Nothing measures what this second torque does, though, which is why the
+    # staircase checks the room at every round rather than trusting it.
+    return _Probe(
+        peak_nm=probe_torque(
+            seed_torque_nm=peak, seed_deflection_rad=achieved, **bounds
+        ),
+        **sized,
+    )
+
+
+def _check_room(adapter, probe: _Probe, index: int, joint: str, torque_nm: float):
+    """Read where the last publish put the joint, and refuse if it left the room.
+
+    The reading is taken either way — for a round it *is* the measurement — so
+    this is the check `_probe_peak` makes on its own publish, one publish later
+    and for every publish after it. Returns the reading, so a caller that wants
+    it as data does not read the joint twice.
+    """
+    reading = adapter.read_tracking_error()
+    travelled = abs(float(reading[index]) - probe.baseline_rad)
+    if travelled > probe.room_rad:
+        raise _outside_room(joint, torque_nm, travelled, probe.room_rad)
+    return reading
 
 
 def measure_staircase(
@@ -411,11 +466,14 @@ def measure_staircase(
     try:
         for name in joints:
             index = group.joints.index(name)
-            peak, seed_nm, loudest_nm = _probe_peak(
+            probe = _probe_peak(
                 adapter, gate, publish,
                 index=index, width=width, limit=limits[index],
                 deflection_rad=deflection_rad, hold_sec=hold_sec, joint=name,
                 noise_rad=noise_rad,
+            )
+            peak, seed_nm, loudest_nm = (
+                probe.peak_nm, probe.seed_nm, probe.loudest_nm
             )
             # The seed is worth saying out loud: the joint stood still under
             # half of it, so its dry friction is at least a quarter of what is
@@ -443,13 +501,19 @@ def measure_staircase(
             # Every round that is recorded is therefore reached moving the way
             # the branch it lands in says, which is the invariant the fitter's
             # single-argmax split assumes and cannot check for itself.
+            #
+            # It is still read, though. Not recording it says nothing about
+            # where it put the joint, and this is the largest torque of the
+            # run — on a joint that turned out to be softer than the probe
+            # measured, it is the publish that reaches a stop first.
             publish(gate.authorize_effort(_effort(width, index, values[0])), hold_sec)
+            _check_room(adapter, probe, index, name, values[0])
             for value in values[1:]:
                 effort = gate.authorize_effort(_effort(width, index, value))
                 publish(effort, hold_sec)
                 poses.append(adapter.read_state())
                 applied.append(effort)
-                errors.append(adapter.read_tracking_error())
+                errors.append(_check_room(adapter, probe, index, name, value))
     finally:
         publish(np.zeros(width), RELEASE_HOLD_SEC)
     return np.asarray(poses), np.asarray(applied), np.asarray(errors)

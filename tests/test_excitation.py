@@ -221,6 +221,25 @@ def _immovable(kp):
     return _Joint(lambda torque: torque / kp, band_rad=100.0 / kp, latch_rad=0.0)
 
 
+def _piecewise(*segments):
+    """A joint whose stiffness changes with torque: ((up_to_nm, kp), ...).
+
+    `_softens_beyond` with more than one knee, for the case where the probe
+    measures one region, extrapolates through a second and lands in a third.
+    """
+
+    def deflection(torque):
+        magnitude, travelled, lower = abs(torque), 0.0, 0.0
+        for up_to, kp in segments:
+            travelled += (min(magnitude, up_to) - lower) / kp
+            if magnitude <= up_to:
+                break
+            lower = up_to
+        return np.sign(torque) * travelled
+
+    return deflection
+
+
 def _softens_beyond(knee, kp_below, kp_above):
     """A joint whose stiffness changes at *knee* N.m, so that extrapolating
     from a torque on one side of it lands somewhere else entirely."""
@@ -594,6 +613,35 @@ def test_the_escalation_stops_before_it_walks_the_joint_into_its_margin():
 
     loudest = max(abs(float(effort[0])) for effort, _seconds in arm.calls)
     assert loudest == pytest.approx(0.8), "the 1.6 N.m step must not go out"
+
+
+def test_a_staircase_round_that_leaves_the_room_is_refused():
+    """The probe's achieved deflection is checked against the room. The rounds
+    that follow it were checked by nothing, and they are where the run spends
+    its time.
+
+    This joint is 15 N.m/rad below 0.1 N.m, 30 to 1.0 and 0.2 beyond. The probe
+    measures the soft region, asks 0.75, achieves 0.0283 — comfortably inside
+    the 0.250 rad of room — and re-extrapolates to 1.3235 N.m, a torque nothing
+    has measured. `measure_staircase` publishes that as the staircase's first
+    value; the joint travels 1.654 rad, 1.2 rad past its stop, and the run
+    completes and writes a file.
+
+    The arrival is checked as well as the recorded rounds. It is not recorded,
+    because it is reached travelling the wrong way for the branch it would land
+    on, but it is published at full peak and it is the largest torque of the
+    run — so it is read, checked, and thrown away.
+    """
+    arm = _Arm(_Joint(_piecewise((0.1, 15.0), (1.0, 30.0), (float("inf"), 0.2))))
+
+    with pytest.raises(ExcitationRefused, match=r"r_aj_5.*margin"):
+        _drive(arm, limit=_Limit(lower=-0.45, upper=0.45), steps=5)
+
+    beyond = [effort for effort, _seconds in arm.calls if abs(float(effort[0])) > 1.0]
+    assert len(beyond) == 1, "the run must stop at the first publish past the room"
+    effort, seconds = arm.calls[-1]
+    assert effort.tolist() == [0.0, 0.0]
+    assert seconds > 0.0
 
 
 def test_a_deflection_that_lands_inside_the_margin_is_refused():
