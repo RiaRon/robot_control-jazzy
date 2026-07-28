@@ -35,6 +35,18 @@ def probe_torque(
     upper_rad: float,
     joint: str,
 ) -> float:
+    """Size the torque that should produce ``deflection_rad``.
+
+    ``deflection_rad`` is a magnitude, not a signed offset: the staircase this
+    sizes a step for pushes the joint by that amount at both ends of the
+    sweep, so both position limits bind on it regardless of which way a given
+    step goes.
+    """
+    if deflection_rad <= 0:
+        raise ExcitationRefused(
+            f"{joint} was asked for a {deflection_rad:g} rad deflection; "
+            "deflection_rad is a magnitude and must be positive"
+        )
     if abs(seed_deflection_rad) < 1e-6:
         raise ExcitationRefused(
             f"{joint} did not move under {seed_torque_nm:g} N.m, so its "
@@ -44,7 +56,7 @@ def probe_torque(
 
     # Position first: a pose with no room is a pose problem, not a torque one.
     room = min(position_rad - lower_rad, upper_rad - position_rad) - MARGIN_RAD
-    if deflection_rad > room:
+    if abs(deflection_rad) > room:
         raise ExcitationRefused(
             f"{joint} has {room:.3f} rad to a position limit before its "
             f"{MARGIN_RAD:g} rad margin, less than the {deflection_rad:g} rad "

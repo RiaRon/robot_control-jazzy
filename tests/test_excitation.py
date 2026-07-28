@@ -61,3 +61,25 @@ def test_it_refuses_a_seed_the_joint_did_not_respond_to():
             deflection_rad=0.05, seed_torque_nm=0.05,
             seed_deflection_rad=0.0, **BOUNDS
         )
+
+
+def test_it_refuses_a_negative_deflection_towards_the_tighter_limit():
+    """-0.25 rad at a pose with only 0.10 rad of real margin on the near
+    side. The staircase this sizes a step for pushes the joint by this
+    magnitude at both ends, so a signed deflection must not evade the room
+    check that a positive one would trip."""
+    with pytest.raises(ExcitationRefused, match=r"r_aj_5"):
+        probe_torque(
+            deflection_rad=-0.25, seed_torque_nm=0.05, seed_deflection_rad=0.05,
+            effort_limit_nm=7.0, position_rad=-1.27, lower_rad=-1.57,
+            upper_rad=1.57, joint="r_aj_5",
+        )
+
+
+@pytest.mark.parametrize("deflection_rad", [0.0, -0.05])
+def test_it_refuses_a_non_positive_deflection_rad(deflection_rad):
+    with pytest.raises(ExcitationRefused, match=r"r_aj_5.*magnitude"):
+        probe_torque(
+            deflection_rad=deflection_rad, seed_torque_nm=0.05,
+            seed_deflection_rad=0.004, **BOUNDS
+        )
