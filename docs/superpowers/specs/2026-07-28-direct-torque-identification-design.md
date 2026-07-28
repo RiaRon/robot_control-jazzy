@@ -180,6 +180,16 @@ seventeen of the wrist's twenty-seven discarded rounds become signal.
 `StaticEstimate` gains `coulomb_nm` and `bias_nm` arrays, NaN where a joint was
 measured only by gravity sweeps.
 
+**Two measurements of the same quantity.** The dynamic fit already estimates a
+Coulomb term, as a regression coefficient over a moving track. The staircase
+measures it directly: a known torque, at rest, at the moment the joint breaks
+free. The static value is the measurement of record and is what `bundle` carries
+and `export` writes, wherever the staircase covered a joint; the dynamic
+coefficient stays in the dynamic estimate because that model needs its own
+internally consistent parameters. `validate` reports the two side by side, since
+a large disagreement is evidence about the model rather than about the arm, and
+silently preferring one would hide it.
+
 ### B2. `tanh` and a bias in the dynamic model
 
 `identification.py` builds dynamic design rows
