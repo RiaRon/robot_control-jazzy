@@ -1114,16 +1114,28 @@ def _pose_torque(args, profile) -> int:
         )
     if args.hold_sec <= 0:
         raise ValueError("--hold-sec must be positive")
-    if args.noise <= 0:
-        # A zero floor puts the motion test back on the divide-by-zero guard,
-        # where encoder dither reads as a joint that moved and the torque
-        # extrapolated from it is published before anything has measured a
-        # deflection. `identify --noise 0` only drops fewer rounds; here it
-        # commands the arm.
+    # Both of these are refused downstream as well, but only after the
+    # escalation has run — on a real joint that means publishing all the way to
+    # the ceiling or the doubling cap first. A number that was never going to
+    # be accepted should cost nothing to reject.
+    #
+    # `isfinite and > 0` rather than `<= 0`: nan fails every comparison, so it
+    # passes a `<= 0` guard, and inf passes it outright. Either one makes the
+    # motion threshold something no reading is ever above, and the joint is
+    # walked to the cap and then told its dry friction exceeds a quarter of its
+    # rating — the false diagnosis the split ceiling refusal exists to prevent.
+    if not (np.isfinite(args.deflection) and args.deflection > 0):
         raise ValueError(
-            f"--noise must be positive, got {args.noise:g}; it is the encoder "
-            "noise the seed has to be seen through, and without it dither "
-            "reads as motion and sizes a torque from nothing"
+            f"--deflection must be a positive number, got {args.deflection:g}; "
+            "it is how far each joint is pushed at the ends of its staircase, "
+            "and the torque that produces it is what the run probes for"
+        )
+    if not (np.isfinite(args.noise) and args.noise > 0):
+        # `identify --noise 0` only drops fewer rounds; here it commands the arm.
+        raise ValueError(
+            f"--noise must be a positive number, got {args.noise:g}; it is the "
+            "encoder noise the seed has to be seen through, and without it "
+            "dither reads as motion and sizes a torque from nothing"
         )
     if args.steps < MIN_STAIRCASE_STEPS:
         raise ValueError(

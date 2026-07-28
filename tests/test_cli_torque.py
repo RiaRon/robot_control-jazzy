@@ -158,6 +158,44 @@ def test_a_staircase_too_short_to_fit_is_refused(arm, tmp_path, capsys):
     assert arm.published == []
 
 
+@pytest.mark.parametrize("deflection", ["0", "-0.05", "nan", "inf"])
+def test_a_non_positive_deflection_is_refused_before_anything_publishes(
+    arm, tmp_path, capsys, deflection
+):
+    """`probe_torque` does refuse this, but only once `_seed_response` has
+    returned — after the escalation has run, which on a real joint means all
+    the way to the ceiling or the doubling cap. Against this stub 32 efforts
+    went out before the refusal printed.
+
+    A number that was never going to be accepted should cost nothing to
+    reject, which is the principle the --steps minimum established.
+    """
+    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
+                 "--hold-sec", "0.01", "--deflection", deflection,
+                 "--output", str(tmp_path / "t.json")])
+
+    assert code == 2
+    assert "--deflection" in capsys.readouterr().out
+    assert arm.published == []
+
+
+@pytest.mark.parametrize("noise", ["nan", "inf"])
+def test_a_noise_that_is_not_a_number_is_refused(arm, tmp_path, capsys, noise):
+    """`args.noise <= 0` is False for nan, so nan passes the guard and makes
+    the motion threshold nan; `travelled >= nan` is never true, so a healthy
+    frictionless joint is walked to the doubling cap and then told its dry
+    friction exceeds a quarter of its rating — the false diagnosis the split
+    ceiling refusal existed to remove. Executed: 40 publishes, up to 1.6 N.m.
+    """
+    code = main(["pose", "torque", "--group", GROUP, "--execute", "--steps", "4",
+                 "--hold-sec", "0.01", "--noise", noise,
+                 "--output", str(tmp_path / "t.json")])
+
+    assert code == 2
+    assert "--noise" in capsys.readouterr().out
+    assert arm.published == []
+
+
 @pytest.mark.parametrize("noise", ["0", "-1"])
 def test_a_non_positive_noise_is_refused(arm, tmp_path, capsys, noise):
     """`--noise 0` puts the motion test back on the 1e-6 divide-by-zero guard,
