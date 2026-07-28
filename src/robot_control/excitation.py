@@ -52,10 +52,17 @@ MOVED_RAD = 1e-6
 #: How many times the encoder's noise a reading must change by before the
 #: escalation calls it motion. The test is on the difference of two readings,
 #: whose noise is sqrt(2) times one reading's, so this is 3.5 sigma on the
-#: quantity actually being tested — under one false "it moved" in two thousand
-#: seeds. It has to be this conservative: a seed that reads as motion when the
-#: joint is stuck extrapolates a stiffness from pure noise, and the torque that
-#: comes out is published before anything has measured a deflection.
+#: quantity actually being tested: about one false "it moved" in 2500 reads,
+#: but a joint's six escalation reads all share one baseline, which is nearer
+#: 1 in 400 per joint and under 2% across a seven-joint run. That is the
+#: pessimistic reading — `DEFAULT_NOISE_RAD` is an encoder count, and a
+#: quantization step's own sigma is step/sqrt(12), which puts this margin
+#: closer to 17 sigma in practice.
+#:
+#: It has to be conservative in this direction: a seed that reads as motion
+#: when the joint is stuck extrapolates a stiffness from pure noise, and the
+#: torque that comes out is published before anything has measured a
+#: deflection.
 #:
 #: The cost is a joint whose real motion is under the floor escalating one more
 #: step, which is the conservative direction.
@@ -319,8 +326,11 @@ def _seed_response(
 def _probe_peak(
     adapter, gate, publish, *,
     index, width, limit, deflection_rad, hold_sec, joint, noise_rad,
-) -> tuple[float, float]:
-    """Size the staircase for one joint, and report the seed that moved it.
+) -> tuple[float, float, float]:
+    """Size the staircase for one joint: the peak, the seed that moved it, and
+    the largest torque published on the way — which is not the peak, since the
+    first extrapolation is published to be measured and the second one, if it
+    is taken, can be smaller.
 
     Every deflection here is a difference from the reading at zero torque.
     A tracking error on its own is the controller's droop — (tau_gravity -
@@ -366,8 +376,10 @@ def _probe_peak(
             f"{deflection_rad:g} rad asked for fits; the joint is softer than "
             "the seed said it was, so ask for a smaller deflection"
         )
+    # The escalation's last publish is the confirming step at twice the seed.
+    loudest_nm = max(2.0 * seed_nm, peak)
     if abs(achieved - deflection_rad) <= RECHECK_TOLERANCE * deflection_rad:
-        return peak, seed_nm
+        return peak, seed_nm, loudest_nm
     # Once, and then it is used. This extrapolation starts from a deflection
     # near the one wanted rather than from a seed the width of a stiction band,
     # so checking it in turn would be a loop with nothing to make it terminate.
@@ -375,7 +387,7 @@ def _probe_peak(
     # its response under-reports the elastic deflection by the whole band.
     return probe_torque(
         seed_torque_nm=peak, seed_deflection_rad=achieved, **bounds
-    ), seed_nm
+    ), seed_nm, loudest_nm
 
 
 def measure_staircase(
@@ -399,7 +411,7 @@ def measure_staircase(
     try:
         for name in joints:
             index = group.joints.index(name)
-            peak, seed_nm = _probe_peak(
+            peak, seed_nm, loudest_nm = _probe_peak(
                 adapter, gate, publish,
                 index=index, width=width, limit=limits[index],
                 deflection_rad=deflection_rad, hold_sec=hold_sec, joint=name,
@@ -408,11 +420,16 @@ def measure_staircase(
             # The seed is worth saying out loud: the joint stood still under
             # half of it, so its dry friction is at least a quarter of what is
             # printed (see SEED_TORQUE_NM), and the ratio between joints is the
-            # first look at the arm's stiction a run gives.
-            announce(
+            # first look at the arm's stiction a run gives. So is the largest
+            # torque the joint received, which the staircase peak alone does
+            # not describe — somebody is watching this arm move.
+            line = (
                 f"  {name}: moved under a {seed_nm:g} N.m seed, staircase peak "
                 f"{peak:.3f} N.m"
             )
+            if loudest_nm > peak:
+                line += f", probed at {loudest_nm:.3f} N.m"
+            announce(line)
             values = staircase(peak, steps)
             # The first torque is where the joint arrives, not a round it was
             # measured at. `_probe_peak` leaves it held at +peak, so it reaches

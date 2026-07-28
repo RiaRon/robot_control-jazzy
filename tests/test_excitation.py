@@ -350,6 +350,24 @@ def test_encoder_noise_does_not_read_as_a_joint_that_moved():
         assert loudest < 2 * 3.485, f"published {loudest:.3f} N.m"
 
 
+def test_the_run_says_the_largest_torque_the_joint_actually_received():
+    """The staircase peak is not the largest torque published. `_probe_peak`
+    publishes its first extrapolation to measure what it achieves, and may then
+    return a smaller second one; this joint goes slack past 0.1 N.m, so it is
+    probed at 0.750 and the staircase settles at 0.274. An operator watching
+    the arm should be told the number that describes what it just did.
+    """
+    arm = _Arm(_Joint(_softens_beyond(0.1, 15.0, 5.0)))
+    said = []
+
+    _poses, applied, _errors = _drive(arm, announce=said.append)
+
+    loudest = max(abs(float(effort[0])) for effort, _seconds in arm.calls)
+    assert loudest == pytest.approx(0.75)
+    assert applied[:, 0].max() < loudest
+    assert "0.750" in said[0], said[0]
+
+
 def test_the_smallest_seed_that_moved_the_joint_is_announced():
     """It is the run's first measurement of the joint's stiction: the joint
     stood still at half this torque and moved at this one."""
