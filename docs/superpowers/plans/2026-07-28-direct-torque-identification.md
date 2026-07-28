@@ -42,7 +42,7 @@ those numbers need: `tanh` in place of `sign`, and a bias column.
 | `src/robot_control/artifacts.py` (307) | signed JSON read/write | sweep schema v2 with v1 back-compat |
 | `src/robot_control/cli.py` (2236) | CLI stages | new `pose torque` stage, torque probe, staircase measurement loop |
 | `tests/test_identification.py` | fit unit tests | staircase fitter, regression identity |
-| `tests/test_recording.py` | artifact round-trips | v1/v2 sweep compatibility |
+| `tests/test_sweep_artifacts.py` | artifact round-trips | v1/v2 sweep compatibility |
 | `tests/test_cli_torque.py` (new) | `pose torque` behaviour | probe sizing, refusals, sweep shape |
 
 `cli.py` is already 2236 lines. The torque-sweep measurement loop and probe are
@@ -188,7 +188,7 @@ EOF
 
 **Files:**
 - Modify: `src/robot_control/artifacts.py:23` (`SWEEP_SCHEMA_VERSION`), `:139-178`
-- Test: `tests/test_recording.py`
+- Test: `tests/test_sweep_artifacts.py`
 
 **Interfaces:**
 - Consumes: `GravitySweep.applied_torque` from Task 1.
@@ -196,7 +196,8 @@ EOF
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/test_recording.py`:
+Add to `tests/test_sweep_artifacts.py`, which already owns sweep round-trips
+and carries `profile`, `_sweep(profile, ...)` and `_resign` fixtures:
 
 ```python
 def test_a_version_1_sweep_still_loads(tmp_path, profile):
@@ -240,7 +241,7 @@ way `_sign_and_write` does, so the downgraded payload still verifies.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m pytest tests/test_recording.py -k sweep -v`
+Run: `python3 -m pytest tests/test_sweep_artifacts.py -k applied -v`
 Expected: FAIL — `write_sweep` emits no `applied_torque` key.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -309,7 +310,7 @@ Expected: all nine load, each reporting a non-zero applied span.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/robot_control/artifacts.py tests/test_recording.py
+git add src/robot_control/artifacts.py tests/test_sweep_artifacts.py
 git commit -F - <<'EOF'
 feat: 스윕 스키마 v2 — applied_torque, v1 하위호환
 

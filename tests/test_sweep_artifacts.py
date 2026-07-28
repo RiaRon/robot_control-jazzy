@@ -25,19 +25,31 @@ def profile():
     return load_builtin_profile("openarm_tesollo")
 
 
-def _sweep(profile, group=GROUP, sweep_joint=None):
+def _sweep(profile, group=GROUP, sweep_joint=None, applied=None, modelled=None):
     joints = profile.groups[group].joints
     width = len(joints)
-    scales = np.array([[0.0] * width, [0.5] * width, [1.0] * width])
-    poses = np.tile(np.linspace(0.0, 0.3, width), (3, 1))
-    torque = np.tile(np.linspace(1.0, 5.0, width), (3, 1))
+    rounds = (
+        np.asarray(modelled).shape[0]
+        if modelled is not None
+        else (np.asarray(applied).shape[0] if applied is not None else 3)
+    )
+    scales = np.linspace(0.0, 1.0, rounds)[:, None] * np.ones(width)
+    poses = np.tile(np.linspace(0.0, 0.3, width), (rounds, 1))
+    torque = (
+        np.asarray(modelled, dtype=float)
+        if modelled is not None
+        else np.tile(np.linspace(1.0, 5.0, width), (rounds, 1))
+    )
+    applied_torque = (
+        np.asarray(applied, dtype=float) if applied is not None else scales * torque
+    )
     return GravitySweep(
         group=group,
         joint_names=joints,
         poses=poses,
         modelled_torque=torque,
         scales=scales,
-        applied_torque=scales * torque,
+        applied_torque=applied_torque,
         errors=(torque - scales * torque) / 20.0,
         sweep_joint=sweep_joint,
     )
@@ -128,6 +140,55 @@ def test_a_future_schema_is_refused_rather_than_guessed(profile, tmp_path):
 
     with pytest.raises(ArtifactError, match="schema_version"):
         read_sweep(path, profile)
+
+
+def test_a_version_1_sweep_still_loads(profile, tmp_path):
+    """Nine sweeps were collected before applied_torque existed. In a v1 file
+    the applied torque is the scale times the model, because that is the only
+    thing the old excitation could publish."""
+    path = tmp_path / "v1.json"
+    write_sweep(path, _sweep(profile), profile)
+    payload = json.loads(path.read_text())
+    payload["schema_version"] = 1
+    for entry in payload["rounds"]:
+        entry.pop("applied_torque")
+    _resign(path, payload)
+
+    loaded = read_sweep(path, profile)
+
+    assert loaded.applied_torque == pytest.approx(
+        loaded.scales * loaded.modelled_torque
+    )
+
+
+def test_a_version_2_sweep_round_trips_an_applied_torque_the_model_cannot_explain(
+    profile, tmp_path
+):
+    sweep = _sweep(profile, applied=np.full((2, 7), 0.4), modelled=np.zeros((2, 7)))
+    path = tmp_path / "v2.json"
+    write_sweep(path, sweep, profile)
+
+    assert read_sweep(path, profile).applied_torque == pytest.approx(0.4)
+
+
+def test_a_version_1_sweep_with_applied_torque_present_uses_the_stored_value(
+    profile, tmp_path
+):
+    """Transitional files: schema_version 1, written after applied_torque
+    joined the round dict but before the version was bumped for it.
+    Reconstruction has to key off whether the field is present, not off the
+    version number, or this file's real applied torque gets thrown away in
+    favour of a recomputed one that disagrees with it."""
+    sweep = _sweep(profile, applied=np.full((2, 7), 0.4), modelled=np.zeros((2, 7)))
+    path = tmp_path / "v1_transitional.json"
+    write_sweep(path, sweep, profile)
+    payload = json.loads(path.read_text())
+    payload["schema_version"] = 1
+    _resign(path, payload)
+
+    loaded = read_sweep(path, profile)
+
+    assert loaded.applied_torque == pytest.approx(0.4)
 
 
 def test_a_sweep_with_no_checksum_is_refused(profile, tmp_path):

@@ -19,8 +19,11 @@ class ArtifactError(RuntimeError):
 
 
 #: Bumped when a payload's meaning changes, not when a field is added that older
+#: readers can ignore. 2: applied_torque joined the round payload; a version 1
+#: reader cannot skip it, so this is a meaning change rather than an addition.
+SWEEP_SCHEMA_VERSION = 2
+#: Bumped when a payload's meaning changes, not when a field is added that older
 #: readers can ignore — there are none, so it never has been.
-SWEEP_SCHEMA_VERSION = 1
 STATIC_SCHEMA_VERSION = 1
 
 SWEEP_KIND = "gravity_sweep"
@@ -87,22 +90,32 @@ def _sign_and_write(path: str | Path, payload: dict[str, Any]) -> None:
 
 
 def _verify(
-    path: str | Path, profile: RobotProfile, kind: str, version: int
+    path: str | Path,
+    profile: RobotProfile,
+    kind: str,
+    version: int,
+    *,
+    minimum: int | None = None,
 ) -> dict[str, Any]:
     """Read a signed artifact, refusing anything it was not measured against.
 
     Unlike a calibration bundle, an unsigned file is refused outright rather
-    than trusted: this tool is the only thing that writes these.
+    than trusted: this tool is the only thing that writes these. ``minimum``
+    lets a reader accept older schemas it knows how to reconstruct; a writer
+    only ever calls with the exact version, so every other caller is
+    unaffected.
     """
     payload = json.loads(Path(path).read_text())
     if not isinstance(payload, dict):
         raise ArtifactError(f"{kind} is not an object")
     if payload.get("kind") != kind:
         raise ArtifactError(f"expected a {kind}, found {payload.get('kind')!r}")
-    if payload.get("schema_version") != version:
+    found = payload.get("schema_version")
+    floor = version if minimum is None else minimum
+    if not isinstance(found, int) or not floor <= found <= version:
         raise ArtifactError(
-            f"unsupported {kind} schema_version: "
-            f"{payload.get('schema_version')!r}, expected {version}"
+            f"unsupported {kind} schema_version: {found!r}, expected between "
+            f"{floor} and {version}"
         )
 
     checksum = payload.get("checksum_sha256")
@@ -159,21 +172,28 @@ def write_sweep(path: str | Path, sweep: GravitySweep, profile: RobotProfile) ->
 
 
 def read_sweep(path: str | Path, profile: RobotProfile) -> GravitySweep:
-    payload = _verify(path, profile, SWEEP_KIND, SWEEP_SCHEMA_VERSION)
+    payload = _verify(path, profile, SWEEP_KIND, SWEEP_SCHEMA_VERSION, minimum=1)
     name, names = _group_joints(payload, profile, SWEEP_KIND)
     rounds = payload.get("rounds") or []
     try:
+        scales = np.array([entry["scale"] for entry in rounds], dtype=float)
+        modelled = np.array(
+            [entry["modelled_torque"] for entry in rounds], dtype=float
+        )
+        # A version 1 file predates the field. Its excitation could only ever
+        # publish a multiple of the model, so that product is not a guess.
+        applied = (
+            np.array([entry["applied_torque"] for entry in rounds], dtype=float)
+            if rounds and "applied_torque" in rounds[0]
+            else scales * modelled
+        )
         return GravitySweep(
             group=name,
             joint_names=names,
             poses=np.array([entry["pose"] for entry in rounds], dtype=float),
-            modelled_torque=np.array(
-                [entry["modelled_torque"] for entry in rounds], dtype=float
-            ),
-            scales=np.array([entry["scale"] for entry in rounds], dtype=float),
-            applied_torque=np.array(
-                [entry["applied_torque"] for entry in rounds], dtype=float
-            ),
+            modelled_torque=modelled,
+            scales=scales,
+            applied_torque=applied,
             errors=np.array([entry["error"] for entry in rounds], dtype=float),
             sweep_joint=payload.get("sweep_joint"),
         )
