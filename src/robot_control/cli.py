@@ -2328,6 +2328,26 @@ def _report_static(estimate, poses: int, *, staircase=None) -> None:
     with `dataclasses.replace`, so they are read from *estimate* here like
     every other column.
     """
+    # Widths of the gravity-fit columns between kp and the three staircase
+    # columns (alpha, offset, residual, cond, rounds, frozen), shared by the
+    # full row below and by the short row a fully-unidentified joint prints
+    # instead. `blank_middle` is built from these same numbers rather than a
+    # counted-by-hand literal, so the short row's padding cannot silently
+    # drift out of alignment if any of these widths ever changes.
+    ALPHA_WIDTH = 7
+    OFFSET_WIDTH = 14
+    RESIDUAL_WIDTH = 15
+    CONDITION_WIDTH = 6
+    USED_WIDTH = 7
+    EXCLUDED_WIDTH = 7
+    blank_middle = " ".join(
+        f"{'':>{width}}"
+        for width in (
+            ALPHA_WIDTH, OFFSET_WIDTH, RESIDUAL_WIDTH,
+            CONDITION_WIDTH, USED_WIDTH, EXCLUDED_WIDTH,
+        )
+    )
+
     print(f"identify: {poses} poses, {estimate.used.max()} rounds at most per joint")
     print(
         "  joint            kp (N.m/rad)   alpha   offset (rad)  "
@@ -2344,8 +2364,8 @@ def _report_static(estimate, poses: int, *, staircase=None) -> None:
         fo = _static_column(estimate.bias_nm, index)
         if not np.isfinite(stiffness):
             print(
-                f"  {name:<16} {'—':>12}"
-                f"{'':>44} {stair_kp:>12} {fc:>9} {fo:>9}"
+                f"  {name:<16} {'—':>12} {blank_middle} "
+                f"{stair_kp:>12} {fc:>9} {fo:>9}"
             )
             continue
         # alpha alone can be nan here even though stiffness was identified:
@@ -2353,12 +2373,19 @@ def _report_static(estimate, poses: int, *, staircase=None) -> None:
         # fully-unidentified row above uses, not a bare nan next to numbers
         # that are all real answers.
         alpha = estimate.torque_scale[index]
-        alpha_column = f"{alpha:7.3f}" if np.isfinite(alpha) else f"{'—':>7}"
+        alpha_column = (
+            f"{alpha:{ALPHA_WIDTH}.3f}"
+            if np.isfinite(alpha)
+            else f"{'—':>{ALPHA_WIDTH}}"
+        )
         print(
             f"  {name:<16} {stiffness:12.2f} {alpha_column} "
-            f"{estimate.offset[index]:+14.5f} {estimate.residual_rmse[index]:15.5f} "
-            f"{estimate.condition[index]:6.1f} {estimate.used[index]:7d} "
-            f"{estimate.excluded[index]:7d} {stair_kp:>12} {fc:>9} {fo:>9}"
+            f"{estimate.offset[index]:+{OFFSET_WIDTH}.5f} "
+            f"{estimate.residual_rmse[index]:{RESIDUAL_WIDTH}.5f} "
+            f"{estimate.condition[index]:{CONDITION_WIDTH}.1f} "
+            f"{estimate.used[index]:{USED_WIDTH}d} "
+            f"{estimate.excluded[index]:{EXCLUDED_WIDTH}d} "
+            f"{stair_kp:>12} {fc:>9} {fo:>9}"
         )
     for name, reason in estimate.unidentifiable:
         print(f"  {name}: not identified (gravity) — {reason}")

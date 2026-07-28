@@ -259,7 +259,10 @@ def test_identify_reports_fc_and_fo_from_a_staircase_sweep(tmp_path, profile, ca
     """A staircase mixed in with the usual gravity sweeps must not be mistaken
     for gravity data — kp/alpha stay the gravity fit's — but must still carry
     Fc and Fo for the joint it covered, and leave every other joint's Fc/Fo at
-    the file's usual '—' for a value that was never measured.
+    the file's usual '—' for a value that was never measured. This is the
+    real origin of the chain the brief describes end to end: `_identify`
+    actually runs `fit_staircase` and the merged estimate actually reaches
+    the written file, not just the console.
     """
     output = tmp_path / "static.json"
     paths = _poses(tmp_path, profile) + [
@@ -274,6 +277,59 @@ def test_identify_reports_fc_and_fo_from_a_staircase_sweep(tmp_path, profile, ca
     uncovered = _joint_row(out, "r_aj_1")
     assert "—" not in covered, covered
     assert "—" in uncovered, uncovered
+    # json.loads parses `null` and the non-standard `NaN` token the same way,
+    # so the only way to pin which one is actually on disk is to read the
+    # file as raw text before parsing it.
+    text = output.read_text()
+    assert "null" in text
+    assert "NaN" not in text
+    payload = json.loads(text)
+    joints = profile.groups[GROUP].joints
+    covered_index = joints.index("r_aj_5")
+    coulomb = payload["coulomb_nm"]
+    bias = payload["bias_nm"]
+    assert coulomb[covered_index] is not None
+    assert coulomb[covered_index] == pytest.approx(0.05, rel=0.15)
+    assert bias[covered_index] is not None
+    for index in range(len(joints)):
+        if index == covered_index:
+            continue
+        assert coulomb[index] is None, coulomb
+        assert bias[index] is None, bias
+
+
+def test_identify_continues_when_the_staircase_fit_raises(
+    tmp_path, profile, monkeypatch, capsys
+):
+    """`fit_staircase` raising is a structural failure (no sweeps, mismatched
+    joints) rather than a per-joint one, and unreachable in practice here
+    since `fit_static_gravity` already validated group/joint agreement across
+    the same sweep list moments earlier. Still, the brief asks for the catch,
+    so this pins the behaviour with a monkeypatch: report and continue on the
+    gravity estimate, the same technique Task 9 used for its own
+    unreachable-in-practice path.
+    """
+    from robot_control.identification import FitError
+
+    def _raise(_sweeps):
+        raise FitError("staircase blew up")
+
+    monkeypatch.setattr("robot_control.cli.fit_staircase", _raise)
+    output = tmp_path / "static.json"
+    paths = _poses(tmp_path, profile) + [
+        _staircase_pose(tmp_path, profile, joint="r_aj_5")
+    ]
+
+    code = main(_argv(paths, output))
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "staircase: staircase blew up" in out
+    payload = json.loads(output.read_text())
+    # The merge never happened, so the file looks exactly like a gravity-only
+    # run: neither key present, same as `fit_static_gravity`'s own None.
+    assert "coulomb_nm" not in payload
+    assert "bias_nm" not in payload
 
 
 def test_identify_without_a_staircase_still_writes_the_same_numbers(
