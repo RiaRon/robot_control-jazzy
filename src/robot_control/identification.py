@@ -179,6 +179,13 @@ class StaticEstimate:
     used: np.ndarray
     excluded: np.ndarray
     unidentifiable: tuple[tuple[str, str], ...]
+    #: Fc, N.m: the torque the joint holds without any position error at all,
+    #: measured as the gap between the staircase's two branches. NaN where only
+    #: gravity sweeps covered the joint.
+    coulomb_nm: np.ndarray | None = None
+    #: Fo + tau_gravity, N.m: where the staircase's midline crosses zero
+    #: torque. NaN where only gravity sweeps covered the joint.
+    bias_nm: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -465,6 +472,121 @@ def fit_static_gravity(
         used=used,
         excluded=excluded,
         unidentifiable=tuple(unidentifiable),
+    )
+
+
+#: How far a staircase's two branch slopes may differ, as a fraction of their
+#: mean, before the pair is refused rather than averaged. Two branches from one
+#: spring-with-friction joint share a slope; a bigger gap means something else
+#: moved between them.
+BRANCH_SLOPE_TOLERANCE = 0.25
+
+
+def fit_staircase(sweeps: Sequence[GravitySweep]) -> StaticEstimate:
+    """Fit kp, Coulomb friction and bias from a torque staircase.
+
+    Static equilibrium under dry friction is an inequality, not an equation:
+    the joint holds anywhere within Fc of balance. Running the torque up and
+    back down therefore traces two parallel lines whose slope is -1/kp and
+    whose separation is 2 Fc / kp, so both come out of two ordinary least
+    squares rather than a search over breakpoints.
+    """
+    sweeps = list(sweeps)
+    if not sweeps:
+        raise FitError("a staircase fit needs at least one sweep")
+    names = sweeps[0].joint_names
+    group = sweeps[0].group
+    for sweep in sweeps[1:]:
+        # Group first: it is the identity the operator chose, and a group
+        # mismatch always drags a joint mismatch along behind it.
+        if sweep.group != group:
+            raise FitError(
+                f"sweeps cover different groups: {group!r} and {sweep.group!r}"
+            )
+        if sweep.joint_names != names:
+            raise FitError(
+                f"sweeps cover different joints: {list(names)} against "
+                f"{list(sweep.joint_names)}"
+            )
+
+    width = len(names)
+    stiffness = np.full(width, np.nan)
+    coulomb = np.full(width, np.nan)
+    bias = np.full(width, np.nan)
+    residual = np.full(width, np.nan)
+    used = np.zeros(width, dtype=int)
+    unidentifiable: list[tuple[str, str]] = []
+
+    for joint, name in enumerate(names):
+        rising, falling = [], []
+        for sweep in sweeps:
+            applied = sweep.applied_torque[:, joint]
+            errors = sweep.errors[:, joint]
+            if float(np.ptp(applied)) <= 0.0:
+                continue
+            peak = int(np.argmax(applied))
+            # The peak round belongs to the rising branch only: its deflection
+            # was reached travelling upward, so putting it in the falling
+            # branch too would put a point a full 2 Fc/kp off that branch's
+            # line and drag the fit.
+            rising.extend(zip(applied[: peak + 1], errors[: peak + 1]))
+            falling.extend(zip(applied[peak + 1 :], errors[peak + 1 :]))
+        used[joint] = len(rising) + len(falling)
+        if len(rising) < 2 or len(falling) < 2:
+            unidentifiable.append(
+                (name, f"{len(rising)} rising and {len(falling)} falling rounds; "
+                       "each branch needs two")
+            )
+            continue
+
+        fits = []
+        for branch in (rising, falling):
+            torques = np.array([value for value, _ in branch])
+            deflections = np.array([value for _, value in branch])
+            fits.append(np.polyfit(torques, deflections, 1))
+        slopes = np.array([fit[0] for fit in fits])
+        if np.any(slopes >= 0):
+            unidentifiable.append(
+                (name, "deflection grew with the torque opposing it, so the "
+                       "joint did not respond the way a spring does")
+            )
+            continue
+        mean_slope = float(np.mean(slopes))
+        if abs(slopes[0] - slopes[1]) > BRANCH_SLOPE_TOLERANCE * abs(mean_slope):
+            unidentifiable.append(
+                (name, f"the two branches differ in slope by "
+                       f"{abs(slopes[0] - slopes[1]) / abs(mean_slope):.0%}, over "
+                       f"{BRANCH_SLOPE_TOLERANCE:.0%}: not one spring with dry friction")
+            )
+            continue
+
+        stiffness[joint] = -1.0 / mean_slope
+        intercepts = np.array([fit[1] for fit in fits])
+        coulomb[joint] = abs(intercepts[0] - intercepts[1]) * stiffness[joint] / 2.0
+        bias[joint] = float(np.mean(intercepts)) * stiffness[joint]
+        predicted = np.concatenate([
+            np.polyval(fit, np.array([value for value, _ in branch]))
+            for fit, branch in zip(fits, (rising, falling))
+        ])
+        measured = np.concatenate([
+            np.array([value for _, value in branch]) for branch in (rising, falling)
+        ])
+        residual[joint] = float(np.sqrt(np.mean((predicted - measured) ** 2)))
+
+    return StaticEstimate(
+        joint_names=names,
+        stiffness=stiffness,
+        # alpha is a statement about the gravity model; this fit never
+        # consulted one, so nothing distinguishes one value of it from another.
+        torque_scale=np.full(width, np.nan),
+        offset=np.full(width, np.nan),
+        residual_rmse=residual,
+        condition=np.full(width, np.nan),
+        used=used,
+        excluded=np.zeros(width, dtype=int),
+        unidentifiable=tuple(unidentifiable),
+        coulomb_nm=coulomb,
+        bias_nm=bias,
     )
 
 

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ from robot_control.identification import (
     GravitySweep,
     build_excitation,
     fit_second_order,
+    fit_staircase,
     fit_static_gravity,
     split_repetitions,
     validate_holdout,
@@ -239,3 +241,51 @@ def test_the_generalised_regression_reproduces_the_measured_estimate(profile):
         assert estimate.stiffness[index] == pytest.approx(
             EXPECTED_STIFFNESS[name], rel=1e-3
         ), f"{name} moved; the regression change was not an identity"
+
+
+def _staircase_sweep(kp, coulomb, gravity, peak=0.6, steps=5):
+    """A joint that behaves exactly like a spring with dry friction."""
+    from robot_control.excitation import staircase
+
+    values = staircase(peak, steps)
+    errors, held = [], None
+    for index, applied in enumerate(values):
+        target = (gravity - applied) / kp
+        if held is None or abs(target - held) > coulomb / kp:
+            direction = 1.0 if index < steps else -1.0
+            held = target + direction * coulomb / kp
+        errors.append(held)
+    return GravitySweep(
+        group="openarm_right_arm",
+        joint_names=("r_aj_5",),
+        poses=np.zeros((len(values), 1)),
+        modelled_torque=np.zeros((len(values), 1)),
+        scales=np.zeros((len(values), 1)),
+        applied_torque=np.array(values).reshape(-1, 1),
+        errors=np.array(errors).reshape(-1, 1),
+    )
+
+
+def test_the_staircase_recovers_stiffness_friction_and_bias():
+    """Rounds inside the stiction band are the measurement here, not noise.
+    The gravity fit drops them; seventeen of the wrist's twenty-seven rounds
+    were dropped that way, and they are exactly the ones that carry Fc."""
+    estimate = fit_staircase([_staircase_sweep(kp=15.0, coulomb=0.08, gravity=0.2)])
+
+    assert estimate.stiffness[0] == pytest.approx(15.0, rel=0.05)
+    assert estimate.coulomb_nm[0] == pytest.approx(0.08, rel=0.15)
+    assert estimate.bias_nm[0] == pytest.approx(0.2, rel=0.15)
+
+
+def test_a_joint_whose_branches_disagree_in_slope_is_not_identified():
+    """Two branches that are not parallel did not come from a spring with dry
+    friction, and a number fitted to them would describe nothing."""
+    sweep = _staircase_sweep(kp=15.0, coulomb=0.08, gravity=0.2)
+    bent = sweep.errors.copy()
+    bent[len(bent) // 2:] *= 3.0
+    sweep = replace(sweep, errors=bent)
+
+    estimate = fit_staircase([sweep])
+
+    assert np.isnan(estimate.stiffness[0])
+    assert any("r_aj_5" == name for name, _ in estimate.unidentifiable)
