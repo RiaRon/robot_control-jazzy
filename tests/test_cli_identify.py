@@ -287,7 +287,9 @@ def test_identify_reports_fc_and_fo_from_a_staircase_sweep(tmp_path, profile, ca
     joints = profile.groups[GROUP].joints
     covered_index = joints.index("r_aj_5")
     coulomb = payload["coulomb_nm"]
-    bias = payload["bias_nm"]
+    # Fo + tau_gravity(pose), which is why it is not called bias_nm: the fit
+    # file's key of that name holds Fo alone.
+    bias = payload["bias_with_gravity_nm"]
     assert coulomb[covered_index] is not None
     assert coulomb[covered_index] == pytest.approx(0.05, rel=0.15)
     assert bias[covered_index] is not None
@@ -329,6 +331,7 @@ def test_identify_continues_when_the_staircase_fit_raises(
     # The merge never happened, so the file looks exactly like a gravity-only
     # run: neither key present, same as `fit_static_gravity`'s own None.
     assert "coulomb_nm" not in payload
+    assert "bias_with_gravity_nm" not in payload
     assert "bias_nm" not in payload
 
 

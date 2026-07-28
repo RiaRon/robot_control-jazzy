@@ -211,8 +211,12 @@ class StaticEstimate:
     #: measured as the gap between the staircase's two branches. NaN where only
     #: gravity sweeps covered the joint.
     coulomb_nm: np.ndarray | None = None
-    #: Fo + tau_gravity, N.m: where the staircase's midline crosses zero
-    #: torque. NaN where only gravity sweeps covered the joint.
+    #: Fo + tau_gravity(pose), N.m: where the staircase's midline crosses zero
+    #: torque, with the pose's gravity torque still in it — this fit has no
+    #: gravity column to separate the two. Not the same quantity as the fit
+    #: file's `bias_nm`, which is Fo alone; written out under the name
+    #: `bias_with_gravity_nm` for exactly that reason. NaN where only gravity
+    #: sweeps covered the joint.
     bias_nm: np.ndarray | None = None
 
 

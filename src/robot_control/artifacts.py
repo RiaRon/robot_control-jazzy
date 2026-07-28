@@ -26,10 +26,13 @@ SWEEP_SCHEMA_VERSION = 2
 #: Bumped when a payload's meaning changes, not when a field is added that older
 #: readers can ignore. 2: coulomb_nm/bias_nm joined the payload — each written
 #: only when the fit that produced this estimate actually measured it, so a
-#: gravity-only run (still the common case) writes a version 2 file with
-#: neither key present. `read_static_estimate` below keys off presence, not
-#: off this number, the same way `read_sweep` handles its own version 2.
-STATIC_SCHEMA_VERSION = 2
+#: gravity-only run (still the common case) writes a file with neither key
+#: present. `read_static_estimate` below keys off presence, not off this
+#: number, the same way `read_sweep` handles its own version 2. 3: bias_nm
+#: became bias_with_gravity_nm. A version 2 reader would find no bias key in a
+#: version 3 file and conclude none was measured, so the number has to move
+#: for it to refuse the file instead.
+STATIC_SCHEMA_VERSION = 3
 
 SWEEP_KIND = "gravity_sweep"
 STATIC_KIND = "static_gravity_estimate"
@@ -290,8 +293,12 @@ def write_static_estimate(
     # unmeasured, unlike the undetermined-alpha case above, which is refused.
     if estimate.coulomb_nm is not None:
         payload["coulomb_nm"] = nan_to_null(estimate.coulomb_nm.tolist())
+    # Named for what it holds, which is Fo *plus* the pose's gravity torque —
+    # `r2s fit` writes a `bias_nm` of its own that is Fo alone, and the two
+    # files get read side by side. The fit file calls this same quantity
+    # `static_bias_nm`, named from where it arrives rather than what it is.
     if estimate.bias_nm is not None:
-        payload["bias_nm"] = nan_to_null(estimate.bias_nm.tolist())
+        payload["bias_with_gravity_nm"] = nan_to_null(estimate.bias_nm.tolist())
     _sign_and_write(path, payload)
 
 
@@ -321,18 +328,21 @@ def read_static_estimate(path: str | Path, profile: RobotProfile) -> StaticArtif
             )
         return values
 
-    def optional_grid(key: str) -> np.ndarray | None:
-        """None when *key* is absent: a version 1 file, or a fit that never
-        ran a staircase — the same "never measured" default `StaticEstimate`
-        itself uses, not a nan-filled array standing in for a distinction the
-        file does not actually carry. `dtype=float` turns a stored `null`
-        (JSON's spelling of the `nan_to_null` conversion the writer applied)
-        back into `nan` for free — the same conversion `read_sweep` relies on
-        needing no matching "null_to_nan" step of its own.
+    def optional_grid(*keys: str) -> np.ndarray | None:
+        """None when none of *keys* is present: a version 1 file, or a fit that
+        never ran a staircase — the same "never measured" default
+        `StaticEstimate` itself uses, not a nan-filled array standing in for a
+        distinction the file does not actually carry. `dtype=float` turns a
+        stored `null` (JSON's spelling of the `nan_to_null` conversion the
+        writer applied) back into `nan` for free — the same conversion
+        `read_sweep` relies on needing no matching "null_to_nan" step of its
+        own. Later *keys* are the names earlier schema versions gave the same
+        quantity.
         """
-        if key not in payload:
-            return None
-        return grid(key)
+        for key in keys:
+            if key in payload:
+                return grid(key)
+        return None
 
     try:
         estimate = StaticEstimate(
@@ -346,7 +356,8 @@ def read_static_estimate(path: str | Path, profile: RobotProfile) -> StaticArtif
             excluded=grid("rounds_excluded", int),
             unidentifiable=(),
             coulomb_nm=optional_grid("coulomb_nm"),
-            bias_nm=optional_grid("bias_nm"),
+            # `bias_nm` is what versions 1 and 2 called the same quantity.
+            bias_nm=optional_grid("bias_with_gravity_nm", "bias_nm"),
         )
     except (TypeError, ValueError) as error:
         raise ArtifactError(f"malformed static estimate: {error}") from error

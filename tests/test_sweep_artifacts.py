@@ -310,12 +310,61 @@ def test_a_static_estimate_carries_coulomb_and_bias_through_a_file(profile, tmp_
     assert "NaN" not in text
 
 
+def test_the_static_bias_key_says_the_gravity_torque_is_still_in_it(
+    profile, tmp_path
+):
+    """A staircase's bias is Fo + tau_gravity(pose) — where the midline of the
+    two branches crosses zero torque, with the pose's gravity torque still in
+    it. `r2s fit` writes a key called `bias_nm` too, and that one is Fo alone.
+    Two files, one name, two quantities: nothing in the code confuses them, but
+    the files are meant to be read side by side by a person.
+    """
+    from robot_control.artifacts import write_static_estimate
+
+    width = len(profile.groups[GROUP].joints)
+    bias = np.full(width, np.nan)
+    bias[0] = 0.3
+    original = dataclasses.replace(_estimate(profile), bias_nm=bias)
+    path = tmp_path / "static.json"
+
+    write_static_estimate(
+        path, original, profile, group=GROUP, noise_rad=4e-4, sources=[]
+    )
+
+    payload = json.loads(path.read_text())
+    assert payload["bias_with_gravity_nm"][0] == pytest.approx(0.3)
+    assert "bias_nm" not in payload
+
+
+def test_a_static_estimate_written_before_the_rename_still_loads(profile, tmp_path):
+    """The reader keys off presence, so the old name costs nothing to accept
+    and every estimate already on disk carries it."""
+    from robot_control.artifacts import read_static_estimate, write_static_estimate
+
+    width = len(profile.groups[GROUP].joints)
+    bias = np.full(width, np.nan)
+    bias[0] = 0.3
+    original = dataclasses.replace(_estimate(profile), bias_nm=bias)
+    path = tmp_path / "static.json"
+    write_static_estimate(
+        path, original, profile, group=GROUP, noise_rad=4e-4, sources=[]
+    )
+    payload = json.loads(path.read_text())
+    payload["bias_nm"] = payload.pop("bias_with_gravity_nm")
+    payload["schema_version"] = 2
+    _resign(path, payload)
+
+    loaded = read_static_estimate(path, profile).estimate
+
+    assert loaded.bias_nm[0] == pytest.approx(0.3)
+
+
 def test_a_static_estimate_with_no_staircase_never_writes_the_keys_at_all(
     profile, tmp_path
 ):
     """The common case: a gravity-only run. coulomb_nm/bias_nm stay `None` —
     `fit_static_gravity` never sets them — and the file this writes carries
-    neither key at all, rather than a version 2 file full of `null`."""
+    neither key at all, rather than one full of `null`."""
     from robot_control.artifacts import read_static_estimate, write_static_estimate
 
     path = tmp_path / "static.json"
