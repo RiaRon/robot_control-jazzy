@@ -293,7 +293,20 @@ def load_bundle(path: str | Path, profile: RobotProfile) -> CalibrationBundle:
     if checksum:
         unsigned = dict(payload)
         unsigned.pop("checksum_sha256")
-        actual = hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
+        try:
+            actual = hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
+        except ValueError as error:
+            # json.loads already accepted the file — Python's own reader
+            # takes the non-standard `NaN` token on the way in — so this is
+            # not a checksum mismatch, it is a bundle old enough to predate
+            # the null convention Fc/Fo now write. Named here rather than
+            # left to surface as _canonical_bytes's bare "out of range float"
+            # ValueError, which says nothing about what to do about it.
+            raise CalibrationError(
+                "bundle carries a non-standard NaN token instead of null — it "
+                "predates the null convention for an unmeasured Fc/Fo and "
+                "needs regenerating with r2s fit"
+            ) from error
         if checksum != actual:
             raise CalibrationError("bundle checksum mismatch")
     control = payload.get("controller", {})

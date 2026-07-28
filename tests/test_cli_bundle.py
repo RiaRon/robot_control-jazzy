@@ -1,12 +1,14 @@
 """`robotctl r2s bundle`, and what validate and export then see."""
 
+import hashlib
 import json
 
 import numpy as np
 import pytest
 
-from robot_control.calibration import write_bundle
+from robot_control.calibration import identified_block, write_bundle
 from robot_control.cli import main
+from robot_control.identification import CombinedEstimate
 from robot_control.profile import load_builtin_profile
 
 
@@ -200,6 +202,98 @@ def test_bundle_needs_its_three_paths(base, tmp_path, capsys):
 
     assert code == 2
     assert "--fit" in capsys.readouterr().out
+
+
+def _old_style_nan_base(path, profile):
+    """A --base bundle exactly as `write_bundle` produced before commit
+    4c11045: a real nan in the identified block, written with `json.dumps`
+    at its default `allow_nan=True`, and a checksum computed the same way —
+    the historical shape a bundle already on disk actually has, not a
+    hand-edited approximation of one.
+    """
+    groups = {
+        name: {
+            "nominal": {
+                "stiffness": 50.0, "damping": 2.0, "friction": 0.1,
+                "effort_limit": 10.0, "velocity_limit": 2.0,
+            }
+        }
+        for name in profile.groups
+    }
+    width = len(profile.groups[GROUP].joints)
+    combined = CombinedEstimate(
+        joint_names=profile.groups[GROUP].joints,
+        inertia=np.full(width, 0.1),
+        damping=np.full(width, 2.0),
+        friction=np.full(width, 0.2),
+        stiffness=np.full(width, 50.0),
+        inertia_from_gravity=np.full(width, 0.1),
+        disagreement=np.zeros(width),
+        # One joint's staircase measured, six not — the exact shape the
+        # review reproduced.
+        coulomb_nm=np.concatenate([[0.08], np.full(width - 1, np.nan)]),
+    )
+    groups[GROUP]["identified"] = identified_block(
+        combined, profile, torque_scale=np.ones(width),
+        sweep_sha256=["a" * 64], track_sha256="c" * 64,
+    )
+    payload = {
+        "schema_version": 2,
+        "profile": profile.name,
+        "asset": {"id": profile.asset_id, "manifest_sha256": profile.manifest_sha256},
+        "controller": {
+            "command_period_sec": 0.01, "delay_sec": 0.02,
+            "interpolation": "linear", "filter": {"type": "none"},
+        },
+        "groups": groups,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    out = dict(payload)
+    out["checksum_sha256"] = hashlib.sha256(canonical).hexdigest()
+    path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def test_bundle_refuses_a_base_predating_the_null_convention_cleanly(
+    profile, tmp_path, capsys
+):
+    """A base bundle written before Fc/Fo's null conversion carries a literal
+    NaN token. json.loads still parses it — Python's own reader accepts the
+    token on the way in — so the crash used only to surface once the
+    checksum was recomputed. This has to come back as a checked `error:`
+    line and the usual exit code, like every other unreadable base — not a
+    traceback.
+    """
+    base = _old_style_nan_base(tmp_path / "base.json", profile)
+
+    code = main(
+        ["r2s", "bundle", "--base", str(base), "--output", str(tmp_path / "out.json"),
+         "--fit", str(_fit(tmp_path / "right.json"))]
+    )
+
+    assert code == 2
+    out = capsys.readouterr().out
+    assert "error" in out
+    assert "NaN" in out
+
+
+def test_bundle_refuses_a_base_that_is_not_valid_json_cleanly(tmp_path, capsys):
+    """Isolates the other half of the fix: `json.loads` on malformed JSON
+    raises `json.JSONDecodeError`, a `ValueError` but not a
+    `CalibrationError` — the one case the null-token fix above doesn't touch,
+    since it never reaches `_canonical_bytes` at all. `_bundle` has to catch
+    this the same way `validate` and `export` already do on the same call.
+    """
+    base = tmp_path / "base.json"
+    base.write_text("{not json")
+
+    code = main(
+        ["r2s", "bundle", "--base", str(base), "--output", str(tmp_path / "out.json"),
+         "--fit", str(_fit(tmp_path / "right.json"))]
+    )
+
+    assert code == 2
+    assert "error" in capsys.readouterr().out
 
 
 def _metrics(path):

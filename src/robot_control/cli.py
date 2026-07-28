@@ -2027,7 +2027,11 @@ def _bundle(args, profile) -> int:
         return UNUSABLE
     try:
         base = load_bundle(args.base, profile)
-    except (CalibrationError, OSError) as error:
+    except (CalibrationError, OSError, ValueError) as error:
+        # Matches validate's and export's own catch on the same call: a base
+        # that cannot be read is a checked outcome here too, whatever form
+        # that unreadability takes (malformed JSON, an asset mismatch, or a
+        # bundle old enough to predate a since-added convention).
         print(f"error: {error}")
         return UNUSABLE
     if base.schema_version != 2:

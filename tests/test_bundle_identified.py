@@ -6,6 +6,7 @@ another robot's bundle, which is the one failure a checksum cannot catch — the
 checksum is recomputed on write, so it signs whatever was pasted.
 """
 
+import hashlib
 import json
 
 import numpy as np
@@ -22,6 +23,23 @@ from robot_control.profile import load_builtin_profile
 
 
 GROUP = "openarm_right_arm"
+
+
+def _write_old_style_nan_bundle(path, payload) -> None:
+    """Reproduce the exact file `write_bundle` produced before commit
+    4c11045: the checksum computed over the raw payload with plain
+    `json.dumps` (`allow_nan` at its default, True), and the signed file
+    written the same way. A real nan in the identified block therefore lands
+    on disk as the literal `NaN` token, with a checksum that verifies against
+    exactly that — the historical shape a pre-existing bundle actually has,
+    not a hand-edited approximation of one.
+    """
+    unsigned = dict(payload)
+    unsigned.pop("checksum_sha256", None)
+    canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    out = dict(unsigned)
+    out["checksum_sha256"] = hashlib.sha256(canonical).hexdigest()
+    path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
 
 
 @pytest.fixture
@@ -263,6 +281,34 @@ def test_a_nan_measurement_writes_null_on_disk_and_reads_back_as_nan(profile, tm
     identified = bundle.identified[GROUP]
     assert identified.coulomb_nm[0] == pytest.approx(0.08)
     assert np.all(np.isnan(identified.coulomb_nm[1:]))
+
+
+def test_a_bundle_predating_the_null_convention_is_named_not_a_bare_valueerror(
+    profile, tmp_path
+):
+    """`json.loads` parses the file's literal NaN token fine — Python's own
+    reader accepts it — so the failure only surfaces when the checksum is
+    recomputed through `_canonical_bytes`'s `allow_nan=False`. That has to
+    come back as a `CalibrationError` naming the real cause, not `_canonical_
+    bytes`'s bare "out of range float" `ValueError`, and not a false
+    "checksum mismatch" — the checksum is not wrong, it is unrepresentable.
+    """
+    path = tmp_path / "bundle.json"
+    payload = _base(profile)
+    block = identified_block(
+        _combined_fully_measured(profile),
+        profile,
+        torque_scale=np.ones(7),
+        sweep_sha256=["a" * 64],
+        track_sha256="c" * 64,
+    )
+    block["coulomb_nm"][1] = float("nan")
+    payload["groups"][GROUP]["identified"] = block
+    _write_old_style_nan_bundle(path, payload)
+
+    with pytest.raises(CalibrationError, match="NaN") as excinfo:
+        load_bundle(path, profile)
+    assert "regenerat" in str(excinfo.value)
 
 
 def test_a_negative_coulomb_measurement_is_refused(profile, tmp_path):
