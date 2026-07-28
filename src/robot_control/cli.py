@@ -989,7 +989,7 @@ def _measure_sweep(
     adapter, chain, gate, group, rounds, hold_sec, index, sweep_joint
 ) -> GravitySweep:
     """Hold each scale in turn, read what the arm did, and release the torque."""
-    poses, torques, applied, errors = [], [], [], []
+    poses, torques, applied, published, errors = [], [], [], [], []
     try:
         for scales in rounds:
             # Recomputed each round: compensation moves the arm, and the torque
@@ -1002,6 +1002,7 @@ def _measure_sweep(
             poses.append(state)
             torques.append(torque)
             applied.append(scales)
+            published.append(effort)
             errors.append(error)
             print(
                 f"scale {_scale_label(scales, index):>8}: worst joint error "
@@ -1018,6 +1019,7 @@ def _measure_sweep(
         poses=np.asarray(poses, dtype=float),
         modelled_torque=np.asarray(torques, dtype=float),
         scales=np.asarray(applied, dtype=float),
+        applied_torque=np.asarray(published, dtype=float),
         errors=np.asarray(errors, dtype=float),
         sweep_joint=sweep_joint,
     )

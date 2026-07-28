@@ -37,6 +37,7 @@ def _sweep(profile, group=GROUP, sweep_joint=None):
         poses=poses,
         modelled_torque=torque,
         scales=scales,
+        applied_torque=scales * torque,
         errors=(torque - scales * torque) / 20.0,
         sweep_joint=sweep_joint,
     )
@@ -52,7 +53,7 @@ def test_a_sweep_round_trips_through_a_file(profile, tmp_path):
     assert loaded.group == original.group
     assert loaded.joint_names == original.joint_names
     assert loaded.sweep_joint == "r_aj_2"
-    for field in ("poses", "modelled_torque", "scales", "errors"):
+    for field in ("poses", "modelled_torque", "scales", "applied_torque", "errors"):
         np.testing.assert_allclose(getattr(loaded, field), getattr(original, field))
 
 
@@ -159,6 +160,7 @@ def test_a_sweep_with_no_rounds_is_refused(profile):
             poses=good.poses[:0],
             modelled_torque=good.modelled_torque[:0],
             scales=good.scales[:0],
+            applied_torque=good.applied_torque[:0],
             errors=good.errors[:0],
         )
 

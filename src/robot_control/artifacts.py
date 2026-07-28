@@ -148,6 +148,7 @@ def write_sweep(path: str | Path, sweep: GravitySweep, profile: RobotProfile) ->
                     "pose": sweep.poses[index].tolist(),
                     "modelled_torque": sweep.modelled_torque[index].tolist(),
                     "scale": sweep.scales[index].tolist(),
+                    "applied_torque": sweep.applied_torque[index].tolist(),
                     "error": sweep.errors[index].tolist(),
                 }
                 for index in range(sweep.rounds)
@@ -170,6 +171,9 @@ def read_sweep(path: str | Path, profile: RobotProfile) -> GravitySweep:
                 [entry["modelled_torque"] for entry in rounds], dtype=float
             ),
             scales=np.array([entry["scale"] for entry in rounds], dtype=float),
+            applied_torque=np.array(
+                [entry["applied_torque"] for entry in rounds], dtype=float
+            ),
             errors=np.array([entry["error"] for entry in rounds], dtype=float),
             sweep_joint=payload.get("sweep_joint"),
         )

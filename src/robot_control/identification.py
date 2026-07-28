@@ -105,12 +105,16 @@ class GravitySweep:
     modelled_torque: np.ndarray
     #: (rounds, joints) the fraction of it actually published.
     scales: np.ndarray
+    #: (rounds, joints) the torque actually published, in N.m. Not derivable
+    #: from scales once an excitation publishes a torque of its own choosing
+    #: rather than a multiple of the model.
+    applied_torque: np.ndarray
     #: (rounds, joints) the controller's own tracking error after the hold.
     errors: np.ndarray
     #: The joint whose scale varied, when the sweep varied only one.
     sweep_joint: str | None = None
 
-    _GRIDS = ("poses", "modelled_torque", "scales", "errors")
+    _GRIDS = ("poses", "modelled_torque", "scales", "applied_torque", "errors")
 
     def __post_init__(self) -> None:
         names = tuple(str(name) for name in self.joint_names)
@@ -129,8 +133,8 @@ class GravitySweep:
         counts = {getattr(self, name).shape[0] for name in self._GRIDS}
         if len(counts) != 1:
             raise FitError(
-                "every round needs a pose, a modelled torque, a scale and an "
-                f"error, but the counts differ: {sorted(counts)}"
+                "every round needs a pose, a modelled torque, a scale, an "
+                f"applied torque and an error, but the counts differ: {sorted(counts)}"
             )
         if self.rounds == 0:
             raise FitError("a sweep needs at least one round")

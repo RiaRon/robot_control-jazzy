@@ -3,6 +3,7 @@ import pytest
 
 from robot_control.identification import (
     FitError,
+    GravitySweep,
     build_excitation,
     fit_second_order,
     split_repetitions,
@@ -150,3 +151,33 @@ def test_holdout_gates_and_model_inadequate_status():
     )
     assert failed.status == "model_inadequate"
     assert "tesollo_rmse" in failed.failures
+
+
+def test_a_sweep_records_the_torque_it_published():
+    """The regression's second column is the applied torque, and it has to be
+    able to come from somewhere other than a multiple of the model — that is
+    the whole point of driving a joint gravity does not reach."""
+    sweep = GravitySweep(
+        group="openarm_right_arm",
+        joint_names=("r_aj_1", "r_aj_2"),
+        poses=np.zeros((2, 2)),
+        modelled_torque=np.array([[1.0, 2.0], [1.0, 2.0]]),
+        scales=np.zeros((2, 2)),
+        applied_torque=np.array([[0.3, -0.3], [-0.3, 0.3]]),
+        errors=np.zeros((2, 2)),
+    )
+
+    assert sweep.applied_torque.tolist() == [[0.3, -0.3], [-0.3, 0.3]]
+
+
+def test_a_sweep_refuses_an_applied_torque_of_the_wrong_shape():
+    with pytest.raises(FitError, match="applied_torque"):
+        GravitySweep(
+            group="openarm_right_arm",
+            joint_names=("r_aj_1", "r_aj_2"),
+            poses=np.zeros((2, 2)),
+            modelled_torque=np.zeros((2, 2)),
+            scales=np.zeros((2, 2)),
+            applied_torque=np.zeros((2, 3)),
+            errors=np.zeros((2, 2)),
+        )

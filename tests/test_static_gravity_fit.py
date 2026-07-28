@@ -46,6 +46,7 @@ def _sweep(kp, alpha, offset, torques, scales=SCALES, names=NAMES, frozen=None):
         poses=np.zeros_like(modelled),
         modelled_torque=modelled,
         scales=grid,
+        applied_torque=grid * modelled,
         errors=errors,
     )
 
@@ -82,6 +83,7 @@ def test_the_fit_survives_measurement_noise():
             poses=sweep.poses,
             modelled_torque=sweep.modelled_torque,
             scales=sweep.scales,
+            applied_torque=sweep.applied_torque,
             errors=sweep.errors + rng.normal(0.0, 2e-4, sweep.errors.shape),
         )
         for sweep in sweeps
@@ -143,6 +145,7 @@ def test_sweeps_of_different_groups_cannot_be_fitted_together():
         poses=sweeps[0].poses,
         modelled_torque=sweeps[0].modelled_torque,
         scales=sweeps[0].scales,
+        applied_torque=sweeps[0].applied_torque,
         errors=sweeps[0].errors,
     )
 
