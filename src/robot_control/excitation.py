@@ -148,6 +148,13 @@ def probe_torque(
     return wanted
 
 
+def _effort(width: int, index: int, value: float) -> np.ndarray:
+    """A whole-group effort with *value* on one joint and zero on the rest."""
+    effort = np.zeros(width)
+    effort[index] = value
+    return effort
+
+
 def _hold_and_read(adapter, gate, publish, effort, hold_sec, index) -> float:
     """Publish *effort*, hold it for *hold_sec* so the joint settles, read it.
 
@@ -314,18 +321,30 @@ def measure_staircase(
                 deflection_rad=deflection_rad, hold_sec=hold_sec, joint=name,
                 noise_rad=noise_rad,
             )
-            # The seed is worth saying out loud: the joint stood still at half
-            # of it and moved at it, which brackets its dry friction, and the
+            # The seed is worth saying out loud: the joint stood still under
+            # half of it, which puts a floor under its dry friction, and the
             # ratio between joints is the first look at the arm's stiction a
             # run gives.
             announce(
                 f"  {name}: moved under a {seed_nm:g} N.m seed, staircase peak "
                 f"{peak:.3f} N.m"
             )
-            for value in staircase(peak, steps):
-                effort = np.zeros(width)
-                effort[index] = value
-                effort = gate.authorize_effort(effort)
+            values = staircase(peak, steps)
+            # The first torque is where the joint arrives, not a round it was
+            # measured at. `_probe_peak` leaves it held at +peak, so it reaches
+            # -peak travelling downward and settles on the descending
+            # equilibrium — a full 2 Fc/kp below the ascending line, at the
+            # rising branch's most extreme torque. A point at -peak can only be
+            # reached by descending, so there is no ordering of the staircase
+            # that makes this first visit a rising-branch measurement; it is
+            # published and held like any other, and then not recorded.
+            #
+            # Every round that is recorded is therefore reached moving the way
+            # the branch it lands in says, which is the invariant the fitter's
+            # single-argmax split assumes and cannot check for itself.
+            publish(gate.authorize_effort(_effort(width, index, values[0])), hold_sec)
+            for value in values[1:]:
+                effort = gate.authorize_effort(_effort(width, index, value))
                 publish(effort, hold_sec)
                 poses.append(adapter.read_state())
                 applied.append(effort)

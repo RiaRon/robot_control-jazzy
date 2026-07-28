@@ -80,8 +80,14 @@ robotctl pose torque --group openarm_right_arm --execute \
   makes one flag work across joints whose stiffness differs sixfold, and it is
   what keeps the experiment inside the arm's own limits.
 - `--steps` (default 7): staircase points from −tau_max to +tau_max. The run
-  visits them ascending then descending, so the file holds `2*steps − 1` rounds
-  per joint.
+  visits them ascending then descending, so it publishes `2*steps − 1` torques
+  and the file holds `2*steps − 2` rounds per joint. The first torque is where
+  the joint arrives from the probe: it is reached travelling *downward*, so it
+  sits on the descending equilibrium, a full `2 Fc/kp` off the ascending line
+  the fit would read it on. It is held like any other round and not recorded,
+  which leaves every recorded round reached moving the way its branch says.
+  `--steps 3` is therefore the smallest run that gives each branch the two
+  rounds the fit needs.
 - `--joint` (repeatable, default every joint in the group): which joints to
   excite.
 

@@ -121,7 +121,10 @@ def test_the_sweep_it_writes_records_the_torque_and_not_a_scale(arm, tmp_path, p
           "--hold-sec", "0.01", "--joint", "r_aj_5", "--output", str(output)])
 
     sweep = read_sweep(output, profile)
-    assert sweep.rounds == 2 * 3 - 1
+    # One fewer than the staircase's 2*steps - 1 torques: the joint arrives at
+    # the first one from the probe, travelling the wrong way for the branch it
+    # would be read on, so it is held but not recorded.
+    assert sweep.rounds == 2 * 3 - 2
     assert np.count_nonzero(sweep.scales) == 0
     assert np.ptp(sweep.applied_torque[:, 4]) > 0
 

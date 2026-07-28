@@ -1117,7 +1117,9 @@ def _pose_torque(args, profile) -> int:
         chain = _gravity_chain(adapter, profile, group)
         gate = _gate(profile, group, seed=None)
         print(
-            f"{group.name}: {len(joints)} joints, {2 * args.steps - 1} rounds "
+            # One fewer than the staircase's torques: the first is where the
+            # joint arrives from the probe, held but not recorded.
+            f"{group.name}: {len(joints)} joints, {2 * args.steps - 2} rounds "
             f"each, {args.deflection:g} rad target deflection"
         )
         if not args.execute:

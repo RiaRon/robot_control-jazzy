@@ -150,14 +150,19 @@ class _Joint:
         self.rng = rng
         self.held = None
 
-    def error(self, torque):
+    def settle(self, torque):
+        """Where the torque leaves the joint. Driven by publishing, not by
+        reading: a joint moves when it is pushed, whether or not anybody looks
+        at it — which is the difference between a round and an arrival."""
         target = self.droop_rad - self.deflection(torque)
         if self.held is None:
             self.held = target + self.latch_rad
         elif abs(target - self.held) > self.band_rad:
             self.held = target + np.sign(self.held - target) * self.band_rad
-        # On the reading, not on the latch: the joint is where it is, the
-        # encoder is what is uncertain about it.
+
+    def reading(self):
+        # Jitter on the reading, not on the latch: the joint is where it is,
+        # the encoder is what is uncertain about it.
         if self.jitter_rad <= 0.0:
             return self.held
         return self.held + self.rng.normal(0.0, self.jitter_rad)
@@ -174,22 +179,40 @@ class _Arm:
     def publish(self, effort, seconds):
         self.effort = np.asarray(effort, dtype=float).copy()
         self.calls.append((self.effort, seconds))
+        self.joint.settle(float(self.effort[0]))
 
     def read_state(self, timeout_sec=None):
         return np.full(2, self.joint.position)
 
     def read_tracking_error(self):
-        return np.array([self.joint.error(float(self.effort[0])), 0.0])
+        return np.array([self.joint.reading(), 0.0])
 
 
-def _drive(arm, *, deflection_rad=0.05, limit=None, steps=5, announce=None):
+def _drive(arm, *, deflection_rad=0.05, limit=None, steps=5, announce=None,
+           noise_rad=0.0):
+    """Drive the stub. *noise_rad* defaults to 0: these joints are exact, and a
+    threshold derived from an encoder they do not have would only obscure what
+    each test is about. `test_encoder_noise_...` passes the real figure."""
     return measure_staircase(
         arm, _Gate(), _Group(),
         joints=["r_aj_5"], limits=[limit or _Limit(), _Limit()],
         deflection_rad=deflection_rad, steps=steps, hold_sec=0.0,
-        publish=arm.publish,
+        publish=arm.publish, noise_rad=noise_rad,
         **({} if announce is None else {"announce": announce}),
     )
+
+
+def _fit(poses, applied, errors):
+    """Fit what a run recorded, the way `identify` will."""
+    from robot_control.identification import GravitySweep, fit_staircase
+
+    return fit_staircase([
+        GravitySweep(
+            group="openarm_right_arm", joint_names=_Group.joints, poses=poses,
+            modelled_torque=np.zeros_like(applied), scales=np.zeros_like(applied),
+            applied_torque=applied, errors=errors,
+        )
+    ])
 
 
 def _immovable(kp):
@@ -313,7 +336,8 @@ def test_encoder_noise_does_not_read_as_a_joint_that_moved():
         )
         said = []
 
-        _drive(arm, limit=_Limit(effort=40.0), announce=said.append)
+        _drive(arm, limit=_Limit(effort=40.0), announce=said.append,
+               noise_rad=DEFAULT_NOISE_RAD)
 
         assert "0.05 N.m seed" not in said[0], said[0]
         loudest = max(abs(float(effort[0])) for effort, _seconds in arm.calls)
@@ -369,6 +393,60 @@ def test_the_escalation_is_capped_before_it_reaches_a_generous_ceiling():
     seeds = [float(effort[0]) for effort, _seconds in arm.calls if effort[0] > 0]
     assert len(seeds) == MAX_SEED_DOUBLINGS + 1
     assert seeds[-1] == pytest.approx(0.05 * 2**MAX_SEED_DOUBLINGS)
+
+
+@pytest.mark.parametrize(
+    "kp, coulomb, gravity, limit, position",
+    [
+        (63.7, 0.30, 5.0, _Limit(effort=40.0, lower=-0.175, upper=3.316), 0.5),
+        (15.1, 0.10, 0.03, _Limit(effort=7.0), 0.0),
+    ],
+)
+def test_what_a_run_records_inverts_back_to_the_joint_it_drove(
+    kp, coulomb, gravity, limit, position
+):
+    """The whole point of the stage: the sweep must fit back to the joint.
+
+    The probe leaves the joint held at +peak and the staircase starts at -peak,
+    so the joint arrives at the first round travelling *downward* and sits on
+    the descending equilibrium — one full 2 Fc/kp hysteresis gap off the
+    ascending line the fitter reads it on, at the most extreme torque of the
+    rising branch, where a point has the most leverage.
+
+    Recording that arrival: kp 65.689 (+3.1%) and Fc 0.2652 (-11.6%) for the
+    shoulder, 15.679 (+3.8%) and 0.0890 (-11.0%) for the wrist. Fc is what
+    hdgp_export writes out as joint_friction, so the -11% lands in the number
+    the run exists to produce. It is deterministic, and more steps do not wash
+    it out.
+    """
+    arm = _Arm(
+        _Joint(lambda torque, kp=kp: torque / kp, droop_rad=gravity / kp,
+               band_rad=coulomb / kp, latch_rad=0.0, position=position)
+    )
+
+    estimate = _fit(*_drive(arm, limit=limit, steps=7))
+
+    # r_aj_6 is in the group and was never driven, so it is legitimately
+    # unidentified; the joint under test must not be.
+    assert "r_aj_5" not in [name for name, _reason in estimate.unidentifiable]
+    assert estimate.stiffness[0] == pytest.approx(kp, rel=1e-9)
+    assert estimate.coulomb_nm[0] == pytest.approx(coulomb, rel=1e-9)
+
+
+def test_the_arrival_at_the_first_torque_is_held_but_not_recorded():
+    """A staircase of `steps` visits 2*steps - 1 torques and records one fewer,
+    because the first is where the joint arrives from the probe rather than a
+    round it was measured at. Both branches keep steps - 1 rounds, so the
+    fitter's two-per-branch minimum still admits --steps 3.
+    """
+    arm = _Arm(_Joint(lambda torque: torque / 15.0))
+
+    _poses, applied, _errors = _drive(arm, steps=5)
+
+    assert len(applied) == 2 * 5 - 2
+    published = [float(effort[0]) for effort, _seconds in arm.calls]
+    # ... but it is published: the joint has to travel there.
+    assert published.count(pytest.approx(-applied[:, 0].max())) == 2
 
 
 def test_the_torque_release_is_held_rather_than_published_once():
