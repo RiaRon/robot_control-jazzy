@@ -510,6 +510,29 @@ def fit_static_gravity(
 BRANCH_SLOPE_TOLERANCE = 0.25
 
 
+def _driven_rounds(sweep: GravitySweep, joint: int) -> tuple[np.ndarray, np.ndarray]:
+    """The rounds of *sweep* that were driving *joint*, and what it read there.
+
+    `pose torque` leaves `--joint` at every joint in the group, and
+    `measure_staircase` drives them one after another, so one file holds every
+    joint's staircase and a joint's own rounds are a single contiguous block.
+    Outside it the joint carries no torque and holds a standing error that
+    barely moves — dozens of near-duplicate points at zero torque, which fall
+    on both branches at once and pull the two intercepts together. Fc is the
+    gap between those intercepts.
+
+    The block is the closed range between the first and last round carrying
+    torque, so a zero-torque round *inside* it stays: with an odd `steps` the
+    staircase visits zero twice, and those two rounds are the joint's own.
+    """
+    applied = sweep.applied_torque[:, joint]
+    driven = np.nonzero(applied)[0]
+    if driven.size == 0:
+        return applied[:0], sweep.errors[:0, joint]
+    first, stop = int(driven[0]), int(driven[-1]) + 1
+    return applied[first:stop], sweep.errors[first:stop, joint]
+
+
 def fit_staircase(sweeps: Sequence[GravitySweep]) -> StaticEstimate:
     """Fit kp, Coulomb friction and bias from a torque staircase.
 
@@ -548,9 +571,8 @@ def fit_staircase(sweeps: Sequence[GravitySweep]) -> StaticEstimate:
     for joint, name in enumerate(names):
         rising, falling = [], []
         for sweep in sweeps:
-            applied = sweep.applied_torque[:, joint]
-            errors = sweep.errors[:, joint]
-            if float(np.ptp(applied)) <= 0.0:
+            applied, errors = _driven_rounds(sweep, joint)
+            if applied.size == 0 or float(np.ptp(applied)) <= 0.0:
                 continue
             peak = int(np.argmax(applied))
             # The peak round belongs to the rising branch only: its deflection
