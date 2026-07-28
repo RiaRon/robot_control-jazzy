@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import dataclasses
 import json
 from pathlib import Path
 import subprocess
@@ -40,6 +41,7 @@ from .identification import (
     design_pose_set,
     fit_second_order,
     fit_second_order_runs,
+    fit_staircase,
     fit_static_gravity,
     score_holdout,
     split_repetitions,
@@ -1361,6 +1363,18 @@ def _pose_rviz(args) -> int:
     return subprocess.call(command)
 
 
+def _is_staircase_sweep(sweep: GravitySweep) -> bool:
+    """True for a sweep shaped like `pose torque`'s output, not `pose gravity`'s.
+
+    `pose torque` publishes no fraction of the model — scales is all zero —
+    and drives applied_torque directly to trace the staircase. A degenerate
+    gravity sweep held at scale zero the whole way also has all-zero scales,
+    but nothing was ever fed forward either, so its applied_torque is flat
+    too; checking both is what tells the two apart.
+    """
+    return not np.any(sweep.scales) and bool(np.ptp(sweep.applied_torque))
+
+
 def _identify(args, profile) -> int:
     """Fit stiffness, stiction and a torque correction from measured sweeps.
 
@@ -1414,6 +1428,11 @@ def _identify(args, profile) -> int:
 
     try:
         measured = [read_sweep(path, profile) for path in sweeps]
+        # Every sweep, gravity and staircase alike: gravity sweeps vary the
+        # modelled-torque column and pin alpha, staircase sweeps vary
+        # applied_torque instead and pin kp. Both are the joint fit the
+        # spec's A3 describes, and it is what keeps torque_scale finite for a
+        # joint a staircase alone would leave undetermined.
         estimate = fit_static_gravity(measured, noise_rad=args.noise)
     except ArtifactError as error:
         print(f"error: {error}")
@@ -1422,7 +1441,30 @@ def _identify(args, profile) -> int:
         print(f"error: {error}")
         return UNUSABLE
 
-    _report_static(estimate, len(measured))
+    staircase_estimate = None
+    staircases = [sweep for sweep in measured if _is_staircase_sweep(sweep)]
+    if staircases:
+        try:
+            staircase_estimate = fit_staircase(staircases)
+        except FitError as error:
+            # A structural problem (no sweeps, mismatched joints) rather than
+            # a per-joint one; the gravity fit already succeeded, so the run
+            # continues on that alone instead of losing everything over Fc
+            # and Fo it never had a chance to measure.
+            print(f"staircase: {error}")
+        else:
+            # Fc and Fo only. kp is the staircase's own second opinion,
+            # printed beside the gravity fit's kp in _report_static, never
+            # merged into the record fit_static_gravity owns; torque_scale
+            # and offset stay whatever fit_static_gravity measured, since
+            # fit_staircase never touches a gravity model at all.
+            estimate = dataclasses.replace(
+                estimate,
+                coulomb_nm=staircase_estimate.coulomb_nm,
+                bias_nm=staircase_estimate.bias_nm,
+            )
+
+    _report_static(estimate, len(measured), staircase=staircase_estimate)
     if estimate.unidentifiable:
         print(
             "refused: nothing written. Add a pose that loads the joints above "
@@ -2264,17 +2306,47 @@ def _report_design(group, design) -> None:
     print(f"  worst conditioned: {joint} at {design.worst_condition:.1f}")
 
 
-def _report_static(estimate, poses: int) -> None:
-    """Print the fit per joint, so a marginal one is visible as such."""
+def _static_column(values, index: int) -> str:
+    """Format one entry of an optional per-joint array with the file's own
+    '—' convention, for Fc/Fo/staircase-kp — none of which every joint has:
+    `fit_static_gravity` leaves them `None` outright with no staircase sweep
+    at all, and `fit_staircase` leaves a joint it never covered `nan` inside
+    the array it does return. Both read the same here.
+    """
+    if values is None or not np.isfinite(values[index]):
+        return "—"
+    return f"{values[index]:.4f}"
+
+
+def _report_static(estimate, poses: int, *, staircase=None) -> None:
+    """Print the fit per joint, so a marginal one is visible as such.
+
+    *staircase* is the staircase fit's own `StaticEstimate`, printed only for
+    its `stiffness` (a second opinion on kp) and its `unidentifiable`
+    (reasons distinct from the gravity fit's own, labelled apart below) — Fc
+    and Fo are already folded into *estimate* by the caller before this runs,
+    with `dataclasses.replace`, so they are read from *estimate* here like
+    every other column.
+    """
     print(f"identify: {poses} poses, {estimate.used.max()} rounds at most per joint")
     print(
         "  joint            kp (N.m/rad)   alpha   offset (rad)  "
-        "residual (rad)   cond  rounds  frozen"
+        "residual (rad)   cond  rounds  frozen  staircase kp   Fc (N.m)   Fo (N.m)"
     )
     for index, name in enumerate(estimate.joint_names):
         stiffness = estimate.stiffness[index]
+        stair_kp = (
+            f"{staircase.stiffness[index]:.2f}"
+            if staircase is not None and np.isfinite(staircase.stiffness[index])
+            else "—"
+        )
+        fc = _static_column(estimate.coulomb_nm, index)
+        fo = _static_column(estimate.bias_nm, index)
         if not np.isfinite(stiffness):
-            print(f"  {name:<16} {'—':>12}")
+            print(
+                f"  {name:<16} {'—':>12}"
+                f"{'':>44} {stair_kp:>12} {fc:>9} {fo:>9}"
+            )
             continue
         # alpha alone can be nan here even though stiffness was identified:
         # a joint whose model was zero at every used round. Same "—" the
@@ -2286,10 +2358,13 @@ def _report_static(estimate, poses: int) -> None:
             f"  {name:<16} {stiffness:12.2f} {alpha_column} "
             f"{estimate.offset[index]:+14.5f} {estimate.residual_rmse[index]:15.5f} "
             f"{estimate.condition[index]:6.1f} {estimate.used[index]:7d} "
-            f"{estimate.excluded[index]:7d}"
+            f"{estimate.excluded[index]:7d} {stair_kp:>12} {fc:>9} {fo:>9}"
         )
     for name, reason in estimate.unidentifiable:
-        print(f"  {name}: not identified — {reason}")
+        print(f"  {name}: not identified (gravity) — {reason}")
+    if staircase is not None:
+        for name, reason in staircase.unidentifiable:
+            print(f"  {name}: not identified (staircase) — {reason}")
 
 
 def main(argv: list[str] | None = None) -> int:

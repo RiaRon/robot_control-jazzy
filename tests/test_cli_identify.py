@@ -204,6 +204,101 @@ def test_identify_reports_but_refuses_to_write_an_undetermined_alpha(
     assert not output.exists()
 
 
+def _staircase_pose(tmp_path, profile, joint, peak=0.6, steps=5, coulomb=0.05):
+    """Write one sweep shaped like `pose torque`'s output: scales all zero,
+    the applied torque tracing a staircase on *joint* while every other joint
+    holds at zero applied torque and the group's own offset error — the shape
+    `_identify` must tell apart from a gravity sweep by scales-plus-motion,
+    not by name.
+    """
+    from robot_control.excitation import staircase
+
+    joints = profile.groups[GROUP].joints
+    width = len(joints)
+    kp, _alpha, offset = _truth(width)
+    index = joints.index(joint)
+    values = staircase(peak, steps)
+    rounds = len(values)
+
+    applied = np.zeros((rounds, width))
+    errors = np.tile(offset, (rounds, 1))
+    held = None
+    for row, torque in enumerate(values):
+        target = -torque / kp[index] + offset[index]
+        if held is None or abs(target - held) > coulomb / kp[index]:
+            direction = 1.0 if row < steps else -1.0
+            held = target + direction * coulomb / kp[index]
+        applied[row, index] = torque
+        errors[row, index] = held
+
+    path = tmp_path / "staircase.json"
+    write_sweep(
+        path,
+        GravitySweep(
+            group=GROUP,
+            joint_names=joints,
+            poses=np.zeros((rounds, width)),
+            modelled_torque=np.zeros((rounds, width)),
+            scales=np.zeros((rounds, width)),
+            applied_torque=applied,
+            errors=errors,
+        ),
+        profile,
+    )
+    return str(path)
+
+
+def _joint_row(out, joint):
+    for line in out.splitlines():
+        if line.strip().startswith(joint):
+            return line
+    raise AssertionError(f"no report row for {joint!r} in:\n{out}")
+
+
+def test_identify_reports_fc_and_fo_from_a_staircase_sweep(tmp_path, profile, capsys):
+    """A staircase mixed in with the usual gravity sweeps must not be mistaken
+    for gravity data — kp/alpha stay the gravity fit's — but must still carry
+    Fc and Fo for the joint it covered, and leave every other joint's Fc/Fo at
+    the file's usual '—' for a value that was never measured.
+    """
+    output = tmp_path / "static.json"
+    paths = _poses(tmp_path, profile) + [
+        _staircase_pose(tmp_path, profile, joint="r_aj_5")
+    ]
+
+    code = main(_argv(paths, output))
+
+    assert code == 0
+    out = capsys.readouterr().out
+    covered = _joint_row(out, "r_aj_5")
+    uncovered = _joint_row(out, "r_aj_1")
+    assert "—" not in covered, covered
+    assert "—" in uncovered, uncovered
+
+
+def test_identify_without_a_staircase_still_writes_the_same_numbers(
+    tmp_path, profile, capsys
+):
+    """Every existing caller passes gravity sweeps only. Wiring the staircase
+    fit in must not change what a gravity-only run measures or writes — the
+    regression guard for Task 11.
+    """
+    output = tmp_path / "static.json"
+
+    assert main(_argv(_poses(tmp_path, profile), output)) == 0
+
+    payload = json.loads(output.read_text())
+    kp, alpha, offset = _truth(len(profile.groups[GROUP].joints))
+    np.testing.assert_allclose(payload["stiffness_nm_per_rad"], kp, rtol=1e-6)
+    np.testing.assert_allclose(payload["torque_scale"], alpha, rtol=1e-6)
+    np.testing.assert_allclose(payload["offset_rad"], offset, atol=1e-9)
+    out = capsys.readouterr().out
+    # No staircase sweep means Fc/Fo were never measured for any joint: the
+    # None-handling path, distinct from fit_staircase leaving a joint NaN.
+    for joint in profile.groups[GROUP].joints:
+        assert "—" in _joint_row(out, joint)
+
+
 def test_identify_refuses_a_sweep_from_another_asset(tmp_path, profile, capsys):
     output = tmp_path / "static.json"
     paths = _poses(tmp_path, profile)
