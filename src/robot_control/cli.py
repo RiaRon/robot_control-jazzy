@@ -44,6 +44,7 @@ from .identification import (
     split_repetitions,
     validate_holdout,
 )
+from .excitation import measure_staircase
 from .hdgp_export import (
     DEFAULT_MAX_SPREAD,
     HdgpExportError,
@@ -98,6 +99,10 @@ DEFAULT_TOLERANCE_M = 0.005
 # Long enough for the arm to stop moving after a torque step before its
 # tracking error is read, at the 100 Hz the controller manager runs.
 DEFAULT_HOLD_SEC = 2.0
+# Deflection each joint is pushed to at the ends of its torque staircase. The
+# torque that produces it is probed rather than fixed, since the joint's
+# stiffness — what this stage measures — is the unknown that sets it.
+DEFAULT_DEFLECTION_RAD = 0.05
 # Refuse a scale beyond this. The model is only as good as the URDF's masses,
 # and over-compensating does not mispose the arm, it drives it away from where
 # it was holding.
@@ -432,6 +437,29 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     )
     gravity.add_argument("--execute", action="store_true")
 
+    torque = stages.add_parser(
+        "torque",
+        help="push each joint with a torque of our own and measure the response",
+    )
+    torque.add_argument("--profile", default="openarm_tesollo")
+    torque.add_argument("--group", required=True)
+    torque.add_argument(
+        "--deflection",
+        type=float,
+        default=DEFAULT_DEFLECTION_RAD,
+        help="radians to push each joint at the ends of its staircase; the "
+        "torque that produces it is probed, since stiffness is the unknown",
+    )
+    torque.add_argument("--steps", type=int, default=7)
+    torque.add_argument(
+        "--joint",
+        action="append",
+        help="canonical joint to excite; repeatable. Default: every joint",
+    )
+    torque.add_argument("--hold-sec", type=float, default=DEFAULT_HOLD_SEC)
+    torque.add_argument("--output", type=Path)
+    torque.add_argument("--execute", action="store_true")
+
     follow = stages.add_parser(
         "follow", help="follow the RViz end-effector marker continuously"
     )
@@ -479,6 +507,8 @@ def _pose(args: argparse.Namespace) -> int:
             return _pose_park(args, profile, raise_elbow=args.stage == "ready")
         if args.stage == "gravity":
             return _pose_gravity(args, profile)
+        if args.stage == "torque":
+            return _pose_torque(args, profile)
         if args.stage == "follow":
             return _pose_follow(args, profile)
         return _pose_ee(args, profile)
@@ -1025,6 +1055,83 @@ def _measure_sweep(
     )
 
 
+def _pose_torque(args, profile) -> int:
+    """Measure stiffness with a torque we chose rather than one gravity gave.
+
+    `pose gravity` can only publish a multiple of the modelled torque, so a
+    joint the model says carries nothing — a wrist whose tool sits on its own
+    axis — cannot be excited at all, whatever the scale. This stage instead
+    probes a torque per joint from a small seed push and drives a staircase
+    with it, one joint at a time.
+    """
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if not group.compensable:
+        raise ValueError(
+            f"group {group.name!r} declares no effort_controller, so torque "
+            "cannot be published for it"
+        )
+    if group.tip_link is None:
+        raise ValueError(
+            f"group {group.name!r} has no tip_link, so its chain cannot be built"
+        )
+    joints = args.joint or list(group.joints)
+    for name in joints:
+        if name not in group.joints:
+            raise ValueError(
+                f"{name!r} is not a joint of {group.name!r}; it has "
+                f"{list(group.joints)}"
+            )
+    if args.hold_sec <= 0:
+        raise ValueError("--hold-sec must be positive")
+    if args.output is not None and not args.execute:
+        raise ValueError(
+            "--output records what the arm measured, so it needs --execute; a "
+            "dry run publishes nothing and there would be nothing to record"
+        )
+
+    limits = _joint_limits(profile, group)
+    with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        chain = _gravity_chain(adapter, profile, group)
+        gate = _gate(profile, group, seed=None)
+        print(
+            f"{group.name}: {len(joints)} joints, {2 * args.steps - 1} rounds "
+            f"each, {args.deflection:g} rad target deflection"
+        )
+        if not args.execute:
+            print("DRY RUN: nothing published; pass --execute")
+            return 0
+
+        poses, applied, errors = measure_staircase(
+            adapter, gate, group,
+            joints=joints, limits=limits, deflection_rad=args.deflection,
+            steps=args.steps, hold_sec=args.hold_sec,
+            publish=lambda effort, seconds: _publish_for(adapter, effort, seconds),
+        )
+        # The real gravity torque at each round's measured pose — the same
+        # column a gravity sweep's alpha multiplies — so torque and gravity
+        # sweeps fit jointly: gravity sweeps vary this column and pin alpha,
+        # torque sweeps vary applied_torque instead and pin kp.
+        modelled = np.array([chain.gravity_torque(pose) for pose in poses])
+        sweep = GravitySweep(
+            group=group.name,
+            joint_names=tuple(group.joints),
+            poses=poses,
+            modelled_torque=modelled,
+            # No fraction of the model was published — the torque came from
+            # probe_torque, not from scaling the gravity model — so there is
+            # no scale to record, only zeros.
+            scales=np.zeros_like(applied),
+            applied_torque=applied,
+            errors=errors,
+        )
+        if args.output is not None:
+            write_sweep(args.output, sweep, profile)
+            print(f"wrote {args.output}")
+    return 0
+
+
 def _scale_vector(given: str | None, group) -> np.ndarray:
     """Read --scale as one value for every joint, or one value per joint."""
     if given is None:
@@ -1060,15 +1167,19 @@ def _scale_label(scales: np.ndarray, index: int | None) -> str:
 
 
 def _publish_for(adapter, effort, seconds: float) -> None:
-    """Republish *effort* at the controller rate for *seconds*.
+    """Republish *effort* at the controller rate for *seconds*, at least once.
 
     ForwardCommandController holds its last command, so one message would do,
     but republishing means a dropped message cannot silently leave the arm on a
-    stale torque.
+    stale torque. *seconds* of 0.0 is a deliberate one-shot — the torque
+    release at the end of a run — so the first publish cannot wait on the
+    deadline check the way the repeats do.
     """
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    while True:
         adapter.send_effort(effort)
+        if time.monotonic() >= deadline:
+            return
         time.sleep(0.01)
 
 

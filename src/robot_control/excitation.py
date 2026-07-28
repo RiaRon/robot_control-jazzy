@@ -8,6 +8,7 @@ So it is probed: push a little, read the response, extrapolate.
 
 from __future__ import annotations
 
+import numpy as np
 
 #: Ceiling on the probe, as a fraction of the joint's rating. A seed that
 #: barely moves extrapolates to an enormous torque; the joint is rated for it
@@ -95,3 +96,49 @@ def probe_torque(
             "rating; ask for a smaller deflection"
         )
     return wanted
+
+
+def measure_staircase(
+    adapter, gate, group, *, joints, limits, deflection_rad, steps, hold_sec, publish
+):
+    """Drive each joint through its staircase and collect the rounds.
+
+    *publish* is a callable taking (effort, seconds); the caller owns how a
+    torque is held, so this stays free of ROS and of wall-clock policy.
+
+    Every joint but the one under test receives zero. The vendor hardware runs
+    MIT mode, so the position loop is still holding the whole arm while one
+    joint is pushed against it; nothing here commands a position.
+    """
+    width = len(group.joints)
+    poses, applied, errors = [], [], []
+    try:
+        for name in joints:
+            index = group.joints.index(name)
+            limit = limits[index]
+            seed = np.zeros(width)
+            seed[index] = SEED_TORQUE_NM
+            publish(gate.authorize_effort(seed), hold_sec)
+            response = float(adapter.read_tracking_error()[index])
+
+            peak = probe_torque(
+                deflection_rad=deflection_rad,
+                seed_torque_nm=SEED_TORQUE_NM,
+                seed_deflection_rad=response,
+                effort_limit_nm=limit.effort,
+                position_rad=float(adapter.read_state()[index]),
+                lower_rad=limit.lower,
+                upper_rad=limit.upper,
+                joint=name,
+            )
+            for value in staircase(peak, steps):
+                effort = np.zeros(width)
+                effort[index] = value
+                effort = gate.authorize_effort(effort)
+                publish(effort, hold_sec)
+                poses.append(adapter.read_state())
+                applied.append(effort)
+                errors.append(adapter.read_tracking_error())
+    finally:
+        publish(np.zeros(width), 0.0)
+    return np.asarray(poses), np.asarray(applied), np.asarray(errors)
