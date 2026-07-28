@@ -134,6 +134,76 @@ def _fit_file(tmp_path, profile, stiffness=None, damping=None):
     return path
 
 
+def _fit_payload(profile, **extra):
+    return {
+        "population": 128,
+        "joint_names": list(profile.groups[GROUP].joints),
+        "stiffness": KP.tolist(),
+        "damping": DAMPING.tolist(),
+        "friction": np.zeros(7).tolist(),
+        "residual_rmse": [1e-9] * 7,
+        "track_sha256": "a" * 64,
+        **extra,
+    }
+
+
+def test_the_scored_model_carries_the_bias_the_fit_measured(tmp_path, profile):
+    """`r2s fit` writes Fo under `bias_nm`, in N.m. What is read back looked
+    for a key called `bias`, which nothing has ever written, so the bias was
+    always zero and `score_holdout` scored a model that was never fitted.
+
+    The units differ too: the file's `bias_nm` is `combine`'s Fo = Fo/J times
+    J, and `SecondOrderEstimate.bias` is Fo/J, so the inertia written beside it
+    in the same file is what converts it back. At Fo/J = 5 rad/s^2 dropping the
+    term costs 0.0165 rad of RMSE against a 0.03 rad threshold, which is enough
+    to move a verdict in either direction.
+    """
+    from robot_control.cli import _estimate_from_fit
+
+    path = tmp_path / "estimate.json"
+    inertia = np.linspace(0.4, 0.1, 7)
+    path.write_text(
+        json.dumps(
+            _fit_payload(
+                profile,
+                inertia_kg_m2=inertia.tolist(),
+                bias_nm=(5.0 * inertia).tolist(),
+            )
+        )
+    )
+
+    estimate = _estimate_from_fit(path, profile.groups[GROUP])
+
+    np.testing.assert_allclose(estimate.bias, np.full(7, 5.0))
+
+
+def test_a_fit_file_from_before_the_bias_was_written_scores_without_one(
+    tmp_path, profile
+):
+    """Zero is what an absent bias term means; it is not a stand-in for a
+    measurement the file is missing."""
+    from robot_control.cli import _estimate_from_fit
+
+    path = tmp_path / "estimate.json"
+    path.write_text(json.dumps(_fit_payload(profile)))
+
+    estimate = _estimate_from_fit(path, profile.groups[GROUP])
+
+    np.testing.assert_array_equal(estimate.bias, np.zeros(7))
+
+
+def test_a_bias_with_no_inertia_beside_it_is_refused(tmp_path, profile):
+    """Fo in N.m cannot be turned into Fo/J without J. Guessing one would put
+    a number of the wrong size into the model rather than say so."""
+    from robot_control.cli import _estimate_from_fit
+
+    path = tmp_path / "estimate.json"
+    path.write_text(json.dumps(_fit_payload(profile, bias_nm=[0.5] * 7)))
+
+    with pytest.raises(ValueError, match="inertia"):
+        _estimate_from_fit(path, profile.groups[GROUP])
+
+
 def test_validate_scores_the_holdout_without_a_metrics_file(
     bundle, tmp_path, profile, capsys
 ):

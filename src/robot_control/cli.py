@@ -1830,10 +1830,19 @@ def _estimate_from_fit(path: Path, group) -> SecondOrderEstimate:
     inverse = None
     if "inertia_kg_m2" in payload:
         inverse = 1.0 / column("inertia_kg_m2")
-    # "r2s fit" does not write this key yet (Fo's export is a later task), so
-    # every fit file on disk predates it; zero is what an absent bias term
-    # means, not a placeholder for a missing measurement.
-    bias = column("bias") if "bias" in payload else np.zeros(width)
+    # Absent on a fit file written before Fo was exported, and zero is what an
+    # absent bias term means rather than a placeholder for a missing
+    # measurement. Present, it is Fo in N.m — `combine` multiplied Fo/J by the
+    # inertia written beside it — so that same inertia converts it back to the
+    # Fo/J this estimate is built from.
+    bias = np.zeros(width)
+    if "bias_nm" in payload:
+        if inverse is None:
+            raise ValueError(
+                f"{path}: bias_nm is Fo in N.m and this estimate needs Fo/J, "
+                "but the file carries no inertia_kg_m2 to divide it by"
+            )
+        bias = column("bias_nm") * inverse
     return SecondOrderEstimate(
         column("stiffness"),
         column("damping"),
