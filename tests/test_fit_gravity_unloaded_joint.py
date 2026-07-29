@@ -61,3 +61,37 @@ def test_a_sign_flipped_gravity_column_is_still_refused():
 
     with pytest.raises(FitError, match="accelerates towards its load"):
         fit_second_order_runs([(clock, command, measured, -gravity)])
+
+
+def test_a_column_buried_under_friction_is_dropped_not_convicted():
+    """A wiggle track around one pose varies gravity less than dry friction.
+
+    Motion then cannot carry the column's information — friction eats it — so
+    even a locally sign-flipped model must not be convicted on it. The joint
+    keeps its dynamic model and offers no gravity cross-check.
+    """
+    clock, command, measured, gravity = _run(load_scale=(1.0, 0.0))
+    # Joint B: a constant load plus a wiggle far smaller than its friction,
+    # sign-flipped against how the (zero) real load actually moved it.
+    buried = gravity.copy()
+    buried[:, 1] = 0.5 + 0.01 * np.sin(np.arange(SAMPLES) * STEP * 2 * np.pi)
+
+    estimate = fit_second_order_runs(
+        [(clock, command, measured, buried)],
+        coulomb_nm=np.array([FRICTION[0] * INERTIA[0] * 100, 0.2]),
+    )
+
+    # Joint A's column span is under its (huge) floor too — dropped, not used.
+    assert np.isnan(estimate.inverse_inertia[0])
+    assert np.isnan(estimate.inverse_inertia[1])
+
+
+def test_the_friction_floor_spares_an_informative_column():
+    clock, command, measured, gravity = _run()
+
+    estimate = fit_second_order_runs(
+        [(clock, command, measured, gravity)],
+        coulomb_nm=np.array([1e-3, 1e-3]),
+    )
+
+    np.testing.assert_allclose(1.0 / estimate.inverse_inertia[0], INERTIA[0], rtol=0.05)

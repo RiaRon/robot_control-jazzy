@@ -876,7 +876,7 @@ def _gravity_significant(design, target, params) -> bool:
     return params[4] < -2.0 * stderr
 
 
-def fit_second_order_runs(runs) -> SecondOrderEstimate:
+def fit_second_order_runs(runs, coulomb_nm=None) -> SecondOrderEstimate:
     """Fit one model across several runs of the same excitation.
 
     Stacked as rows of one regression rather than fitted separately and
@@ -912,28 +912,38 @@ def fit_second_order_runs(runs) -> SecondOrderEstimate:
     residual = np.empty(width)
     with_gravity = columns.pop() == 5
     inverse_inertia = np.empty(width) if with_gravity else None
+    floor = None if coulomb_nm is None else np.asarray(coulomb_nm, dtype=float)
     for joint in range(width):
         design = np.vstack([designs[joint] for designs, _targets in per_run])
         target = np.concatenate([targets[joint] for _designs, targets in per_run])
-        params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
-        if with_gravity and params[4] <= 0 and not _gravity_significant(
-            design, target, params
-        ):
-            # The column identifies nothing for this joint — a roll axis
-            # spends the whole track nearly parallel to gravity — so its
-            # coefficient is noise-signed, which is not the wrong-sign error
-            # below. Refit without the column; the joint keeps its dynamic
-            # model and simply offers no independent inertia to cross-check.
-            design = np.delete(design, 4, axis=1)
+        drop = False
+        if with_gravity and floor is not None and np.isfinite(floor[joint]):
+            # A gravity variation smaller than the joint's own dry friction
+            # never reaches the encoder — the deadband eats it — so the track
+            # physically cannot carry the column's information. A wiggle track
+            # around one pose does this to every joint the posture barely
+            # loads, and a locally-wrong model must not be convicted on it.
+            drop = float(np.ptp(design[:, 4])) <= floor[joint]
+        if not drop:
             params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
-            inverse_inertia[joint] = np.nan
-        elif with_gravity:
-            if params[4] <= 0:
+        if not drop and with_gravity and params[4] <= 0:
+            if _gravity_significant(design, target, params):
                 raise FitError(
                     f"joint {joint} accelerates towards its load rather than away "
                     "from it, so the gravity column has the wrong sign or the "
                     "wrong chain"
                 )
+            # The coefficient is noise-signed — a roll axis spends the whole
+            # track nearly parallel to gravity — which is not the wrong-sign
+            # error above.
+            drop = True
+        if with_gravity and drop:
+            # The joint keeps its dynamic model and simply offers no
+            # independent inertia to cross-check.
+            design = np.delete(design, 4, axis=1)
+            params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
+            inverse_inertia[joint] = np.nan
+        elif with_gravity:
             inverse_inertia[joint] = params[4]
         if rank < 2 or params[0] <= 0 or params[1] < 0:
             raise FitError(f"unidentifiable dynamics for joint {joint}")

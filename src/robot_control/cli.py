@@ -1689,7 +1689,10 @@ def _fit(args, profile) -> int:
                     None if gravity is None else gravity[index],
                 )
                 for index, run in enumerate(tracks)
-            ]
+            ],
+            # The staircase's measured Coulomb friction, where it ran: the
+            # floor under which a gravity variation cannot reach the encoder.
+            coulomb_nm=None if static is None else static.coulomb_nm,
         )
     except FitError as error:
         print(f"error: {error}")
