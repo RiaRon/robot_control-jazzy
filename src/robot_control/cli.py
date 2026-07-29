@@ -159,6 +159,16 @@ class Refused(RuntimeError):
     """
 
 
+# Shared by every command that builds a gravity chain against the live stack.
+# The bringup description carries the vendor's masses, so a mounted hand needs
+# the generated asset URDF handed in instead; either naming convention reads.
+_URDF_OVERRIDE_HELP = (
+    "URDF file for the gravity model, instead of the running stack's "
+    "description — the generated asset URDF (canonical names, hand masses "
+    "included) is the usual override"
+)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="robotctl")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -238,6 +248,9 @@ def _parser() -> argparse.ArgumentParser:
                 type=float,
                 default=DEFAULT_HOLD_SEC,
                 help="seconds to publish at each scale before measuring",
+            )
+            item.add_argument(
+                "--urdf", type=Path, help=_URDF_OVERRIDE_HELP
             )
             item.add_argument(
                 "--execute",
@@ -442,6 +455,7 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         default=DEFAULT_HOLD_SEC,
         help="seconds to publish at each scale before measuring",
     )
+    gravity.add_argument("--urdf", type=Path, help=_URDF_OVERRIDE_HELP)
     gravity.add_argument("--execute", action="store_true")
 
     torque = stages.add_parser(
@@ -477,6 +491,7 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         "the seed doubles until it does, so a coarser encoder needs it raised",
     )
     torque.add_argument("--output", type=Path)
+    torque.add_argument("--urdf", type=Path, help=_URDF_OVERRIDE_HELP)
     torque.add_argument("--execute", action="store_true")
 
     follow = stages.add_parser(
@@ -495,6 +510,7 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         default=DEFAULT_FOLLOW_SEC,
         help="how long to follow before stopping on its own",
     )
+    follow.add_argument("--urdf", type=Path, help=_URDF_OVERRIDE_HELP)
     follow.add_argument("--execute", action="store_true")
 
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
@@ -938,16 +954,57 @@ def _report_residual(adapter, target, solution, profile, group, args) -> None:
     print(f"settle: {residual * 1000:.1f} mm after {SETTLE_PASSES} corrections")
 
 
-def _gravity_chain(adapter, profile, group):
-    """Build the kinematic chain for *group* from the running stack's URDF."""
-    from .kinematics import chain_from_urdf
+def _group_chain(urdf: str, profile, group):
+    """Build *group*'s chain from *urdf*, in whichever naming it carries.
+
+    The bringup description names joints at the source
+    (openarm_right_joint1...); the generated asset URDF names them canonically
+    (r_aj_1...) and ends at the group's `asset_tip_link` instead of its
+    `tip_link`. Which convention a file uses is read off the file itself, so
+    either can serve as the gravity model.
+    """
+    from xml.etree import ElementTree
+
+    from .kinematics import KinematicsError, chain_from_urdf
 
     source_by_canonical = {joint.canonical: joint.source for joint in profile.joints}
-    return chain_from_urdf(
-        adapter.read_robot_description(),
-        [source_by_canonical[canonical] for canonical in group.joints],
-        group.tip_link,
+    sources = [source_by_canonical[canonical] for canonical in group.joints]
+    present = {
+        element.get("name")
+        for element in ElementTree.fromstring(urdf).findall("joint")
+    }
+    if all(name in present for name in sources):
+        return chain_from_urdf(urdf, sources, group.tip_link)
+    if all(name in present for name in group.joints):
+        if group.asset_tip_link is None:
+            raise KinematicsError(
+                f"the URDF names joints canonically, but group {group.name!r} "
+                "declares no asset_tip_link to end the chain at"
+            )
+        return chain_from_urdf(urdf, list(group.joints), group.asset_tip_link)
+    missing_source = next(name for name in sources if name not in present)
+    missing_canonical = next(
+        name for name in group.joints if name not in present
     )
+    raise KinematicsError(
+        f"the URDF matches neither naming for group {group.name!r}: it has "
+        f"no joint {missing_source!r} (source) and no joint "
+        f"{missing_canonical!r} (canonical)"
+    )
+
+
+def _gravity_chain(adapter, profile, group, urdf_path=None):
+    """Build the group's chain from *urdf_path*, or the running stack's URDF.
+
+    An explicit file wins: the bringup description carries the vendor's
+    masses, and a hand the vendor never mounted is exactly what an asset URDF
+    override is for.
+    """
+    if urdf_path is not None:
+        urdf = Path(urdf_path).read_text()
+    else:
+        urdf = adapter.read_robot_description()
+    return _group_chain(urdf, profile, group)
 
 
 def _pose_gravity(args, profile) -> int:
@@ -1011,7 +1068,7 @@ def _pose_gravity(args, profile) -> int:
         _check_scales(step, group)
 
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group)
+        chain = _gravity_chain(adapter, profile, group, args.urdf)
         state = adapter.read_state()
         modelled = chain.gravity_torque(state)
         gate = _gate(profile, group, seed=None)
@@ -1153,7 +1210,7 @@ def _pose_torque(args, profile) -> int:
 
     limits = _joint_limits(profile, group)
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group)
+        chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
         print(
             # One fewer than the staircase's torques: the first is where the
@@ -1321,7 +1378,7 @@ def _pose_follow(args, profile) -> int:
 
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group)
+        chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
         adapter.watch_marker()
         state = adapter.read_state()
@@ -1564,7 +1621,7 @@ def _fit(args, profile) -> int:
     put a standing load but into the stiffness — and the two fits together give
     the inertia neither can reach alone.
     """
-    from .kinematics import KinematicsError, chain_from_urdf
+    from .kinematics import KinematicsError
 
     provenance: dict = {}
     if args.manifest is not None:
@@ -1610,9 +1667,7 @@ def _fit(args, profile) -> int:
             )
             return UNUSABLE
         try:
-            chain = chain_from_urdf(
-                Path(args.urdf).read_text(), sources, group.tip_link
-            )
+            chain = _group_chain(Path(args.urdf).read_text(), profile, group)
         except (KinematicsError, OSError) as error:
             print(f"error: {error}")
             return UNUSABLE
@@ -1763,7 +1818,7 @@ def _component_of(group, profile) -> str:
 
 def _score_manifest(args, profile) -> tuple[dict, dict]:
     """Score a fitted model against the run the manifest held out."""
-    from .kinematics import KinematicsError, chain_from_urdf
+    from .kinematics import KinematicsError
 
     if not args.fit:
         raise ValueError(
@@ -1790,12 +1845,8 @@ def _score_manifest(args, profile) -> tuple[dict, dict]:
                 "the fit carries a gravity term, so scoring it needs --urdf to "
                 "work out the modelled torque along the holdout"
             )
-        source_by_canonical = {j.canonical: j.source for j in profile.joints}
-        sources = tuple(source_by_canonical[j] for j in group.joints)
         try:
-            chain = chain_from_urdf(
-                Path(args.urdf).read_text(), sources, group.tip_link
-            )
+            chain = _group_chain(Path(args.urdf).read_text(), profile, group)
         except KinematicsError as error:
             raise ValueError(str(error)) from error
         gravity = np.array([chain.gravity_torque(q) for q in track.measured])
@@ -2306,7 +2357,7 @@ def _collect_poses(args, profile) -> list[Path] | None:
     rate = profile.endpoint().command_rate_hz
 
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group)
+        chain = _gravity_chain(adapter, profile, group, args.urdf)
         design = design_pose_set(
             chain.gravity_torque,
             np.array([joint.lower for joint in limits]),

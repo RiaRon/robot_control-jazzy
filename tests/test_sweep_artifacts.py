@@ -84,10 +84,25 @@ def test_a_sweep_measured_on_one_asset_is_refused_against_another(profile, tmp_p
     """The numbers describe a specific robot; a different one would be a lie."""
     path = tmp_path / "sweep.json"
     write_sweep(path, _sweep(profile), profile)
-    other = dataclasses.replace(profile, manifest_sha256="0" * 64)
+    other = dataclasses.replace(profile, asset_id="some_other_robot")
 
     with pytest.raises(ArtifactError, match="profile or asset"):
         read_sweep(path, other)
+
+
+def test_a_sweep_outlives_a_manifest_revision_of_its_own_asset(profile, tmp_path):
+    """A manifest revision (a camera moved, a note added) is the same arm.
+
+    The joints the numbers describe are guarded separately, by name — refusing
+    on the hash alone would orphan every measured file each time the asset's
+    metadata was touched.
+    """
+    path = tmp_path / "sweep.json"
+    write_sweep(path, _sweep(profile), profile)
+    revised = dataclasses.replace(profile, manifest_sha256="0" * 64)
+
+    sweep = read_sweep(path, revised)
+    assert list(sweep.joint_names) == list(_sweep(profile).joint_names)
 
 
 def test_an_edited_sweep_is_refused(profile, tmp_path):

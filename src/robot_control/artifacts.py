@@ -156,10 +156,14 @@ def _verify(
         raise ArtifactError(f"{kind} checksum mismatch")
 
     asset = payload.get("asset") or {}
+    # The manifest hash is recorded but not compared: a manifest revision of
+    # the same asset (a camera frame added, a note reworded) does not change
+    # the arm the numbers describe, and refusing on it would orphan every
+    # measured file each time. The joints themselves are guarded by name in
+    # `_group_joints`; what is refused here is a different robot altogether.
     if (
         payload.get("profile") != profile.name
         or asset.get("id") != profile.asset_id
-        or asset.get("manifest_sha256") != profile.manifest_sha256
     ):
         raise ArtifactError("profile or asset manifest mismatch")
     return payload

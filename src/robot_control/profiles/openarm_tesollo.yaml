@@ -3,7 +3,11 @@ components: [openarm, tesollo]
 asset:
   id: openarm_tesollo_sensor_rl
   manifest: ../../../../hdgp/assets/robot/openarm_tesollo_sensor_rl/openarm_tesollo_sensor_rl_manifest.yaml
-  manifest_sha256: b89a946e12a0efeb21bfed0b95dbfcf923e6a97f5b06462b08e42acd1bc34c46
+  manifest_sha256: 5f0e422ae33230592f97732448c7018ee853b40a03e689d8f884c9a3d6719798
+  # The asset's own canonical-named URDF (r_aj_1...), whose masses include the
+  # mounted hand — pass it to --urdf wherever the bringup description's vendor
+  # masses are wrong for the arm as built.
+  urdf: ../../../../hdgp/assets/robot/openarm_tesollo_sensor_rl/openarm_tesollo_sensor_rl.urdf
 ros:
   humble:
     command_topic: /robot_control/openarm_tesollo/command
@@ -29,6 +33,8 @@ groups:
     controller: right_joint_trajectory_controller
     moveit_group: right_arm
     tip_link: openarm_right_hand_tcp
+    # Where the chain ends in the asset URDF: the Tesollo palm's EE frame.
+    asset_tip_link: r_hl_palm_ee
     effort_controller: right_forward_effort_controller
   openarm_left_arm:
     joints: [l_aj_1, l_aj_2, l_aj_3, l_aj_4, l_aj_5, l_aj_6, l_aj_7]
@@ -36,6 +42,8 @@ groups:
     controller: left_joint_trajectory_controller
     moveit_group: left_arm
     tip_link: openarm_left_hand_tcp
+    # Where the chain ends in the asset URDF: the left gripper's TCP.
+    asset_tip_link: l_hl_gripper_tcp
     effort_controller: left_forward_effort_controller
   # Humble ships no parallel_gripper_action_controller, and this branch's
   # vendored configuration runs left_gripper_controller as a

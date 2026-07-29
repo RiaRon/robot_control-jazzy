@@ -61,6 +61,11 @@ class Group:
     # hdgp's `get_actuator_params` answers an unrecognised name with the env's
     # own default instead of an error. A guessed name trains silently wrong.
     hdgp_group: str | None = None
+    # Where this group's chain ends in the *asset* URDF, which names joints
+    # canonically (r_aj_1...) and has no `tip_link` frame. Named rather than
+    # derived: the asset generator and the bringup description chose their tool
+    # frames independently.
+    asset_tip_link: str | None = None
 
     @property
     def executable(self) -> bool:
@@ -90,6 +95,9 @@ class RobotProfile:
     joints: tuple[Joint, ...]
     groups: dict[str, Group]
     ros: dict[str, RosEndpoint]
+    # The canonical-named URDF of the asset itself, whose masses include the
+    # mounted hand — the gravity model the bringup description cannot provide.
+    asset_urdf_path: Path | None = None
 
     @property
     def joint_names(self) -> tuple[str, ...]:
@@ -157,6 +165,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
     tip_link = body.get("tip_link")
     effort_controller = body.get("effort_controller")
     hdgp_group = body.get("hdgp_group")
+    asset_tip_link = body.get("asset_tip_link")
     if moveit_group is None and tip_link is not None:
         # The tip link is only ever used as the IK frame of a planning group.
         raise ProfileError(f"group {name} declares a tip_link without a moveit_group")
@@ -186,6 +195,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
             None if effort_controller is None else str(effort_controller)
         ),
         hdgp_group=None if hdgp_group is None else str(hdgp_group),
+        asset_tip_link=None if asset_tip_link is None else str(asset_tip_link),
     )
 
 
@@ -200,6 +210,14 @@ def load_profile(path: str | Path) -> RobotProfile:
     expected = str(asset.get("manifest_sha256", ""))
     if digest != expected:
         raise ProfileError(f"manifest hash mismatch: expected {expected}, got {digest}")
+
+    asset_urdf: Path | None = None
+    if asset.get("urdf") is not None:
+        # Resolved the same way as the manifest: both live in the asset's own
+        # directory, wherever the hdgp checkout put it.
+        asset_urdf = _resolve_manifest(path, str(asset["urdf"]))
+        if not asset_urdf.is_file():
+            raise ProfileError(f"asset urdf not found: {asset_urdf}")
 
     joints = tuple(Joint(**item) for item in raw.get("joints", []))
     names = tuple(j.canonical for j in joints)
@@ -251,6 +269,7 @@ def load_profile(path: str | Path) -> RobotProfile:
         joints=joints,
         groups=groups,
         ros=ros,
+        asset_urdf_path=asset_urdf,
     )
 
 
