@@ -298,6 +298,14 @@ def _parser() -> argparse.ArgumentParser:
                 help="run manifest from r2s collect --repetitions 3; fits across "
                 "the runs it names, instead of one --track",
             )
+            item.add_argument(
+                "--accept-inertia-gap",
+                action="store_true",
+                help="write the fit even when the two routes to the inertia "
+                "disagree. Right when the URDF's masses are only approximate: "
+                "kp/k rests on the staircase's measured kp and stands, while "
+                "1/g inherits the model's error. The gap is recorded either way",
+            )
         if stage == "normalize":
             item.add_argument("--input", type=Path)
             item.add_argument("--output", type=Path)
@@ -1728,15 +1736,26 @@ def _fit(args, profile) -> int:
         worst = float(np.nanmax(combined.disagreement))
         if worst > MAX_INERTIA_DISAGREEMENT:
             joint = combined.joint_names[int(np.nanargmax(combined.disagreement))]
+            if not args.accept_inertia_gap:
+                print(
+                    f"refused: nothing written. The two routes to {joint}'s inertia "
+                    f"disagree by {worst:.0%}, over {MAX_INERTIA_DISAGREEMENT:.0%}. "
+                    "kp/k and 1/g come from different columns of different "
+                    "experiments, so a gap that size means one of them is measuring "
+                    "something else — a static estimate from another robot, a URDF "
+                    "that is not the arm on the track, or a track with a load on it. "
+                    "If the URDF's masses are known to be approximate, "
+                    "--accept-inertia-gap writes the fit anyway: kp/k rests on the "
+                    "staircase's measured kp and stands, while 1/g inherits the "
+                    "model's error."
+                )
+                return REFUSED
             print(
-                f"refused: nothing written. The two routes to {joint}'s inertia "
-                f"disagree by {worst:.0%}, over {MAX_INERTIA_DISAGREEMENT:.0%}. "
-                "kp/k and 1/g come from different columns of different "
-                "experiments, so a gap that size means one of them is measuring "
-                "something else — a static estimate from another robot, a URDF "
-                "that is not the arm on the track, or a track with a load on it."
+                f"accepted: the two routes to {joint}'s inertia disagree by "
+                f"{worst:.0%}, over {MAX_INERTIA_DISAGREEMENT:.0%}, and "
+                "--accept-inertia-gap was passed. The written inertia is kp/k; "
+                "1/g is recorded beside it so the gap stays visible downstream."
             )
-            return REFUSED
         width = len(group.joints)
         payload.update(
             {
@@ -1747,6 +1766,12 @@ def _fit(args, profile) -> int:
                 "friction_nm": combined.friction.tolist(),
                 "inertia_from_gravity_kg_m2": combined.inertia_from_gravity.tolist(),
                 "inertia_disagreement": combined.disagreement.tolist(),
+                # True when the gap was over the threshold and written anyway,
+                # so a reader downstream knows the gravity route was not
+                # believed here rather than having to rediscover it.
+                "inertia_gap_accepted": bool(
+                    args.accept_inertia_gap and worst > MAX_INERTIA_DISAGREEMENT
+                ),
                 "torque_scale": static.torque_scale.tolist(),
                 # Carried through so r2s bundle can cite the whole chain without
                 # being handed the static estimate a second time.
