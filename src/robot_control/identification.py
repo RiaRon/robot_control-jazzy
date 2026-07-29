@@ -57,8 +57,13 @@ class SecondOrderEstimate:
     #: Fo/J: the constant offset the old sign(qd)-only model had no column for.
     bias: np.ndarray
     residual_rmse: np.ndarray
-    #: 1/J, or None when the fit ran without a gravity column.
+    #: 1/J, or None when the fit ran without a gravity column. NaN for a joint
+    #: whose column carried nothing, or disagreed with how the joint moved.
     inverse_inertia: np.ndarray | None = None
+    #: Joints whose gravity column was significantly the wrong sign, and so was
+    #: dropped. A minority is one joint's mass being wrong in the model; a
+    #: majority is the chain, and refuses the fit outright.
+    gravity_disagreed: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -913,6 +918,7 @@ def fit_second_order_runs(runs, coulomb_nm=None) -> SecondOrderEstimate:
     with_gravity = columns.pop() == 5
     inverse_inertia = np.empty(width) if with_gravity else None
     floor = None if coulomb_nm is None else np.asarray(coulomb_nm, dtype=float)
+    wrong_sign: list[int] = []
     for joint in range(width):
         design = np.vstack([designs[joint] for designs, _targets in per_run])
         target = np.concatenate([targets[joint] for _designs, targets in per_run])
@@ -927,15 +933,13 @@ def fit_second_order_runs(runs, coulomb_nm=None) -> SecondOrderEstimate:
         if not drop:
             params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
         if not drop and with_gravity and params[4] <= 0:
+            # Either way the column goes: a coefficient that is noise-signed
+            # (a roll axis parallel to gravity all track) carries nothing, and
+            # one that is genuinely flipped is a model this joint cannot use.
+            # Whether that convicts the whole chain is decided below, once
+            # every joint has voted.
             if _gravity_significant(design, target, params):
-                raise FitError(
-                    f"joint {joint} accelerates towards its load rather than away "
-                    "from it, so the gravity column has the wrong sign or the "
-                    "wrong chain"
-                )
-            # The coefficient is noise-signed — a roll axis spends the whole
-            # track nearly parallel to gravity — which is not the wrong-sign
-            # error above.
+                wrong_sign.append(joint)
             drop = True
         if with_gravity and drop:
             # The joint keeps its dynamic model and simply offers no
@@ -950,8 +954,19 @@ def fit_second_order_runs(runs, coulomb_nm=None) -> SecondOrderEstimate:
         prediction = design @ params
         stiffness[joint], damping[joint], friction[joint], bias[joint] = params[:4]
         residual[joint] = float(np.sqrt(np.mean((prediction - target) ** 2)))
+    if with_gravity and inverse_inertia is not None:
+        loaded = int(np.sum(np.isfinite(inverse_inertia))) + len(wrong_sign)
+        if wrong_sign and len(wrong_sign) * 2 > loaded:
+            # Most of the joints the column loads disagree with it, so it is
+            # the chain that is wrong rather than one joint's mass.
+            raise FitError(
+                "joints "
+                + ", ".join(str(joint) for joint in wrong_sign)
+                + " accelerate towards their load rather than away from it, so "
+                "the gravity column has the wrong sign or the wrong chain"
+            )
     return SecondOrderEstimate(
-        stiffness, damping, friction, bias, residual, inverse_inertia
+        stiffness, damping, friction, bias, residual, inverse_inertia, tuple(wrong_sign)
     )
 
 

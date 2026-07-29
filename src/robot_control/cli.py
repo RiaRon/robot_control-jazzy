@@ -1698,6 +1698,15 @@ def _fit(args, profile) -> int:
         print(f"error: {error}")
         return UNUSABLE
 
+    if estimate.gravity_disagreed:
+        named = ", ".join(track.joint_names[index] for index in estimate.gravity_disagreed)
+        print(
+            f"note: the gravity column disagreed with how {named} moved, so it "
+            "was dropped for those joints — they carry no independent inertia "
+            "to cross-check. The model's mass or centre of mass is wrong there; "
+            "the rest of the arm agreed with it."
+        )
+
     payload: dict = {
         "population": args.population,
         "joint_names": track.joint_names,

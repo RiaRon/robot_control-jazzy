@@ -56,11 +56,34 @@ def test_an_unloaded_joint_fits_without_an_inertia_cross_check():
     np.testing.assert_allclose(estimate.stiffness, KP / INERTIA, rtol=0.05)
 
 
-def test_a_sign_flipped_gravity_column_is_still_refused():
-    clock, command, measured, gravity = _run(load_scale=(1.0, 0.0))
+def test_a_wholly_sign_flipped_gravity_column_is_still_refused():
+    """Every loaded joint wrong means the chain is wrong — refuse the fit."""
+    clock, command, measured, gravity = _run(load_scale=(1.0, 1.0))
 
-    with pytest.raises(FitError, match="accelerates towards its load"):
+    with pytest.raises(FitError, match="accelerate towards their load"):
         fit_second_order_runs([(clock, command, measured, -gravity)])
+
+
+def test_one_wrong_joint_drops_its_column_instead_of_killing_the_fit():
+    """A minority of joints wrong is a local model error, not a wrong chain.
+
+    A hand's centre of mass can be off in a way that flips one wrist axis
+    while the shoulder and elbow stay right. Refusing the whole fit would
+    throw away six good joints to punish one.
+    """
+    clock, command, measured, gravity = _run(load_scale=(1.0, 1.0))
+    flipped = gravity.copy()
+    flipped[:, 1] *= -1.0
+
+    estimate = fit_second_order_runs([(clock, command, measured, flipped)])
+
+    np.testing.assert_allclose(1.0 / estimate.inverse_inertia[0], INERTIA[0], rtol=0.05)
+    assert np.isnan(estimate.inverse_inertia[1])
+    assert estimate.gravity_disagreed == (1,)
+    # The joint keeps the rest of its model, at the price of dropping the
+    # column: its standing load is position-dependent, so what the column no
+    # longer explains is absorbed into stiffness. Loose here for that reason.
+    np.testing.assert_allclose(estimate.stiffness[1], KP[1] / INERTIA[1], rtol=0.1)
 
 
 def test_a_column_buried_under_friction_is_dropped_not_convicted():
