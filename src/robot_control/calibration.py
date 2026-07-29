@@ -164,10 +164,13 @@ def _identified(raw: Any, group_name: str, profile: RobotProfile) -> IdentifiedP
     where = f"{group_name} identified"
 
     fitted = raw.get("fitted_against") or {}
+    # The manifest hash is recorded but not compared — the same rule as
+    # artifacts._read_signed, for the same reason: a manifest revision of the
+    # same asset does not change the arm the parameters were fitted on, and
+    # refusing on it would orphan every bundle at every revision.
     if (
         fitted.get("profile") != profile.name
         or fitted.get("asset_id") != profile.asset_id
-        or fitted.get("manifest_sha256") != profile.manifest_sha256
     ):
         raise CalibrationError(
             f"{where}: parameters were fitted against {fitted.get('profile')!r} / "
@@ -283,10 +286,10 @@ def load_bundle(path: str | Path, profile: RobotProfile) -> CalibrationBundle:
         raise CalibrationError(f"unsupported schema_version: {version}")
 
     asset = payload.get("asset", {})
+    # Hash recorded, not compared — see artifacts._read_signed for the rule.
     if (
         payload.get("profile") != profile.name
         or asset.get("id") != profile.asset_id
-        or asset.get("manifest_sha256") != profile.manifest_sha256
     ):
         raise CalibrationError("profile or asset manifest mismatch")
     checksum = payload.get("checksum_sha256")

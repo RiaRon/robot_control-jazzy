@@ -141,11 +141,22 @@ def test_a_bundle_without_identified_parameters_still_loads(profile, tmp_path):
 def test_parameters_fitted_against_another_asset_are_refused(profile, tmp_path):
     path = tmp_path / "bundle.json"
     payload = _with_identified(profile)
-    payload["groups"][GROUP]["identified"]["fitted_against"]["manifest_sha256"] = "0" * 64
+    payload["groups"][GROUP]["identified"]["fitted_against"]["asset_id"] = "another_robot"
     path.write_text(json.dumps(payload))
 
     with pytest.raises(CalibrationError, match="fitted against"):
         load_bundle(path, profile)
+
+
+def test_parameters_outlive_a_manifest_revision_of_their_own_asset(profile, tmp_path):
+    """Same rule as the sweep artifacts: a manifest revision is the same arm."""
+    path = tmp_path / "bundle.json"
+    payload = _with_identified(profile)
+    payload["groups"][GROUP]["identified"]["fitted_against"]["manifest_sha256"] = "0" * 64
+    path.write_text(json.dumps(payload))
+
+    bundle = load_bundle(path, profile)
+    assert GROUP in bundle.identified
 
 
 def test_parameters_fitted_against_another_profile_are_refused(profile, tmp_path):

@@ -384,7 +384,7 @@ def test_validate_refuses_parameters_measured_on_another_asset(base, tmp_path, c
     main(["r2s", "bundle", "--base", str(base), "--output", str(bundled),
           "--fit", str(_fit(tmp_path / "right.json"))])
     payload = json.loads(bundled.read_text())
-    payload["groups"][GROUP]["identified"]["fitted_against"]["manifest_sha256"] = "0" * 64
+    payload["groups"][GROUP]["identified"]["fitted_against"]["asset_id"] = "another_robot"
     payload.pop("checksum_sha256")
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     payload["checksum_sha256"] = hashlib.sha256(canonical).hexdigest()
