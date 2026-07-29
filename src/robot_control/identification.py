@@ -858,6 +858,24 @@ def _second_order_rows(run) -> tuple[list[np.ndarray], list[np.ndarray]]:
     return designs, targets
 
 
+def _gravity_significant(design, target, params) -> bool:
+    """Whether the gravity coefficient is distinguishable from zero.
+
+    Judged by its own standard error: a column that is ~zero throughout, or
+    collinear with the others, gets a huge standard error and a coefficient
+    that is pure noise. Only a coefficient more than two standard errors below
+    zero convicts the model of the wrong sign.
+    """
+    dof = max(len(target) - design.shape[1], 1)
+    sigma2 = float(np.sum((design @ params - target) ** 2)) / dof
+    try:
+        covariance = np.linalg.inv(design.T @ design) * sigma2
+    except np.linalg.LinAlgError:
+        return False
+    stderr = float(np.sqrt(max(covariance[4, 4], 0.0)))
+    return params[4] < -2.0 * stderr
+
+
 def fit_second_order_runs(runs) -> SecondOrderEstimate:
     """Fit one model across several runs of the same excitation.
 
@@ -898,9 +916,18 @@ def fit_second_order_runs(runs) -> SecondOrderEstimate:
         design = np.vstack([designs[joint] for designs, _targets in per_run])
         target = np.concatenate([targets[joint] for _designs, targets in per_run])
         params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
-        if rank < 2 or params[0] <= 0 or params[1] < 0:
-            raise FitError(f"unidentifiable dynamics for joint {joint}")
-        if with_gravity:
+        if with_gravity and params[4] <= 0 and not _gravity_significant(
+            design, target, params
+        ):
+            # The column identifies nothing for this joint — a roll axis
+            # spends the whole track nearly parallel to gravity — so its
+            # coefficient is noise-signed, which is not the wrong-sign error
+            # below. Refit without the column; the joint keeps its dynamic
+            # model and simply offers no independent inertia to cross-check.
+            design = np.delete(design, 4, axis=1)
+            params, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
+            inverse_inertia[joint] = np.nan
+        elif with_gravity:
             if params[4] <= 0:
                 raise FitError(
                     f"joint {joint} accelerates towards its load rather than away "
@@ -908,6 +935,8 @@ def fit_second_order_runs(runs) -> SecondOrderEstimate:
                     "wrong chain"
                 )
             inverse_inertia[joint] = params[4]
+        if rank < 2 or params[0] <= 0 or params[1] < 0:
+            raise FitError(f"unidentifiable dynamics for joint {joint}")
         prediction = design @ params
         stiffness[joint], damping[joint], friction[joint], bias[joint] = params[:4]
         residual[joint] = float(np.sqrt(np.mean((prediction - target) ** 2)))
