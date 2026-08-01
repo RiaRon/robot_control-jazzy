@@ -4,9 +4,9 @@ This directory owns canonical lower-level robot contracts and the Real2Sim
 artifact pipeline. `sim2real` remains responsible for policy execution and
 task orchestration; `hdgp` remains responsible for robot assets and RL.
 
-This Git branch targets Ubuntu 22.04 and ROS 2 Humble only. It contains
-validated OpenArm and Tesollo Humble driver snapshots directly under
-`ros_ws/src`. Jazzy is maintained on a separate long-lived branch; do not
+This Git branch targets Ubuntu 24.04 and ROS 2 Jazzy only. It contains
+validated OpenArm and Tesollo Jazzy driver snapshots directly under
+`ros_ws/src`. Humble is maintained on a separate long-lived branch; do not
 merge the two distribution branches wholesale.
 
 The first complete profile is `openarm_tesollo`. RH56F1 and the simple gripper
@@ -20,42 +20,662 @@ robotctl r2s preflight
 robotctl r2s collect --dry-run
 ```
 
-Install ROS dependencies and build the imported drivers with:
+Install the Jazzy dependencies and build the supported OpenArm/DG5F graph with:
 
 ```bash
-source /opt/ros/humble/setup.bash
-rosdep install --from-paths ros_ws/src --ignore-src -r -y
+source /opt/ros/jazzy/setup.bash
+./ros_ws/install_dependencies_jazzy.sh
 ./ros_ws/build.sh
 source ros_ws/install/setup.bash
 ```
 
-The wrapper rejects non-Humble environments and keeps all generated products
-inside `ros_ws/{build,install,log}`.
+`install_dependencies_jazzy.sh` deliberately prompts through `sudo`; run it
+only when you are ready to grant the operator-controlled package changes. The
+build wrapper rejects non-Jazzy environments, builds only the supported
+OpenArm/DG5F leaves, and keeps all generated products inside
+`ros_ws/{build,install,log}`.
 
-No command is published unless `--execute` is explicit. A ROS adapter must
-also be installed for execution; the core CLI deliberately fails without one.
+No command is published unless `--execute` is explicit. Execution also needs
+the ROS adapter, which requires `rclpy`; without it the CLI fails with a named
+error rather than crashing on import.
 
 Calibration JSON v1 is read-only compatibility input. All newly exported
 bundles are schema v2, checksum protected, and tied to a profile and asset
 manifest hash.
 
-## Handing a calibration to hdgp
+---
 
-`hdgp` reads schema v1 and one scalar per actuator group, so `r2s export` can
-write that form beside the bundle:
+# 자세 설정 사용법
+
+RViz에서 TCP 마커를 끌어다 놓고, 그 자세로 팔을 보내는 흐름입니다. 전체
+명령 레퍼런스는 [docs/cli.md](docs/cli.md)에 있습니다.
+
+## 0. 명령 준비
+
+`robotctl`은 패키지를 설치해야 생기는 실행 파일입니다. 설치하지 않고 소스에서
+바로 쓰는 편이 간단하고, 가상환경이 ROS의 `rclpy`를 가리는 문제도 없습니다.
 
 ```bash
-robotctl r2s export --bundle bundle.json --validation verdict.json \
-    --output exported.json --hdgp real2sim_actuator.json
-OPENARM_REAL2SIM_ACTUATOR_CALIBRATION=$PWD/real2sim_actuator.json ./train.sh ...
+cd ~/rl_ws/robot_control/.worktrees/jazzy
+source /opt/ros/jazzy/setup.bash
+source ros_ws/install/setup.bash
+export PYTHONPATH="src:.:$PYTHONPATH"        # 대입(=)이 아니라 추가
+alias robotctl='python3 -m robot_control.cli'
 ```
 
-Two things about that conversion are worth knowing before trusting a run.
-`get_actuator_params` answers a group name it does not recognise with the
-env's own default and reports nothing, so the group each profile group lands
-in is declared as `hdgp_group` in the profile rather than guessed; a measured
-group without one is refused. And collapsing a group's joints to one scalar is
-refused when they disagree by more than `--hdgp-max-spread` of their mean —
-the arm's real gains run kp 70 / 60 / 10, where the average describes no joint
-in the group. Groups with no measurement are left out, so the env keeps its own
-gain; the export names them.
+`PYTHONPATH`는 **반드시 추가**하십시오. `PYTHONPATH=src:.` 처럼 대입하면 방금
+source한 ROS 경로가 지워져서, `rclpy`가 설치돼 있는데도 없다고 나옵니다.
+
+굳이 진짜 `robotctl` 명령이 필요하면 가상환경이 시스템 패키지를 상속하도록
+만들어야 합니다:
+
+```bash
+python3 -m venv --system-site-packages .venv
+. .venv/bin/activate && pip install -e .
+```
+
+## 1. 가짜 하드웨어로 먼저
+
+```bash
+./ros_ws/pose_bringup.sh                     # CAN을 건드리지 않습니다
+```
+
+`pose_bringup.sh`는 벤더 기본값을 뒤집습니다. `demo.launch.py`는
+`use_fake_hardware`가 false여서 인자를 빼면 실물 CAN을 엽니다. 이 래퍼는
+반대로, `--real`과 버스 이름을 **명시하지 않으면** 가짜 하드웨어로 뜹니다.
+
+## 2. 실물 연결
+
+### 2-1. CAN 버스 올리기
+
+오픈암 한 대는 팔당 버스 하나입니다. 듀얼 채널 어댑터 한 대면 `can0`, `can1`로
+잡힙니다. 먼저 실제로 무엇이 있는지 확인하십시오:
+
+```bash
+ip -br link show type can
+```
+
+**반드시 CAN FD 모드**여야 합니다. `openarm_description`이 `can_fd:=true`로
+렌더링하고 런치 인자로 바꿀 수 없어서, CAN 2.0으로 올리면 링크는 UP이 되지만
+모터와 프레임을 한 개도 주고받지 못합니다.
+
+```bash
+for iface in can0 can1; do
+  sudo ip link set "$iface" down
+  sudo ip link set "$iface" type can bitrate 1000000 dbitrate 5000000 fd on
+  sudo ip link set "$iface" up
+done
+
+ip -details link show can0 | grep -E "state|fd on"   # state UP + fd on 둘 다
+```
+
+배선은 오픈암 문서 기준 **빨강 → CANH, 검정 → CANL**, GND 선은 없습니다.
+어댑터 쪽 GND 핀은 비워두면 됩니다.
+
+벤더의 `openarm-can-configure-socketcan-4-arms` 스크립트는 `can0`~`can3`이 전부
+있어야 실행되므로 로봇 한 대 구성에서는 쓸 수 없습니다.
+
+### 2-2. 브링업
+
+```bash
+./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1
+```
+
+두 버스 다 이름을 줘야 하고, 래퍼는 추측하지 않습니다. **좌우를 바꿔 넣어도
+소프트웨어는 알아채지 못합니다** — `openarm_hardware`가 두 팔을 같은 모터
+ID(송신 `0x01`~`0x07`, 수신 `0x11`~`0x17`, 그리퍼 `0x08`/`0x18`)로 주소 지정해서,
+어느 팔이 붙어 있든 그럴듯한 관절값이 올라옵니다. 오른팔에 명령했는데 왼팔이
+움직이면 그때 알게 됩니다. 그러면 `--right-can can1 --left-can can0`으로 바꿔
+다시 띄우십시오.
+
+## 3. 자세 읽기
+
+두 번째 터미널에서 0단계를 다시 실행한 뒤:
+
+```bash
+robotctl pose show --group openarm_right_arm
+```
+
+```text
+openarm_right_arm: controller=right_joint_trajectory_controller planning_group=right_arm
+openarm_right_arm: +0.0082 -0.0139 -0.0181 +0.0147 +0.0158 +0.0071 +0.0143
+openarm_right_arm: openarm_right_hand_tcp xyz [+0.0134 -0.1435 +0.0822] rpy [-3.1204 -0.0372 +0.0018]
+```
+
+읽기는 발행이 아니므로 `--execute`가 필요 없습니다. 관절값이 정확히 0이 아니라
+미세하게 떨리면 실물이고, 딱 `0.0000`이면 가짜 하드웨어입니다.
+
+## 4. 마커를 끌어서 그 자세로 보내기
+
+RViz **MotionPlanning** 패널에서 `openarm_right_hand_tcp`(공구 중심점) 위의
+6축 마커를 원하는 곳으로 끕니다. 마커는 목표 상태만 움직이며, 명령을 실행하기
+전까지 로봇은 따라가지 않습니다.
+
+```bash
+robotctl pose ee --group openarm_right_arm --from-marker              # 드라이런
+robotctl pose ee --group openarm_right_arm --from-marker --execute    # 실제로 감
+```
+
+드라이런이 목표 좌표와 7개 관절 해를 전부 출력합니다. 보고 나서 `--execute`를
+붙이십시오.
+
+`--from-marker`는 RViz의 마커 서버에 `get_interactive_markers`로 물어서 이
+그룹의 tip link에 해당하는 마커(`EE:goal_openarm_right_hand_tcp`)를 찾습니다.
+마커의 `feedback` 토픽을 듣지 않는 이유는, feedback이 **드래그하는 동안에만**
+나와서 명령이 마우스와 경주를 해야 하기 때문입니다. 서버는 드래그가 끝난 뒤에도
+자세를 들고 있습니다.
+
+마커는 `world` 기준 절대 자세라 `--from-marker`는 `--rpy`와 `--relative`를
+거부합니다. 거기에 오프셋을 더하면 화면에 없던 곳으로 팔이 갑니다.
+
+RViz는 패널에 선택된 플래닝 그룹의 마커만 내보냅니다. 다른 그룹을 요청하면
+어느 마커가 없는지 알려줍니다:
+
+```text
+unavailable: RViz is running but holds no marker named
+'EE:goal_openarm_right_hand_tcp'; set the MotionPlanning panel's planning group
+to 'right_arm' so it publishes one
+```
+
+### RViz 자체의 Plan & Execute 버튼은 동작하지 않습니다
+
+벤더 `joint_limits.yaml`이 17개 관절 전부 `has_acceleration_limits: false`인데,
+Jazzy 기본 플래닝 파이프라인의 `AddTimeOptimalParameterization`이 가속도 한계를
+요구합니다. 가짜 하드웨어·Gazebo·실물에서 똑같이 실패합니다.
+
+고칠 수는 있지만 그러면 로봇으로 가는 **두 번째 경로**가 열립니다. RViz의
+Execute는 `move_group` → `/execute_trajectory` → 컨트롤러로 바로 가서
+`CommandGate`(프로파일 위치·속도 한계, 워치독, `--execute` 명시 요구)를 전부
+건너뜁니다. 이 프로젝트는 운영자 명령도 학습 정책 명령과 같은 게이트를 지나는
+것을 전제로 설계돼 있습니다. 그래서 RViz는 **자세를 고르는 도구**, `robotctl`은
+**거기 도달하는 도구**로 나눠져 있습니다.
+
+## 5. 오차가 남을 때 — `--settle`
+
+`--execute`는 항상 도달 잔차를 출력합니다.
+
+```text
+EXECUTED: openarm_right_arm over 3 s
+residual: 58.4 mm from the commanded pose
+```
+
+이건 IK 오차가 아닙니다. 계산된 관절 해의 정기구학은 목표 위에 정확히
+떨어집니다(측정값 0.00 mm). 전부 **추종 오차**입니다.
+
+원인은 제어 설정입니다. 컨트롤러가 위치만 보내고(`command_interfaces: [position]`),
+`openarm_hardware`가 그것을 DM 모터의 MIT 명령으로 넘깁니다. 모터 토크는
+`kp * (명령 − 실제)`이고 중력 피드포워드가 없으므로, **관절은 명령보다 뒤처져
+있어야만** 중력을 버티는 토크를 냅니다. 정상상태 오차 ≈ 유지토크 / kp:
+
+| 관절 | 오차 (rad) | kp |
+|---|---:|---:|
+| r_aj_1 (어깨) | 0.067 | 70 |
+| r_aj_4 (팔꿈치) | 0.081 | 60 |
+| r_aj_5 (손목) | 0.004 | 10 |
+
+같은 해를 다시 보내도 소용없습니다. 똑같은 처짐이 그대로 재현됩니다. `--settle`은
+매 회차의 실측 부족분을 명령에 **더해서**, 지난번에 못 간 만큼 목표를 지나쳐
+가도록 명령합니다:
+
+```bash
+robotctl pose ee --group openarm_right_arm --from-marker --execute --settle
+```
+
+```text
+settle 1: 58.4 -> 6.1 mm
+settle 2: 6.1 -> 1.4 mm
+settled: 1.4 mm after 2 corrections
+```
+
+`--tolerance`(기본 0.005 m)로 목표 잔차를 정합니다. 매 회차는 새로 만든 안전
+게이트의 승인을 받으므로, 누적된 명령이 프로파일 위치 한계를 넘으면 거부됩니다.
+최대 4회까지 시도하고, 한 회차가 잔차를 10% 이상 줄이지 못하면 중단합니다 —
+스토퍼에 닿았거나 물체를 쥐고 있으면 수렴하지 않고, 더 밀어봐야 도달할 수 없는
+자세로 명령만 감기기 때문입니다.
+
+`--settle`은 `--execute` 없이 못 씁니다. 드라이런은 아무것도 보내지 않으므로
+부족분이라는 게 존재하지 않습니다.
+
+## 6. 처짐을 근본적으로 없애기 — 중력 보상
+
+`--settle`은 도착점만 고칩니다. 움직이는 내내 정확하려면 처짐 자체를 없애야
+하고, 그건 피드포워드 토크로 합니다.
+
+### 왜 배율을 실험으로 정하는가
+
+중력 토크는 URDF의 질량과 무게중심에서 계산하는데, 이게 맞서는 게인은
+**벤더 하드웨어에 하드코딩**돼 있습니다:
+
+```
+control_gains.yaml:  kp = 70 70 70 60 10 10 10   ← 아무도 읽지 않음
+DEFAULT_KP (헤더):   kp = 20 20 20 20  5  5  5   ← write()가 쓰는 값
+```
+
+`v10_simple_hardware.cpp`가 읽는 하드웨어 파라미터는 `can_interface`,
+`arm_prefix`, `hand`, `can_fd` 넷뿐입니다. **`control_gains.yaml`을 고쳐도
+아무 일도 일어나지 않습니다.**
+
+그래서 올바른 배율은 계산으로 나오는 값이 아니라 **측정하는 값**입니다.
+
+### 절차
+
+effort 컨트롤러는 벤더 브링업에 없으니 따로 올립니다. 트래젝토리 컨트롤러가
+위치를 계속 잡은 채로 effort만 추가되는 구조입니다:
+
+```bash
+./ros_ws/pose_bringup.sh --real --right-can can0 --left-can can1   # 터미널 1
+./ros_ws/load_effort_controllers.sh                                # 터미널 2
+```
+
+먼저 **부하가 걸리는 자세**로 팔을 보내십시오. 팔을 접고 있으면 중력 토크가
+작아서 배율 차이가 안 보입니다.
+
+```bash
+robotctl pose ee --group openarm_right_arm --from-marker --execute --settle
+```
+
+그 자세에서 배율을 훑습니다. 각 배율마다 유지하고, 트래젝토리 컨트롤러가
+발행하는 `error.positions`(= 관절별 처짐, IK도 FK도 거치지 않은 값)를 읽어
+표로 찍습니다:
+
+```bash
+# --execute는 배율마다 토크를 발행합니다. 보상이 바뀔 때마다 팔이 조금씩
+# 움직입니다. E-stop 준비하십시오.
+robotctl pose gravity --group openarm_right_arm --execute --sweep 0,0.25,0.5,0.75,1.0
+```
+
+```text
+  scale      r_aj_1    r_aj_2    r_aj_3    r_aj_4    r_aj_5    r_aj_6    r_aj_7
+   0.00     +0.0694   -0.0225   -0.0137   +0.1790   +0.0112   +0.0193   -0.0705
+   ...
+best measured scale: 0.75 (worst joint +0.0121 rad)
+```
+
+### 관절별로 다듬기
+
+배율 하나로는 타협점까지입니다. 관절마다 최적값이 다릅니다 — 실측 외삽으로
+`r_aj_2` ≈ 1.14, `r_aj_1` ≈ 1.23, `r_aj_3` ≈ 1.31. 모델 토크의 **분포**가
+어긋난 것이지 크기만의 문제가 아닙니다.
+
+전역 최적값을 먼저 찾고, 거기서 관절 하나씩 다듬으십시오. `--sweep-joint`가
+지정한 관절의 배율만 바꾸고 나머지는 `--scale`로 고정합니다:
+
+```bash
+# --execute가 배율마다 토크를 발행합니다. r_aj_2의 몫만 바뀝니다.
+robotctl pose gravity --group openarm_right_arm --execute --scale 1.1 --sweep-joint r_aj_2 --sweep 1.05,1.1,1.15,1.2
+```
+
+보고는 **그 관절 자신의 오차**로 채점합니다 — 전체 최악값을 쓰면 이번 sweep이
+건드리지도 않은 관절이 지배합니다 — 그리고 다음 라운드에 그대로 쓸 벡터를
+출력합니다:
+
+```text
+best measured scale for r_aj_2: 1.15 (that joint +0.0031 rad)
+  refine the next joint the same way, then hold them all at once:
+  --scale 1.1,1.15,1.1,1.1,1.1,1.1,1.1
+```
+
+찾은 배율로 유지합니다:
+
+```bash
+# --execute가 토크를 발행합니다. 명령을 멈출 때까지 팔이 스스로 버팁니다.
+robotctl pose gravity --group openarm_right_arm --scale 1.1,1.15,1.1,1.1,1.1,1.1,1.1 --execute
+```
+
+`pose follow --gravity`도 같은 형식(하나 또는 관절별)을 받으므로, 튜닝한 벡터를
+그대로 넘기면 됩니다.
+
+### 안전장치
+
+- 배율 **1.5 초과는 거부**합니다. 과보상은 자세가 틀리는 게 아니라 버티던
+  자리에서 팔을 밀어냅니다
+- 토크가 프로파일의 관절별 `effort` 한계를 넘으면 **거부**합니다. 서보 스텝과
+  달리 클램프하지 않습니다 — "허용된 만큼"으로 줄인 힘도 여전히 잘못된 크기의
+  힘입니다
+- 종료할 때 **반드시 0을 발행**합니다. 프로세스가 죽은 뒤 토크가 남아 있으면
+  계속 밀게 됩니다
+
+### 모델의 한계
+
+제 중력 모델을 실측 처짐과 비교하면 어깨 1.39배, 팔꿈치 0.87배입니다. 부호와
+순위는 전부 맞습니다. 남은 차이는 마찰·스틱션과 URDF 질량 오차이고, 그래서
+배율이 조작자 손에 있습니다. 최적값은 1.0 근처지만 1.0은 아닐 것이며, 그건
+위 sweep이 답할 문제입니다.
+
+## 7. 마커를 실시간으로 추종 — `pose follow`
+
+한 번에 한 자세씩 커밋하는 대신, 끄는 대로 따라옵니다.
+
+```bash
+# --execute가 위치 명령을 스트리밍합니다. 끄는 동안 팔이 움직입니다.
+robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
+```
+
+```text
+following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
+drag the marker in RViz; the arm tracks it until the time runs out
+followed 634 samples; the arm holds its last commanded pose
+  tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
+  velocity limit clamped on 74 of 634 samples
+```
+
+### `pose ee --from-marker`와 다른 점
+
+`pose ee`는 마커를 **한 번** 읽고 트래젝토리 하나를 보냅니다. `pose follow`는
+마커의 `feedback` 스트림(드래그 중 계속 나오는 토픽)을 읽어 컨트롤러 주기로
+명령합니다.
+
+역기구학이 `/compute_ik`가 아니라 **자코비안 기반 미분 IK**입니다. 100 Hz에
+서비스 왕복은 못 따라가고, 자코비안 스텝은 국소적이라 팔이 가까운 해로
+쓸려갑니다 — 매번 새로 IK를 풀면 해 분기 사이로 튈 수 있습니다. 역행렬은
+감쇠 최소자승이라 특이점을 지나가도 스텝이 유한합니다.
+
+모든 샘플이 `CommandGate.follow`를 지나며 **거부가 아니라 클램프**됩니다.
+팔보다 빨리 끄는 건 정상 조작이므로, 프로파일 속도 한계로 제한하고 몇 개가
+제한됐는지 끝에 보고합니다.
+
+레이트 리밋의 기준이 **이전 명령**이라는 점이 팔이 움직이느냐를 결정합니다.
+이 관절들은 버티는 토크를 내기 위해 명령보다 처짐만큼(실측 0.02~0.05 rad) 뒤에
+있는데, 100 Hz에서 샘플당 예산은 0.02 rad입니다. 실측 기준으로 예산을 잡으면
+명령이 실측보다 한 주기치만 앞설 수 있어 처짐보다 작고, 결과적으로 명령이
+평형점 뒤에 놓여 아무것도 전진하지 않습니다. 가짜 하드웨어는 처짐이 없어 어느
+쪽이든 완벽히 추종하므로, 이 문제는 실물에서만 드러났습니다.
+
+그래서 세 번째 한계가 필요합니다. `max_lead`가 명령이 실측을 앞지르는 양을
+묶습니다 — 없으면 장애물에 막힌 관절이 명령을, 따라서 토크를 무한히 감습니다.
+클램프 보고에 `lead limit`으로 나옵니다.
+
+### 멈출 때
+
+`--seconds`가 끝나거나 Ctrl-C로 끝납니다. 어느 쪽이든 마지막에 명령을 멈추고
+피드포워드 토크를 0으로 되돌립니다. 트래젝토리 컨트롤러가 마지막 명령 위치를
+잡고 있고 그게 팔이 이미 있는 곳이므로, 힘이 빠지거나 어디로 튀지 않고 그
+자리에 섭니다.
+
+**스스로 끝나는 게 설계입니다.** 서보 루프를 켜둔 채로 두면, 몇 시간 뒤 누가
+마커를 건드릴 때 움직이는 로봇이 됩니다.
+
+### 팔 자세가 RViz 고스트와 다릅니다
+
+끝단은 마커에 맞는데 팔꿈치가 다른 곳에 있습니다. **오차가 아니라 여유자유도**입니다.
+
+관절은 7개인데 자세는 6자유도라, 같은 TCP를 만드는 관절 조합이 1차원으로
+무한히 존재합니다 — 손끝을 고정한 채 팔꿈치가 원뿔을 그리며 도는 그 자유도입니다.
+어느 해가 나오는지는 누가 IK를 풀었느냐로 갈립니다:
+
+| | 솔버 | 특성 |
+|---|---|---|
+| RViz 고스트 | MoveIt KDL | 시드에서 수렴한 해. 팔꿈치가 매번 다를 수 있음 |
+| `pose follow` | 자코비안 감쇠 최소자승 | 현재 자세에서 **최소 관절 변화** |
+| `pose ee --from-marker` | `/compute_ik` (MoveIt) | 같은 솔버라 고스트와 **일치** |
+
+서보에서는 국소 해가 맞습니다. 매 샘플 새로 풀면 손끝은 매끄럽게 가는데
+팔꿈치가 원뿔 반대편으로 넘어가고, 조작 위치에서는 팔이 이유 없이 휙 도는
+것으로 보입니다. **고스트와 자세를 비교하지 말고, 마커와 TCP를 비교하십시오.**
+
+### 전 관절 0 자세는 특이점입니다
+
+정확히 `q = 0`에서 자코비안의 **z 행 전체가 0**이고 rank가 5입니다. 그
+자세에서는 어떤 관절도 TCP를 수직으로 움직이지 못합니다. 마커를 위로 끌어도
+움직이지 않는 게 **정상**입니다.
+
+```
+q = 0      특이값: [1.8674 1.5266 1.4142 0.286 0.2856 0.0000]   rank 5
+팔꿈치 0.6 특이값: [1.8601 1.5187 1.4142 0.275 0.2743 0.0524]   rank 6
+```
+
+추종 전에 팔을 살짝 굽히십시오. 정확한 home만 아니면 됩니다:
+
+```bash
+# --execute가 트래젝토리를 보내 팔꿈치를 특이점에서 빼냅니다.
+robotctl pose joints --group openarm_right_arm --values 0,0,0,0.6,0,0,0 --execute
+```
+
+`--gravity`는 여기서 특히 의미가 있습니다. `pose ee --settle`은 이동이 **끝나는
+지점**을 고치는데, 움직이는 팔에는 끝나는 지점이 없습니다. 배율은 앞의
+`pose gravity --sweep`으로 먼저 정하십시오.
+
+## 8. Real2Sim 파라미터 식별
+
+시뮬레이터가 이 팔처럼 움직이려면 관절별 **관성 `J`, 감쇠 `b`, 마찰 `τ_f`,
+강성 `kp`** 가 필요합니다. URDF에서 가져오는 게 아니라 측정합니다.
+
+### 왜 두 실험이 필요한가
+
+물리 방정식은 이렇습니다.
+
+```
+J q̈ = kp(q_cmd − q) − b q̇ − τ_f sign(q̇) − τ_g(q) + τ_ff
+```
+
+**동적 트랙**(`r2s fit`)은 이 식을 `J`로 나눠서 풉니다. 그래서 나오는 건
+`k = kp/J`, `d = b/J`, `f = τ_f/J` — 전부 **관성으로 나눠진 값**이고, 관성
+자체는 이 실험만으로는 분리되지 않습니다.
+
+**중력 sweep**(6장)은 `q̇ = q̈ = 0`인 곳에서 동작하므로 같은 식이 이렇게
+붕괴합니다.
+
+```
+오차 = (α·τ_model − s·τ_model) / kp + c
+```
+
+여기서 나오는 `kp`는 **관성이 들어 있지 않은 N·m/rad** 입니다. 둘을 합치면
+관성이 떨어져 나옵니다.
+
+```
+J = kp / k        b = d·J        τ_f = f·J
+```
+
+어느 한쪽만으로는 안 나오는 값입니다.
+
+### 왜 자세가 여러 개 필요한가
+
+한 자세에서는 `τ_model`이 상수라 오프셋과 구별되지 않습니다. `kp`·마찰·모델
+오차가 **미지수 3개에 방정식 1개**입니다. 실제로 첫 sweep을 관절별로 적합했을
+때 `kp`가 7.5 / 15.4 / 28.4로 나왔습니다. 벤더 헤더의 20에 대해 양쪽으로
+흩어졌는데, 이건 로봇이 이상한 게 아니라 **부정 결정계의 징후**입니다.
+
+여러 자세에서 재면 `τ_model`이 바뀌고 마찰은 그대로라 분리됩니다.
+
+### 절차
+
+**1) 자세 세트를 먼저 검토합니다.** `--execute` 없이는 아무것도 움직이지
+않습니다.
+
+```bash
+robotctl r2s identify --collect --group openarm_right_arm --poses 4 --output static.json
+```
+
+```text
+openarm_right_arm: 4 poses, scales 0,0.5,1
+            r_aj_1   r_aj_2   r_aj_3   r_aj_4   r_aj_5   r_aj_6   r_aj_7
+  pose 0   +0.000   +0.000   +0.000   +0.000   +0.000   +0.000   +0.000
+  pose 1   +1.555   +0.898   -0.125   +0.515   -0.008   +0.059   +0.897
+  cond        2.8      2.8      2.8      2.8      2.8      2.8      2.8
+  worst conditioned: r_aj_1 at 2.8
+DRY RUN: nothing moved and nothing was written.
+```
+
+> **이 dry run이 곧 검토입니다.** 자기 충돌도, 책상도, 위에 놓인 물건도
+> **아무것도 확인하지 않습니다.** 프로파일은 관절을 하나씩 제한할 뿐, 그 자세의
+> 팔이 있을 수 있는 자리인지는 말해주지 않습니다. RViz에서 각 자세를 눈으로
+> 확인하십시오.
+
+`cond`는 그 관절의 회귀 조건수입니다. 200을 넘으면 숫자를 주지 않고 **거부**하고
+어느 관절인지 말합니다. `--poses`나 `--reach`를 올리거나 다른 `--seed`로
+다시 설계하십시오.
+
+**2) 같은 `--seed`로 실행합니다.** 자세 세트는 seed에 대해 결정적이므로 방금
+본 자세를 그대로 방문합니다.
+
+```bash
+# --execute가 설계된 자세로 팔을 차례로 옮기고 그 자리에서 토크를 발행합니다.
+# E-stop 준비하십시오.
+robotctl r2s identify --collect --group openarm_right_arm --poses 4 --seed 0 \
+  --sweep-dir sweeps --output static.json --execute
+```
+
+**출발 전에 전체 여정을 검증합니다** — 모든 자세를 위치 한계에, 모든 구간을
+`--duration`에서의 속도 한계에 대해서. 다섯 번째 자세가 범위 밖이라 중간에
+멈추면 아무도 고르지 않은 자리에 팔이 남습니다. 미리 거부하면 아무 비용도
+들지 않습니다.
+
+토크는 **자세마다** 해제됩니다. 마지막에 한 번이 아닙니다.
+
+```text
+identify: 4 poses, 12 rounds at most per joint
+  joint            kp (N.m/rad)   alpha   offset (rad)  residual (rad)   cond  rounds  frozen
+  r_aj_1                  7.52   1.083       +0.00210         0.00021    4.8      12       0
+  ...
+```
+
+`alpha`는 모델 토크가 틀린 배수입니다 — URDF가 모르는 질량, 케이블, 붙여놓은
+것들. `offset`은 배율과 무관한 성분이고, 여기가 **스틱션**이 사는 자리입니다.
+`frozen`은 토크가 바뀌었는데 관절이 안 움직여서 버린 라운드 수입니다. 스틱션
+밴드 안에서는 위치 오차가 아니라 마찰이 관절을 잡고 있어서, 그 샘플들은 노이즈를
+더하는 게 아니라 **적합된 강성을 무한대로 끌어당깁니다**. 실측에서 `r_aj_4`는
+여섯 배율 연속 정확히 `+0.0075` rad였습니다.
+
+**부분 답을 쓰지 않습니다.** 관절 하나라도 식별 못 하면 아무것도 안 쓰고
+어느 관절이 왜 실패했는지 출력합니다. 최소자승은 늘 뭔가를 돌려주고, 부하가
+변하지 않은 관절의 강성은 그 "뭔가"입니다. 하류에서 그게 관성이 되면 그 뒤로는
+측정값과 구별되지 않습니다.
+
+**3) 동적 트랙을 수집합니다.** 여진을 발행하고 응답을 기록합니다.
+
+먼저 검토 — `--execute` 없이는 아무것도 발행하지 않습니다.
+
+```bash
+robotctl r2s collect --group openarm_right_arm
+```
+
+```text
+openarm_right_arm: amplitude_scale=0.3 samples=611 (6.1 s at 100 Hz) phases=hold,bridge,step,ramp,multisine
+DRY RUN: nothing was published; pass --execute to collect
+```
+
+여진은 **현재 자세** 기준으로 만들어집니다. 팔 한계가 대칭이라 범위 중간값은 전
+관절 0이고, 거기서 시작하면 여진 전에 큰 이동이 먼저 일어납니다. dry run도
+로봇이 필요한 이유가 이것입니다 — 중간값 기준으로 검토하고 `--execute`는 현재
+자세로 돌린다면, 실행되지 않을 트랙을 검토하는 셈입니다.
+
+`bridge`가 위상 목록에 있는 이유: 위상들은 모양이고 그 사이 이음매는 불연속인데,
+실제 프로파일 기준으로 램프→multisine 이음매가 100 Hz에서 **속도 한계의 7배**를
+요구합니다. 진폭을 줄여 불연속을 한 주기에 맞추면 여진이 7분의 1로 쪼그라들어서,
+대신 이음매를 한계 속도로 이어줍니다. 기본 배율에서 11 샘플 추가입니다.
+
+```bash
+# --execute가 100 Hz로 위치 명령을 발행하고 팔이 여진 전체를 지나갑니다.
+# 세 번 반복하며 사이사이 시작 자세로 돌아옵니다. E-stop 준비하십시오.
+robotctl r2s collect --group openarm_right_arm --output run.npz --repetitions 3 --execute
+```
+
+**출발 전에 트랙 전체를 검증합니다.** 중간에 멈추면 아무도 고르지 않은 속도로
+여진 도중에 팔이 남습니다.
+
+세 번인 이유는 두 개로 적합하고 하나를 남겨두기 위해서입니다. 두 번이면 각각
+하나씩이라 적합된 모델을 검증할 대상이 없어서 `2`는 거부합니다.
+
+```bash
+robotctl r2s normalize --input run0.npz --output track0.h5
+```
+
+`/joint_states`는 best-effort로 구독되어 메시지가 유실됩니다. 유실 구간을
+보간하면 **아무도 측정하지 않은 데이터를 지나는 매끄러운 곡선**이 되고, 적합은
+그 곡선과 측정값을 구별하지 못합니다. `--max-gap-periods`(기본 20)를 넘으면
+거부합니다.
+
+**4) 정적·동적을 합칩니다.** URDF를 실행 중인 스택에서 받아옵니다.
+
+```bash
+ros2 param get --hide-type /robot_state_publisher robot_description > robot.urdf
+robotctl r2s fit --manifest run.json --output right.json --static static.json --urdf robot.urdf
+```
+
+`--manifest`가 지정한 두 run에 **하나의 회귀**로 적합합니다. 따로 적합해서
+평균내지 않습니다 — 같은 실험의 반복이라 파라미터가 공유되고 모든 샘플이 같은
+숫자에 대한 증거입니다. 평균을 내면 짧은 run이 긴 run과 같은 무게를 갖습니다.
+그렇다고 하나의 트랙으로 이어붙이지도 않습니다. run 사이 이음매는 운동이
+아니라 (그 사이 팔을 시작 자세로 되돌렸습니다) 그걸 미분하면 일어난 적 없는
+가속도를 만들어냅니다.
+
+```text
+  joint            J (kg.m2)   b (N.m.s)   tau_f (N.m)   kp (N.m/rad)   J from gravity   gap
+  r_aj_1             0.35000      1.5000        0.4000          20.00          0.35000  0.0%
+```
+
+첫 칼럼 `J`는 `kp/k`입니다. 마지막의 `J from gravity`는 `1/g` — 중력 칼럼에서
+직접 나온 값입니다. **다른 실험의 다른 칼럼에서 나오므로, 둘이 맞는다는 건
+계산이 아니라 증거입니다.** 다른 로봇에서 측정한 static estimate나, 트랙의 팔이
+아닌 URDF를 잡아내는 유일한 검사입니다. 25% 넘게 벌어지면 거부하고 아무것도
+쓰지 않습니다.
+
+**5) 번들에 넣고 검증합니다.**
+
+```bash
+robotctl r2s bundle --base bundle.json --fit right.json --fit left.json --output identified.json
+robotctl r2s validate --bundle identified.json --manifest run.json --fit right.json --output verdict.json
+robotctl r2s export --bundle identified.json --validation verdict.json --output release.json
+```
+
+`validate`는 손으로 쓴 메트릭 파일을 읽지 않고 **남겨둔 run에 대해 직접
+채점합니다.** 모델을 그 run의 명령을 따라 **개루프로** 시뮬레이션하고 실제
+측정값과 비교합니다. 개루프인 게 핵심입니다 — 매 스텝 측정값을 되먹이면 이미
+받은 샘플 사이를 얼마나 잘 보간하는지를 재게 되고, 그건 어떤 모델이든 잘합니다.
+시뮬레이터는 그 샘플들 없이 돌아야 합니다.
+
+`improvement_fraction`의 기준선은 **팔이 명령대로 도달했다는 가정**입니다.
+식별을 아예 안 한 사람이 믿을 내용이고, 모델이 그걸 이겨야 들고 다닐 가치가
+있습니다.
+
+각 그룹에 `nominal` 옆에 `identified` 블록이 생깁니다. 성격이 다릅니다 —
+`nominal`은 그룹당 하나의 추정치, `identified`는 **관절당 하나의 측정값**이라
+어느 sweep과 어느 트랙에서 나왔는지, 어떤 교차검증을 통과했는지 함께 실립니다.
+
+블록은 자기가 **측정된** 프로파일·에셋·매니페스트 해시를 기록합니다. 번들
+헤더가 주장하는 것과 나란히요. 같은 정보를 두 번 쓰는 것처럼 보이지만, 이게
+바로 체크섬이 못 하는 검사입니다 — 체크섬은 쓸 때 다시 계산되므로, 다른 로봇
+번들에서 복사해 붙인 블록도 똑같이 서명해줍니다.
+
+### 아직 남은 것
+
+파이프라인은 이제 `collect → normalize → fit → bundle → validate → export`가
+끊긴 데 없이 이어집니다. 다만 **실기에서 한 번도 돌린 적이 없습니다.** 검증된
+건 전부 합성 로봇 기준이고, 뭐가 검증됐고 뭐가 안 됐는지는
+`docs/jazzy-verification.md`에 적어뒀습니다.
+
+실측 파라미터(`J`, `b`, `τ_f`, `kp`)는 아직 없습니다.
+
+## 그 밖의 명령
+
+```bash
+robotctl pose joints --group openarm_right_arm --named home --execute
+robotctl pose joints --group openarm_right_arm --values 0,0,0,0.3,0,0,0 --execute
+robotctl pose ee     --group openarm_right_arm --relative --xyz 0,0,0.03 --execute
+```
+
+`--named`는 SRDF의 group state를 읽습니다. `home`은 전 관절을 0으로 보내므로,
+현재 자세를 모르는 상태에서 실행하면 큰 이동이 됩니다. `pose show`로 먼저
+확인하십시오.
+
+## 종료 코드
+
+| 코드 | 뜻 |
+|---|---|
+| `0` | 정상 |
+| `2` | **할 수 없음** — 알 수 없는 그룹, 인자 오류, ROS 미실행, 마커 없음 |
+| `3` | **하지 않음** — IK 해 없음, 안전 게이트 거부 |
+
+`3`은 시스템이 제대로 동작한 결과입니다.
+
+## 문제 해결
+
+| 증상 | 원인과 조치 |
+|---|---|
+| `unavailable: ... needs rclpy` | ROS 미source, 또는 `PYTHONPATH`를 대입해서 ROS 경로가 지워짐 |
+| `unavailable: no /joint_states within 10.0 s` | 브링업이 안 떠 있음. `ros2 control list_controllers`로 확인 |
+| `unavailable: /compute_ik is not available` | 컨트롤러는 떴는데 `move_group`이 안 뜸. 브링업 로그 확인 |
+| `refused: no IK solution` | 도달 범위 밖이거나 해가 전부 충돌. 더 작은 `--relative` 단계로 |
+| `refused: velocity limit exceeded` | `--duration`에 비해 이동이 큼. 프로파일이 아니라 `--duration`을 올리십시오 |
+| 브링업은 뜨는데 관절값이 안 옴 | `candump can0`으로 프레임 확인. `state STOPPED`면 링크 미기동, `BUS-OFF`면 비트레이트/종단저항 |
+| 다른 로봇 관절이 섞여 보임 | 이전 런치가 살아 있음. `pkill -f "[m]ove_group"` (첫 글자 대괄호는 pkill이 자기 자신을 죽이지 않게 함) |

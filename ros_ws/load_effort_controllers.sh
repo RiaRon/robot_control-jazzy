@@ -1,60 +1,73 @@
 #!/usr/bin/env bash
-# Load the effort controllers `r2s identify` publishes gravity feedforward on.
+
+# Load the effort controllers into an already running stack.
 #
-# They are declared in the bringup's controller configuration but deliberately
-# not spawned with it: this puts a torque path onto a powered arm, and that
-# should be something somebody ran on purpose. Run it when a sweep needs one,
-# and `--unload` when the sweep is done.
+# The vendored bringup claims the position interface only, so every MIT command
+# carries tau = 0 and each joint holds position by sitting short of its command.
+# These controllers claim the effort interfaces beside the trajectory
+# controllers, which is what lets a gravity feedforward be published without the
+# trajectory controllers giving up position.
 #
-# The trajectory controller keeps position throughout. The hardware sends both
-# in one MIT-mode packet — tau = kp(q_des - q) + kd(qd_des - qd) + tau_ff — so
-# the effort command is a feedforward term added to the position loop, not a
-# replacement for it. Nothing here releases the arm.
-#
-# Usage:
-#   ./ros_ws/load_effort_controllers.sh [right|left|both]   (default: both)
-#   ./ros_ws/load_effort_controllers.sh --unload [right|left|both]
+# Loaded at runtime rather than merged into the vendor controller file, because
+# demo.launch.py passes the controller manager exactly one parameter file:
+# adding them there would mean patching the vendor snapshot or keeping a copy of
+# the whole vendor file in step with it. This also leaves the effort interfaces
+# unclaimed until compensation is actually asked for.
 
 set -euo pipefail
 
-if ! command -v ros2 > /dev/null 2>&1; then
-    echo "error: ros2 is not on PATH; source /opt/ros/humble/setup.bash and this" >&2
-    echo "       workspace's install/setup.bash first" >&2
-    exit 2
-fi
+WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="$WORKSPACE/config/effort_controllers.yaml"
+TYPE="forward_command_controller/ForwardCommandController"
 
-UNLOAD=false
-if [[ "${1:-}" == "--unload" ]]; then
-    UNLOAD=true
-    shift
-fi
+usage() {
+    cat <<'USAGE'
+usage: load_effort_controllers.sh [right|left|both]
+
+  both  (default) load the effort controller for each arm
+
+Requires a running stack; start one with pose_bringup.sh first. The controllers
+are additive: the trajectory controllers keep the position interfaces.
+USAGE
+}
 
 case "${1:-both}" in
-    right) CONTROLLERS=(right_forward_effort_controller) ;;
-    left) CONTROLLERS=(left_forward_effort_controller) ;;
-    both) CONTROLLERS=(right_forward_effort_controller left_forward_effort_controller) ;;
-    *)
-        echo "error: expected right, left, or both; got '${1}'" >&2
-        exit 2
-        ;;
+    right) sides=(right) ;;
+    left) sides=(left) ;;
+    both) sides=(right left) ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
 esac
 
-if ! ros2 control list_controllers > /dev/null 2>&1; then
-    echo "error: no controller_manager is responding; is the bringup running?" >&2
+if [[ "${ROS_DISTRO:-}" != "jazzy" ]]; then
+    echo "error: source a ROS 2 Jazzy environment first" >&2
     exit 2
 fi
 
-for controller in "${CONTROLLERS[@]}"; do
-    if [[ "$UNLOAD" == true ]]; then
-        # Deactivate before unloading so the interface is released with a zero
-        # command rather than whatever was last written to it.
-        ros2 control set_controller_state "$controller" inactive || true
-        ros2 control unload_controller "$controller"
-        echo "unloaded $controller"
-    else
-        ros2 control load_controller --set-state active "$controller"
-        echo "loaded and activated $controller"
+if [[ ! -f "$CONFIG" ]]; then
+    echo "error: missing controller parameters: $CONFIG" >&2
+    exit 2
+fi
+
+if ! ros2 control list_controllers >/dev/null 2>&1; then
+    echo "error: no controller manager is answering" >&2
+    echo "       start the stack first: ros_ws/pose_bringup.sh" >&2
+    exit 2
+fi
+
+for side in "${sides[@]}"; do
+    name="${side}_forward_effort_controller"
+    if ros2 control list_controllers | grep -q "^${name} "; then
+        echo "$name is already loaded"
+        continue
     fi
+    # The controller manager reads a controller's type from its own parameters,
+    # and it was started before this file existed, so the type has to be set on
+    # the running node before the load can resolve it.
+    ros2 param set /controller_manager "${name}.type" "$TYPE" >/dev/null
+    ros2 control load_controller --set-state active "$name" "$CONFIG"
 done
 
-ros2 control list_controllers | grep -E "forward_effort|joint_trajectory" || true
+echo
+echo "effort interfaces now claimed:"
+ros2 control list_controllers | grep effort || echo "  none - check the log above"

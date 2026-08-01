@@ -1,0 +1,567 @@
+diff --git a/dg5f_gz/launch/dg5f_both_gz.launch.py b/dg5f_gz/launch/dg5f_both_gz.launch.py
+index 56280579405903421060c36480fc3a2fc5d36a45..321b59c822c0f15b8cf84ea80db26e68cb1cbdd5 100644
+--- a/dg5f_gz/launch/dg5f_both_gz.launch.py
++++ b/dg5f_gz/launch/dg5f_both_gz.launch.py
+@@ -32,2 +32,2 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Regi
+-from launch.conditions import IfCondition
+-from launch.event_handlers import OnProcessExit
++from launch.conditions import IfCondition, UnlessCondition
++from launch.event_handlers import OnProcessExit, OnProcessStart
+@@ -35 +35,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
+-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration
++from launch.substitutions import (
++    Command,
++    FindExecutable,
++    LaunchConfiguration,
++    PathJoinSubstitution,
++    PythonExpression,
++)
+@@ -49 +55,8 @@ def generate_launch_description():
+-            description="Start RViz2 automatically with this launch file.",
++            description="Start the Gazebo graphical client.",
++        )
++    )
++    declared_arguments.append(
++        DeclareLaunchArgument(
++            "use_fake_hardware",
++            default_value="false",
++            description="Use mock ros2_control hardware instead of Gazebo Sim.",
+@@ -54,0 +68 @@ def generate_launch_description():
++    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+@@ -65,2 +79,2 @@ def generate_launch_description():
+-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
++    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
++        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
+@@ -68 +82 @@ def generate_launch_description():
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
++        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
+@@ -70 +84,7 @@ def generate_launch_description():
+-    # Gazebo
++    gazebo_arguments = PythonExpression(
++        [
++            '" -r empty.sdf -v 0" if "',
++            gui,
++            '" == "true" else " -s -r empty.sdf -v 0"',
++        ]
++    )
+@@ -75,4 +95,2 @@ def generate_launch_description():
+-        # launch_arguments={"gz_args": " -r  empty.sdf"}.items(),
+-        launch_arguments={
+-            "gz_args": " -r empty.sdf -v 0"
+-        }.items(),
++        launch_arguments={"gz_args": gazebo_arguments}.items(),
++        condition=UnlessCondition(use_fake_hardware),
+@@ -92,0 +111,3 @@ def generate_launch_description():
++            " ",
++            "use_fake_hardware:=",
++            use_fake_hardware,
+@@ -95,2 +115,0 @@ def generate_launch_description():
+-    robot_description_content2 = robot_description_content1
+-
+@@ -99,2 +117,0 @@ def generate_launch_description():
+-    robot_description2 = {
+-        "robot_description": ParameterValue(robot_description_content2)}
+@@ -119,0 +137 @@ def generate_launch_description():
++        condition=IfCondition(use_fake_hardware),
+@@ -129,3 +147,8 @@ def generate_launch_description():
+-    node_robot_state_other_publisher = Node(
+-        package="robot_state_publisher",
+-        executable="robot_state_publisher",
++    # gz_ros2_control drives controllers from simulation time, so /clock must be
++    # bridged out of Gazebo. Without it ROS time stays at zero and no trajectory
++    # ever advances.
++    gz_clock_bridge = Node(
++        package="ros_gz_bridge",
++        executable="parameter_bridge",
++        name="gz_clock_bridge",
++        arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+@@ -133,2 +156 @@ def generate_launch_description():
+-        parameters=[robot_description2],
+-        remappings=[("/robot_description", "/robot_description_other")],
++        condition=UnlessCondition(use_fake_hardware),
+@@ -149,0 +172 @@ def generate_launch_description():
++        condition=UnlessCondition(use_fake_hardware),
+@@ -152,2 +175 @@ def generate_launch_description():
+-    # Delay start of robot controllers after spawn
+-    joint_state_broadcaster_spawner = Node(
++    fake_joint_state_broadcaster_spawner = Node(
+@@ -156 +178,4 @@ def generate_launch_description():
+-        arguments=["joint_state_broadcaster"],
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
+@@ -160 +185 @@ def generate_launch_description():
+-    joint_trajectory_controller_spawner = Node(
++    fake_joint_trajectory_controller_spawner = Node(
+@@ -163,4 +188,5 @@ def generate_launch_description():
+-        arguments=["joint_trajectory_controller",
+-                   '--param-file',
+-                   robot_controllers,
+-                   ],
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
+@@ -169,2 +195,9 @@ def generate_launch_description():
+-    nodes = [
+-        gz_spawn_entity,
++    gazebo_joint_state_broadcaster_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
++        output="screen",
++    )
+@@ -172,3 +205,23 @@ def generate_launch_description():
+-        node_robot_state_other_publisher,
+-        gazebo,
+-        # gazebo_gui_setting,
++    gazebo_joint_trajectory_controller_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
++    )
++
++    nodes = [
++        RegisterEventHandler(
++            event_handler=OnProcessStart(
++                target_action=control_node,
++                on_start=[fake_joint_state_broadcaster_spawner],
++            )
++        ),
++        RegisterEventHandler(
++            event_handler=OnProcessExit(
++                target_action=fake_joint_state_broadcaster_spawner,
++                on_exit=[fake_joint_trajectory_controller_spawner],
++            )
++        ),
+@@ -178 +231 @@ def generate_launch_description():
+-                on_exit=[joint_state_broadcaster_spawner],
++                on_exit=[gazebo_joint_state_broadcaster_spawner],
+@@ -183,2 +236,2 @@ def generate_launch_description():
+-                target_action=joint_state_broadcaster_spawner,
+-                on_exit=[joint_trajectory_controller_spawner],
++                target_action=gazebo_joint_state_broadcaster_spawner,
++                on_exit=[gazebo_joint_trajectory_controller_spawner],
+@@ -188,3 +241,4 @@ def generate_launch_description():
+-        # control_node,
+-
+-
++        control_node,
++        gazebo,
++        gz_clock_bridge,
++        gz_spawn_entity,
+@@ -193 +247 @@ def generate_launch_description():
+-    return LaunchDescription(nodes)
++    return LaunchDescription(declared_arguments + nodes)
+diff --git a/dg5f_gz/launch/dg5f_left_gz.launch.py b/dg5f_gz/launch/dg5f_left_gz.launch.py
+index c9b834618161bf533ad72b54bd0064ee99eb0ecf..db1b9d1843f5f24d283e98ecfe14d4a9c5d42710 100644
+--- a/dg5f_gz/launch/dg5f_left_gz.launch.py
++++ b/dg5f_gz/launch/dg5f_left_gz.launch.py
+@@ -32,2 +32,2 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Regi
+-from launch.conditions import IfCondition
+-from launch.event_handlers import OnProcessExit
++from launch.conditions import IfCondition, UnlessCondition
++from launch.event_handlers import OnProcessExit, OnProcessStart
+@@ -35 +35,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
+-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration
++from launch.substitutions import (
++    Command,
++    FindExecutable,
++    LaunchConfiguration,
++    PathJoinSubstitution,
++    PythonExpression,
++)
+@@ -48 +54,8 @@ def generate_launch_description():
+-            description="Start RViz2 automatically with this launch file.",
++            description="Start the Gazebo graphical client.",
++        )
++    )
++    declared_arguments.append(
++        DeclareLaunchArgument(
++            "use_fake_hardware",
++            default_value="false",
++            description="Use mock ros2_control hardware instead of Gazebo Sim.",
+@@ -53,0 +67 @@ def generate_launch_description():
++    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+@@ -61,2 +75,2 @@ def generate_launch_description():
+-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
++    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
++        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
+@@ -64 +78 @@ def generate_launch_description():
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
++        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
+@@ -66 +80,7 @@ def generate_launch_description():
+-    # Gazebo
++    gazebo_arguments = PythonExpression(
++        [
++            '" -r empty.sdf -v 0" if "',
++            gui,
++            '" == "true" else " -s -r empty.sdf -v 0"',
++        ]
++    )
+@@ -71,4 +91,2 @@ def generate_launch_description():
+-        # launch_arguments={"gz_args": " -r  empty.sdf"}.items(),
+-        launch_arguments={
+-            "gz_args": " -r empty.sdf -v 0"
+-        }.items(),
++        launch_arguments={"gz_args": gazebo_arguments}.items(),
++        condition=UnlessCondition(use_fake_hardware),
+@@ -85,5 +102,0 @@ def generate_launch_description():
+-        ]
+-    )
+-    robot_description_content2 = Command(
+-        [
+-            PathJoinSubstitution([FindExecutable(name="xacro")]),
+@@ -91,3 +104,2 @@ def generate_launch_description():
+-            PathJoinSubstitution(
+-                [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
+-            ),
++            "use_fake_hardware:=",
++            use_fake_hardware,
+@@ -96 +107,0 @@ def generate_launch_description():
+-
+@@ -98 +108,0 @@ def generate_launch_description():
+-    robot_description2 = {"robot_description": robot_description_content2}
+@@ -117,0 +128 @@ def generate_launch_description():
++        condition=IfCondition(use_fake_hardware),
+@@ -127,3 +138,8 @@ def generate_launch_description():
+-    node_robot_state_other_publisher = Node(
+-        package="robot_state_publisher",
+-        executable="robot_state_publisher",
++    # gz_ros2_control drives controllers from simulation time, so /clock must be
++    # bridged out of Gazebo. Without it ROS time stays at zero and no trajectory
++    # ever advances.
++    gz_clock_bridge = Node(
++        package="ros_gz_bridge",
++        executable="parameter_bridge",
++        name="gz_clock_bridge",
++        arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+@@ -131,2 +147 @@ def generate_launch_description():
+-        parameters=[robot_description2],
+-        remappings=[("/robot_description", "/robot_description_other")],
++        condition=UnlessCondition(use_fake_hardware),
+@@ -147,0 +163 @@ def generate_launch_description():
++        condition=UnlessCondition(use_fake_hardware),
+@@ -150,2 +166 @@ def generate_launch_description():
+-    # Delay start of robot controllers after spawn
+-    joint_state_broadcaster_spawner = Node(
++    fake_joint_state_broadcaster_spawner = Node(
+@@ -154 +169,4 @@ def generate_launch_description():
+-        arguments=["joint_state_broadcaster"],
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
+@@ -158 +176 @@ def generate_launch_description():
+-    joint_trajectory_controller_spawner = Node(
++    fake_joint_trajectory_controller_spawner = Node(
+@@ -161,4 +179,25 @@ def generate_launch_description():
+-        arguments=["joint_trajectory_controller",
+-                   '--param-file',
+-                   robot_controllers,
+-                   ],
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
++    )
++
++    gazebo_joint_state_broadcaster_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
++        output="screen",
++    )
++
++    gazebo_joint_trajectory_controller_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
+@@ -178 +217,12 @@ def generate_launch_description():
+-        gazebo,
++        RegisterEventHandler(
++            event_handler=OnProcessStart(
++                target_action=control_node,
++                on_start=[fake_joint_state_broadcaster_spawner],
++            )
++        ),
++        RegisterEventHandler(
++            event_handler=OnProcessExit(
++                target_action=fake_joint_state_broadcaster_spawner,
++                on_exit=[fake_joint_trajectory_controller_spawner],
++            )
++        ),
+@@ -182 +232 @@ def generate_launch_description():
+-                on_exit=[joint_state_broadcaster_spawner],
++                on_exit=[gazebo_joint_state_broadcaster_spawner],
+@@ -187,2 +237,2 @@ def generate_launch_description():
+-                target_action=joint_state_broadcaster_spawner,
+-                on_exit=[joint_trajectory_controller_spawner],
++                target_action=gazebo_joint_state_broadcaster_spawner,
++                on_exit=[gazebo_joint_trajectory_controller_spawner],
+@@ -191,0 +242,3 @@ def generate_launch_description():
++        control_node,
++        gazebo,
++        gz_clock_bridge,
+@@ -193,3 +245,0 @@ def generate_launch_description():
+-        # control_node,
+-        node_robot_state_other_publisher
+-
+@@ -198 +248 @@ def generate_launch_description():
+-    return LaunchDescription(nodes)
++    return LaunchDescription(declared_arguments + nodes)
+diff --git a/dg5f_gz/launch/dg5f_right_gz.launch.py b/dg5f_gz/launch/dg5f_right_gz.launch.py
+index b20f72d453fc2d780ac2b0332cb252d5e73fbe0d..1e7f037e9be983901d4006d91f14bbd48be75f2c 100644
+--- a/dg5f_gz/launch/dg5f_right_gz.launch.py
++++ b/dg5f_gz/launch/dg5f_right_gz.launch.py
+@@ -32,2 +32,2 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Regi
+-from launch.conditions import IfCondition
+-from launch.event_handlers import OnProcessExit
++from launch.conditions import IfCondition, UnlessCondition
++from launch.event_handlers import OnProcessExit, OnProcessStart
+@@ -35 +35,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
+-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration
++from launch.substitutions import (
++    Command,
++    FindExecutable,
++    LaunchConfiguration,
++    PathJoinSubstitution,
++    PythonExpression,
++)
+@@ -48 +54,8 @@ def generate_launch_description():
+-            description="Start RViz2 automatically with this launch file.",
++            description="Start the Gazebo graphical client.",
++        )
++    )
++    declared_arguments.append(
++        DeclareLaunchArgument(
++            "use_fake_hardware",
++            default_value="false",
++            description="Use mock ros2_control hardware instead of Gazebo Sim.",
+@@ -53,0 +67 @@ def generate_launch_description():
++    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+@@ -61,2 +75,2 @@ def generate_launch_description():
+-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
++    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
++        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
+@@ -64 +78 @@ def generate_launch_description():
+-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
++        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
+@@ -66 +80,7 @@ def generate_launch_description():
+-    # Gazebo
++    gazebo_arguments = PythonExpression(
++        [
++            '" -r empty.sdf -v 0" if "',
++            gui,
++            '" == "true" else " -s -r empty.sdf -v 0"',
++        ]
++    )
+@@ -71,4 +91,2 @@ def generate_launch_description():
+-        # launch_arguments={"gz_args": " -r  empty.sdf"}.items(),
+-        launch_arguments={
+-            "gz_args": " -r empty.sdf -v 0"
+-        }.items(),
++        launch_arguments={"gz_args": gazebo_arguments}.items(),
++        condition=UnlessCondition(use_fake_hardware),
+@@ -85,5 +102,0 @@ def generate_launch_description():
+-        ]
+-    )
+-    robot_description_content2 = Command(
+-        [
+-            PathJoinSubstitution([FindExecutable(name="xacro")]),
+@@ -91,3 +104,2 @@ def generate_launch_description():
+-            PathJoinSubstitution(
+-                [FindPackageShare("dg5f_gz"), "urdf", "dg5f_right_gz.xacro"]
+-            ),
++            "use_fake_hardware:=",
++            use_fake_hardware,
+@@ -96 +107,0 @@ def generate_launch_description():
+-
+@@ -98 +108,0 @@ def generate_launch_description():
+-    robot_description2 = {"robot_description": robot_description_content2}
+@@ -117,0 +128 @@ def generate_launch_description():
++        condition=IfCondition(use_fake_hardware),
+@@ -128,3 +139,8 @@ def generate_launch_description():
+-    node_robot_state_other_publisher = Node(
+-        package="robot_state_publisher",
+-        executable="robot_state_publisher",
++    # gz_ros2_control drives controllers from simulation time, so /clock must be
++    # bridged out of Gazebo. Without it ROS time stays at zero and no trajectory
++    # ever advances.
++    gz_clock_bridge = Node(
++        package="ros_gz_bridge",
++        executable="parameter_bridge",
++        name="gz_clock_bridge",
++        arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+@@ -132,2 +148 @@ def generate_launch_description():
+-        parameters=[robot_description2],
+-        remappings=[("/robot_description", "/robot_description_other")],
++        condition=UnlessCondition(use_fake_hardware),
+@@ -148,0 +164 @@ def generate_launch_description():
++        condition=UnlessCondition(use_fake_hardware),
+@@ -151,2 +167 @@ def generate_launch_description():
+-    # Delay start of robot controllers after spawn
+-    joint_state_broadcaster_spawner = Node(
++    fake_joint_state_broadcaster_spawner = Node(
+@@ -155 +170,4 @@ def generate_launch_description():
+-        arguments=["joint_state_broadcaster"],
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
+@@ -159 +177 @@ def generate_launch_description():
+-    joint_trajectory_controller_spawner = Node(
++    fake_joint_trajectory_controller_spawner = Node(
+@@ -162,4 +180,5 @@ def generate_launch_description():
+-        arguments=["joint_trajectory_controller",
+-                   '--param-file',
+-                   robot_controllers,
+-                   ],
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
+@@ -168,3 +187,9 @@ def generate_launch_description():
+-    nodes = [
+-        node_robot_state_publisher,
+-        node_robot_state_other_publisher,
++    gazebo_joint_state_broadcaster_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_state_broadcaster",
++            "--controller-manager-timeout", "30",
++        ],
++        output="screen",
++    )
+@@ -172 +197,23 @@ def generate_launch_description():
+-        gazebo,
++    gazebo_joint_trajectory_controller_spawner = Node(
++        package="controller_manager",
++        executable="spawner",
++        arguments=[
++            "joint_trajectory_controller",
++            "--param-file", robot_controllers,
++            "--controller-manager-timeout", "30",
++        ],
++    )
++
++    nodes = [
++        RegisterEventHandler(
++            event_handler=OnProcessStart(
++                target_action=control_node,
++                on_start=[fake_joint_state_broadcaster_spawner],
++            )
++        ),
++        RegisterEventHandler(
++            event_handler=OnProcessExit(
++                target_action=fake_joint_state_broadcaster_spawner,
++                on_exit=[fake_joint_trajectory_controller_spawner],
++            )
++        ),
+@@ -176 +223 @@ def generate_launch_description():
+-                on_exit=[joint_state_broadcaster_spawner],
++                on_exit=[gazebo_joint_state_broadcaster_spawner],
+@@ -181,2 +228,2 @@ def generate_launch_description():
+-                target_action=joint_state_broadcaster_spawner,
+-                on_exit=[joint_trajectory_controller_spawner],
++                target_action=gazebo_joint_state_broadcaster_spawner,
++                on_exit=[gazebo_joint_trajectory_controller_spawner],
+@@ -184,0 +232,4 @@ def generate_launch_description():
++        node_robot_state_publisher,
++        control_node,
++        gazebo,
++        gz_clock_bridge,
+@@ -186 +236,0 @@ def generate_launch_description():
+-        # control_node,
+@@ -190 +240 @@ def generate_launch_description():
+-    return LaunchDescription(nodes)
++    return LaunchDescription(declared_arguments + nodes)
+diff --git a/dg5f_gz/package.xml b/dg5f_gz/package.xml
+index 1ed045f4e241df7d825fadb7d342c170dc52801c..29b0364f4e41ff9bebbd6a54f0e901f6129bd1c6 100644
+--- a/dg5f_gz/package.xml
++++ b/dg5f_gz/package.xml
+@@ -14 +14,4 @@
+-  <depend>ign_ros2_control</depend>
++  <depend>trajectory_msgs</depend>
++  <depend>dg_description</depend>
++  <depend>gz_ros2_control</depend>
++  <depend>hardware_interface</depend>
+diff --git a/dg5f_gz/urdf/dg5f_both_gz.xacro b/dg5f_gz/urdf/dg5f_both_gz.xacro
+index 9c23416fc86d4ef20dc6ce36157eec6823546017..045a6533a1f1b3c7e67f0fb9d7c3233cb4d89f69 100644
+--- a/dg5f_gz/urdf/dg5f_both_gz.xacro
++++ b/dg5f_gz/urdf/dg5f_both_gz.xacro
+@@ -6,0 +7 @@
++    <xacro:arg name="use_fake_hardware" default="false" />
+@@ -23 +24,6 @@
+-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
++            <xacro:if value="$(arg use_fake_hardware)">
++                <plugin>mock_components/GenericSystem</plugin>
++            </xacro:if>
++            <xacro:unless value="$(arg use_fake_hardware)">
++                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
++            </xacro:unless>
+@@ -521,2 +527,2 @@
+-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
+-            filename="libign_ros2_control-system.so">
++        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
++            filename="libgz_ros2_control-system.so">
+diff --git a/dg5f_gz/urdf/dg5f_left_gz.xacro b/dg5f_gz/urdf/dg5f_left_gz.xacro
+index 88b600d3b4680591b03cb1c6e689a3feb461aa35..c543ed96a629e5496b027e463e45f384656fb948 100644
+--- a/dg5f_gz/urdf/dg5f_left_gz.xacro
++++ b/dg5f_gz/urdf/dg5f_left_gz.xacro
+@@ -5,0 +6 @@
++    <xacro:arg name="use_fake_hardware" default="false" />
+@@ -18 +19,6 @@
+-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
++            <xacro:if value="$(arg use_fake_hardware)">
++                <plugin>mock_components/GenericSystem</plugin>
++            </xacro:if>
++            <xacro:unless value="$(arg use_fake_hardware)">
++                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
++            </xacro:unless>
+@@ -300,2 +306,2 @@
+-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
+-            filename="libign_ros2_control-system.so">
++        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
++            filename="libgz_ros2_control-system.so">
+diff --git a/dg5f_gz/urdf/dg5f_right_gz.xacro b/dg5f_gz/urdf/dg5f_right_gz.xacro
+index ea2042fc0fe12079a881da43314676fa2db445f8..3afd513cd5a527f24f231e0d71226484f2e739d4 100644
+--- a/dg5f_gz/urdf/dg5f_right_gz.xacro
++++ b/dg5f_gz/urdf/dg5f_right_gz.xacro
+@@ -5,0 +6 @@
++    <xacro:arg name="use_fake_hardware" default="false" />
+@@ -17 +18,6 @@
+-            <plugin>ign_ros2_control/IgnitionSystem</plugin>
++            <xacro:if value="$(arg use_fake_hardware)">
++                <plugin>mock_components/GenericSystem</plugin>
++            </xacro:if>
++            <xacro:unless value="$(arg use_fake_hardware)">
++                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
++            </xacro:unless>
+@@ -299,2 +305,2 @@
+-        <plugin name="ign_ros2_control::IgnitionROS2ControlPlugin"
+-            filename="libign_ros2_control-system.so">
++        <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
++            filename="libgz_ros2_control-system.so">

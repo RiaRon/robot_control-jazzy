@@ -29,10 +29,16 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler
-from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
+from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit, OnProcessStart
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration
+from launch.substitutions import (
+    Command,
+    FindExecutable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 import os
@@ -45,12 +51,20 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "gui",
             default_value="false",
-            description="Start RViz2 automatically with this launch file.",
+            description="Start the Gazebo graphical client.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "use_fake_hardware",
+            default_value="false",
+            description="Use mock ros2_control hardware instead of Gazebo Sim.",
         )
     )
 
     # Initialize Arguments
     gui = LaunchConfiguration("gui")
+    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
 
     # Get package paths
     pkg_delto_description = FindPackageShare(
@@ -58,20 +72,24 @@ def generate_launch_description():
     model_path = os.path.join(pkg_delto_description, "meshes")
 
     # Set Gazebo model path
-    if 'IGN_GAZEBO_RESOURCE_PATH' in os.environ:
-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = os.environ['IGN_GAZEBO_RESOURCE_PATH'] + ':' + model_path
+    if 'GZ_SIM_RESOURCE_PATH' in os.environ:
+        os.environ['GZ_SIM_RESOURCE_PATH'] = os.environ['GZ_SIM_RESOURCE_PATH'] + ':' + model_path
     else:
-        os.environ['IGN_GAZEBO_RESOURCE_PATH'] = model_path
+        os.environ['GZ_SIM_RESOURCE_PATH'] = model_path
 
-    # Gazebo
+    gazebo_arguments = PythonExpression(
+        [
+            '" -r empty.sdf -v 0" if "',
+            gui,
+            '" == "true" else " -s -r empty.sdf -v 0"',
+        ]
+    )
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]
         ),
-        # launch_arguments={"gz_args": " -r  empty.sdf"}.items(),
-        launch_arguments={
-            "gz_args": " -r empty.sdf -v 0"
-        }.items(),
+        launch_arguments={"gz_args": gazebo_arguments}.items(),
+        condition=UnlessCondition(use_fake_hardware),
     )
 
     # Get URDF via xacro
@@ -82,20 +100,12 @@ def generate_launch_description():
             PathJoinSubstitution(
                 [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
             ),
-        ]
-    )
-    robot_description_content2 = Command(
-        [
-            PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
-            PathJoinSubstitution(
-                [FindPackageShare("dg5f_gz"), "urdf", "dg5f_left_gz.xacro"]
-            ),
+            "use_fake_hardware:=",
+            use_fake_hardware,
         ]
     )
-
     robot_description1 = {"robot_description": robot_description_content1}
-    robot_description2 = {"robot_description": robot_description_content2}
 
     robot_controllers = PathJoinSubstitution(
         [
@@ -115,6 +125,7 @@ def generate_launch_description():
         #     ("~/robot_description", "/robot_description"),
         # ],
         output="screen",
+        condition=IfCondition(use_fake_hardware),
     )
 
     # Robot State Publisher
@@ -124,12 +135,16 @@ def generate_launch_description():
         output="screen",
         parameters=[robot_description1],
     )
-    node_robot_state_other_publisher = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
+    # gz_ros2_control drives controllers from simulation time, so /clock must be
+    # bridged out of Gazebo. Without it ROS time stays at zero and no trajectory
+    # ever advances.
+    gz_clock_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="gz_clock_bridge",
+        arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
         output="screen",
-        parameters=[robot_description2],
-        remappings=[("/robot_description", "/robot_description_other")],
+        condition=UnlessCondition(use_fake_hardware),
     )
 
     gz_spawn_entity = Node(
@@ -145,23 +160,47 @@ def generate_launch_description():
             "-y", "0.0",
             "-z", "0.0",         # z축을 0.1m 올림 (10cm)
         ],
+        condition=UnlessCondition(use_fake_hardware),
     )
 
-    # Delay start of robot controllers after spawn
-    joint_state_broadcaster_spawner = Node(
+    fake_joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout", "30",
+        ],
         output="screen",
     )
 
-    joint_trajectory_controller_spawner = Node(
+    fake_joint_trajectory_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_trajectory_controller",
-                   '--param-file',
-                   robot_controllers,
-                   ],
+        arguments=[
+            "joint_trajectory_controller",
+            "--param-file", robot_controllers,
+            "--controller-manager-timeout", "30",
+        ],
+    )
+
+    gazebo_joint_state_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout", "30",
+        ],
+        output="screen",
+    )
+
+    gazebo_joint_trajectory_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_trajectory_controller",
+            "--param-file", robot_controllers,
+            "--controller-manager-timeout", "30",
+        ],
     )
 
     rqt_joint_trajectory_controller = Node(
@@ -175,24 +214,35 @@ def generate_launch_description():
         ],
     )
     nodes = [
-        gazebo,
+        RegisterEventHandler(
+            event_handler=OnProcessStart(
+                target_action=control_node,
+                on_start=[fake_joint_state_broadcaster_spawner],
+            )
+        ),
+        RegisterEventHandler(
+            event_handler=OnProcessExit(
+                target_action=fake_joint_state_broadcaster_spawner,
+                on_exit=[fake_joint_trajectory_controller_spawner],
+            )
+        ),
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=gz_spawn_entity,
-                on_exit=[joint_state_broadcaster_spawner],
+                on_exit=[gazebo_joint_state_broadcaster_spawner],
             )
         ),
         RegisterEventHandler(
             event_handler=OnProcessExit(
-                target_action=joint_state_broadcaster_spawner,
-                on_exit=[joint_trajectory_controller_spawner],
+                target_action=gazebo_joint_state_broadcaster_spawner,
+                on_exit=[gazebo_joint_trajectory_controller_spawner],
             )
         ),
         node_robot_state_publisher,
+        control_node,
+        gazebo,
+        gz_clock_bridge,
         gz_spawn_entity,
-        # control_node,
-        node_robot_state_other_publisher
-
     ]
 
-    return LaunchDescription(nodes)
+    return LaunchDescription(declared_arguments + nodes)

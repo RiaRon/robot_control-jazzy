@@ -30,7 +30,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(OpenArmCAN REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
-  src/openarm_simple_hardware.cpp
+  src/v10_simple_hardware.cpp
 )
 
 target_include_directories(
@@ -70,7 +70,6 @@ ament_export_libraries(
 )
 ament_export_dependencies(
   hardware_interface
-  openarm_can
   pluginlib
   rclcpp
 )
