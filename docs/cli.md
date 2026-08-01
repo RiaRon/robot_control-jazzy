@@ -179,6 +179,37 @@ Read and set robot poses. Operator commands pass through the same canonical
 interface and the same safety gate as commands issued by a learned policy, so
 pose setting adds no second route to the hardware.
 
+## `robotctl pose ready` and `robotctl pose rest`
+
+Move one or both arms through the slow, table-safe startup and shutdown
+sequence. `ready` raises the elbow before pitching the wrist; `rest` reverses
+that order so the tool does not sweep through the table. Both commands default
+to every `*_arm` group, accept repeatable `--group`, and only print the planned
+phases unless `--execute` is explicit.
+
+```bash
+robotctl pose ready
+# --execute sends slow trajectories and the real arms move through both phases:
+robotctl pose ready --group openarm_right_arm --execute
+robotctl pose rest --execute
+```
+
+## `robotctl pose torque`
+
+Run the direct-torque staircase used to identify stiffness, Coulomb friction,
+and bias. `--group` is required; repeat `--joint` to restrict the experiment,
+otherwise every joint in the group is measured. `--deflection` sets the target
+angular displacement and `--steps` sets the staircase resolution. `--noise`
+must describe the encoder's measured noise because the seed torque is doubled
+until motion clears five times that value. `--hold-sec`, `--urdf`, and
+`--output` control settling, the gravity model, and the signed sweep artifact.
+Without `--execute`, the command reviews the experiment and publishes nothing.
+
+```bash
+robotctl pose torque --group openarm_right_arm --joint r_aj_2 \
+  --deflection 0.05 --steps 7 --noise 0.0002
+```
+
 ## `robotctl pose show`
 
 Report the current joint values of each group and, for a group with a planning
@@ -920,6 +951,7 @@ Fit a second-order joint model to a normalized track.
 | `--population` | `128` | Candidate population size; must be positive |
 | `--static` | — | Stiffness set from `r2s identify`; adds the gravity term and turns the ratios into physical parameters |
 | `--urdf` | *required with `--static`* | Robot description, to compute the modelled torque along the track |
+| `--accept-inertia-gap` | off | Write a fit whose measured `kp/k` inertia disagrees with the URDF-dependent `1/g` cross-check; the gap remains recorded |
 
 ```bash
 robotctl r2s fit --track track.h5 --output estimate.json
@@ -988,6 +1020,9 @@ robotctl r2s fit --track track.h5 --output estimate.json --static static.json --
 `J` in the first column is `kp/k`: the static fit's stiffness, which has no
 inertia in it, over the dynamic fit's, which is that same stiffness divided by
 one. `J from gravity` is `1/g`, from a different column of a different
+model. A disagreement is refused by default. Use `--accept-inertia-gap` only
+when the asset masses are known to be approximate and the recorded gap has
+been reviewed; this does not erase or rewrite the cross-check.
 experiment. **They agreeing is evidence, not arithmetic** — it is the one check
 that catches a static estimate measured on another robot, or a URDF that is not
 the arm the track came from. A gap above 25% is refused and nothing is written.
@@ -1254,9 +1289,21 @@ Export a validated bundle. Refuses anything not already validated.
 | `--bundle` | *required* | Calibration bundle to export |
 | `--validation` | *required* | Verdict JSON from `validate` |
 | `--output` | *required* | Destination bundle |
+| `--hdgp` | — | Also write the schema-v1 actuator calibration consumed by the HDGP training environment |
+| `--hdgp-max-spread` | `0.25` | Maximum `(max-min)/mean` joint disagreement allowed when collapsing a group to one HDGP scalar |
 
 ```bash
 robotctl r2s export --bundle bundle.json --validation verdict.json --output release.json
+```
+
+To hand the same validated measurement to HDGP, request the additional output
+explicitly. A group whose joints disagree beyond `--hdgp-max-spread` is refused
+rather than averaged into a scalar that describes none of them.
+
+```bash
+robotctl r2s export --bundle bundle.json --validation verdict.json \
+  --output release.json --hdgp real2sim_actuator.json \
+  --hdgp-max-spread 0.25
 ```
 
 The bundle is copied byte for byte, so anything `load_bundle` accepted travels
