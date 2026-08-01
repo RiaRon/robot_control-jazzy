@@ -58,8 +58,10 @@ from .hdgp_export import (
     write_hdgp_calibration,
 )
 from .interface import CanonicalInterface
+from .ik_follow import LatestIkWorker
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .safety import CommandGate, SafetyError
+from .servo import CartesianPI
 from .srdf import named_state, repository_root
 from .track import DEFAULT_MAX_GAP_PERIODS, TrackError, normalize_track
 
@@ -117,6 +119,12 @@ MAX_GRAVITY_SCALE = 1.5
 # Following ends on its own rather than running until interrupted: a servo loop
 # left running is a robot that moves when someone touches the marker hours later.
 DEFAULT_FOLLOW_SEC = 60.0
+DEFAULT_FOLLOW_KP = 2.0
+DEFAULT_FOLLOW_KI = 1.0
+DEFAULT_FOLLOW_TOLERANCE_M = 0.002
+DEFAULT_MAX_TCP_SPEED_M_S = 0.05
+ORIENTATION_HOLD_KP = 2.0
+MAX_ORIENTATION_SPEED_RAD_S = 0.5
 # How long a streamed command may be ahead of the arm, expressed as travel time
 # at the joint's velocity limit. It has to exceed the standing droop or the arm
 # cannot advance at all, and stay small enough that a blocked joint does not wind
@@ -519,6 +527,30 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help="how long to follow before stopping on its own",
     )
     follow.add_argument("--urdf", type=Path, help=_URDF_OVERRIDE_HELP)
+    follow.add_argument(
+        "--kp",
+        type=float,
+        default=DEFAULT_FOLLOW_KP,
+        help="Cartesian position proportional gain",
+    )
+    follow.add_argument(
+        "--ki",
+        type=float,
+        default=DEFAULT_FOLLOW_KI,
+        help="Cartesian position integral gain",
+    )
+    follow.add_argument(
+        "--tolerance",
+        type=float,
+        default=DEFAULT_FOLLOW_TOLERANCE_M,
+        help="TCP position deadband in metres",
+    )
+    follow.add_argument(
+        "--max-tcp-speed",
+        type=float,
+        default=DEFAULT_MAX_TCP_SPEED_M_S,
+        help="maximum commanded TCP speed in metres per second",
+    )
     follow.add_argument("--execute", action="store_true")
 
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
@@ -1383,6 +1415,15 @@ def _pose_follow(args, profile) -> int:
     _check_scales(_scale_vector(args.gravity, group), group)
     if args.seconds <= 0:
         raise ValueError("--seconds must be positive")
+    # These legacy flags remain accepted while the MoveIt-target follower uses
+    # kp as its measured-joint outer-loop gain. Constructing the old controller
+    # here retains the established finite/range validation for all four values.
+    CartesianPI(
+        kp=args.kp,
+        ki=args.ki,
+        tolerance=args.tolerance,
+        max_speed=args.max_tcp_speed,
+    )
 
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
@@ -1403,45 +1444,133 @@ def _pose_follow(args, profile) -> int:
         if not args.execute:
             print("DRY RUN: nothing is published; pass --execute to follow")
             return 0
-        _follow_loop(adapter, chain, gate, group, state, period, args)
+        # MoveIt service calls block, so a second node belongs exclusively to
+        # the IK worker while this adapter keeps servicing feedback and commands.
+        with RosAdapter(
+            profile,
+            args.group,
+            execute=False,
+            node_name="robot_control_pose_follow_ik",
+        ) as ik_adapter:
+            worker = LatestIkWorker(ik_adapter.solve_ik)
+            try:
+                _follow_loop(
+                    adapter, chain, gate, group, state, period, args, worker
+                )
+            finally:
+                worker.close()
     return 0
 
 
-def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
-    from .kinematics import twist_between
+def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) -> None:
+    from .ros_adapter import Pose
 
     scales = None if args.gravity is None else _scale_vector(args.gravity, group)
     if scales is not None and not np.any(scales):
         scales = None
 
+    command = np.asarray(state, dtype=float).copy()
+    startup_pose = chain.pose(state)
+    held_orientation = _quaternion_from_rotation(startup_pose[:3, :3])
+    marker_origin = None
+    tcp_origin = None
+    last_submitted_position = None
+    requested_positions: list[np.ndarray] = []
     samples = 0
+    cycles = 0
     notes: dict[str, int] = {}
-    # How far the tool centre point actually trails the marker, which is the
-    # only measure of whether following works. The clamp counts say the command
-    # moved; they say nothing about the arm.
     lag_total = 0.0
     lag_worst = 0.0
-    deadline = time.monotonic() + args.seconds
+    lag_last = 0.0
+    within_tolerance = 0
+    speed_limited = 0
+    joint_error_last = 0.0
+    state_wait_total = 0.0
+    started = time.monotonic()
+    last_cycle = started
+    deadline = started + args.seconds
     try:
         while time.monotonic() < deadline:
             cycle = time.monotonic()
+            elapsed = max(period, cycle - last_cycle)
+            last_cycle = cycle
             adapter.pump(timeout_sec=0.0)
             target = adapter.latest_marker_target()
+            wait_started = time.monotonic()
             state = adapter.read_state(timeout_sec=1.0)
+            state_wait_total += time.monotonic() - wait_started
+            cycles += 1
             if scales is not None:
                 adapter.send_effort(
                     gate.authorize_effort(chain.gravity_torque(state) * scales)
                 )
             if target is not None:
-                goal = np.eye(4)
-                goal[:3, 3] = target.position
-                goal[:3, :3] = _rotation_from_quaternion(target.orientation)
                 here = chain.pose(state)
-                lag = float(np.linalg.norm(goal[:3, 3] - here[:3, 3]))
+                marker_position = np.asarray(target.position, dtype=float)
+                if marker_origin is None:
+                    marker_origin = marker_position.copy()
+                    tcp_origin = here[:3, 3].copy()
+                desired_position = tcp_origin + (
+                    marker_position - marker_origin
+                )
+                if (
+                    last_submitted_position is None
+                    or np.linalg.norm(
+                        desired_position - last_submitted_position
+                    )
+                    >= args.tolerance
+                ):
+                    ik_worker.submit(
+                        Pose(
+                            tuple(desired_position),
+                            held_orientation,
+                            "world",
+                        ),
+                        state,
+                    )
+                    last_submitted_position = desired_position.copy()
+                    requested_positions.append(desired_position.copy())
+
+            status = ik_worker.snapshot()
+            if status.target is not None and status.target_sequence is not None:
+                target_joints = status.target
+                accepted_position = requested_positions[
+                    status.target_sequence - 1
+                ]
+                here = chain.pose(state)
+                lag = float(
+                    np.linalg.norm(accepted_position - here[:3, 3])
+                )
                 lag_total += lag
                 lag_worst = max(lag_worst, lag)
-                step = chain.delta_q(state, twist_between(here, goal))
-                command, limited = gate.follow(state + step, state, period)
+                lag_last = lag
+                within_tolerance += int(lag <= args.tolerance)
+                joint_error_last = float(
+                    np.max(np.abs(target_joints - state))
+                )
+
+                # The motor's impedance loop holds by sitting behind its
+                # command. Re-sending the IK target preserves that droop;
+                # advancing the command while measured joints still trail the
+                # target is the outer feedback loop that removes it.
+                candidate = command + (
+                    args.kp * (target_joints - state) * elapsed
+                )
+                command_tcp = chain.pose(command)[:3, 3]
+                target_tcp = chain.pose(candidate)[:3, 3]
+                tcp_distance = float(
+                    np.linalg.norm(target_tcp - command_tcp)
+                )
+                # The published point is one nominal controller period ahead.
+                # Keeping its spatial increment within that period makes the
+                # stream safe even when joint feedback arrives late.
+                permitted = args.max_tcp_speed * period
+                fraction = 1.0
+                if tcp_distance > permitted and tcp_distance > 0.0:
+                    fraction = permitted / tcp_distance
+                    speed_limited += 1
+                candidate = command + fraction * (candidate - command)
+                command, limited = gate.follow(candidate, state, elapsed)
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
                 adapter.stream_positions(command)
@@ -1450,19 +1579,82 @@ def _follow_loop(adapter, chain, gate, group, state, period, args) -> None:
     except KeyboardInterrupt:
         print("\ninterrupted")
     finally:
-        # Stop commanding, and stop pushing. The trajectory controller holds its
-        # last position, which is where the arm already is, so it stays put.
+        # Stop streaming and release feedforward. Position control holds the
+        # last approved command, which may still lead the measured joints by
+        # max_lead, so the arm can settle slightly after gravity effort is zeroed.
         if scales is not None:
             adapter.send_effort(np.zeros(len(group.joints)))
+        elapsed_total = max(time.monotonic() - started, 1e-12)
+        status = ik_worker.snapshot()
         print(f"followed {samples} samples; the arm holds its last commanded pose")
+        print(
+            f"  actual control rate: {cycles / elapsed_total:.1f} Hz; "
+            f"joint-state wait {state_wait_total / max(cycles, 1) * 1000:.1f} ms/sample"
+        )
+        print(
+            f"  IK requests {status.submitted}: {status.succeeded} succeeded, "
+            f"{status.failed} failed, {status.superseded} superseded"
+        )
         if samples:
             print(
                 f"  tool centre point trailed the marker by "
                 f"{lag_total / samples * 1000:.1f} mm on average, "
                 f"{lag_worst * 1000:.1f} mm at worst"
             )
+            print(f"  last TCP position error: {lag_last * 1000:.1f} mm")
+            print(
+                f"  within {args.tolerance * 1000:.1f} mm on "
+                f"{within_tolerance} of {samples} samples "
+                f"({within_tolerance / samples * 100:.1f}%)"
+            )
+            print(
+                f"  Cartesian speed limit on {speed_limited} of {samples} samples"
+            )
+            print(f"  last maximum joint error: {joint_error_last:.4f} rad")
         for note, count in sorted(notes.items()):
             print(f"  {note} clamped on {count} of {samples} samples")
+
+
+def _quaternion_from_rotation(rotation) -> tuple[float, float, float, float]:
+    """Return an x, y, z, w quaternion for a proper 3x3 rotation matrix."""
+    matrix = np.asarray(rotation, dtype=float)
+    trace = float(np.trace(matrix))
+    if trace > 0.0:
+        scale = 2.0 * np.sqrt(trace + 1.0)
+        quaternion = np.array(
+            [
+                (matrix[2, 1] - matrix[1, 2]) / scale,
+                (matrix[0, 2] - matrix[2, 0]) / scale,
+                (matrix[1, 0] - matrix[0, 1]) / scale,
+                0.25 * scale,
+            ]
+        )
+    else:
+        index = int(np.argmax(np.diag(matrix)))
+        following = (index + 1) % 3
+        remaining = (index + 2) % 3
+        scale = 2.0 * np.sqrt(
+            max(
+                0.0,
+                1.0
+                + matrix[index, index]
+                - matrix[following, following]
+                - matrix[remaining, remaining],
+            )
+        )
+        quaternion = np.zeros(4)
+        quaternion[index] = 0.25 * scale
+        quaternion[3] = (
+            matrix[remaining, following] - matrix[following, remaining]
+        ) / scale
+        quaternion[following] = (
+            matrix[following, index] + matrix[index, following]
+        ) / scale
+        quaternion[remaining] = (
+            matrix[remaining, index] + matrix[index, remaining]
+        ) / scale
+    quaternion /= np.linalg.norm(quaternion)
+    return tuple(float(value) for value in quaternion)
 
 
 def _rotation_from_quaternion(orientation) -> np.ndarray:

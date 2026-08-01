@@ -498,6 +498,7 @@ class _RclpyBackend:
         try:
             import rclpy
             from rclpy.action import ActionClient
+            from rclpy.executors import SingleThreadedExecutor
             from rclpy.qos import qos_profile_sensor_data
             from builtin_interfaces.msg import Duration
             from control_msgs.action import FollowJointTrajectory
@@ -529,6 +530,7 @@ class _RclpyBackend:
 
         self._rclpy = rclpy
         self._ActionClient = ActionClient
+        self._SingleThreadedExecutor = SingleThreadedExecutor
         self._sensor_qos = qos_profile_sensor_data
         self._Duration = Duration
         self._FollowJointTrajectory = FollowJointTrajectory
@@ -558,6 +560,12 @@ class _RclpyBackend:
         if self._owns_context:
             rclpy.init()
         self._node = rclpy.create_node(node_name)
+        # rclpy.spin_once(node) uses a process-global executor. pose follow has
+        # a feedback node and a blocking-IK node on different threads, so that
+        # global executor raises "Executor is already spinning". Each backend
+        # owns its executor to make the nodes genuinely independent.
+        self._executor = SingleThreadedExecutor(context=self._node.context)
+        self._executor.add_node(self._node)
         self._joint_subscription = None
         self._latest: dict[str, float] | None = None
         # None until start_recording: the same callback serves read_state, and
@@ -573,6 +581,8 @@ class _RclpyBackend:
         self._marker_target: Pose | None = None
 
     def close(self) -> None:
+        self._executor.remove_node(self._node)
+        self._executor.shutdown()
         self._node.destroy_node()
         if self._owns_context:
             self._rclpy.shutdown()
@@ -587,7 +597,7 @@ class _RclpyBackend:
         self._latest = None
         deadline = time.monotonic() + timeout_sec
         while self._latest is None and time.monotonic() < deadline:
-            self._rclpy.spin_once(self._node, timeout_sec=0.05)
+            self._executor.spin_once(timeout_sec=0.05)
         if self._latest is None:
             raise AdapterUnavailable(
                 f"no /joint_states within {timeout_sec} s; is the robot bringup "
@@ -710,7 +720,7 @@ class _RclpyBackend:
         try:
             deadline = time.monotonic() + timeout_sec
             while not latest and time.monotonic() < deadline:
-                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+                self._executor.spin_once(timeout_sec=0.05)
         finally:
             self._node.destroy_subscription(subscription)
         if not latest:
@@ -734,7 +744,7 @@ class _RclpyBackend:
         try:
             deadline = time.monotonic() + timeout_sec
             while not latest and time.monotonic() < deadline:
-                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+                self._executor.spin_once(timeout_sec=0.05)
         finally:
             self._node.destroy_subscription(subscription)
         if not latest:
@@ -760,7 +770,7 @@ class _RclpyBackend:
                 publisher.get_subscription_count() == 0
                 and time.monotonic() < deadline
             ):
-                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+                self._executor.spin_once(timeout_sec=0.05)
             if publisher.get_subscription_count() == 0:
                 raise AdapterUnavailable(
                     f"nothing is subscribed to /{controller}/commands; load the "
@@ -795,7 +805,7 @@ class _RclpyBackend:
         return self._marker_target
 
     def pump(self, timeout_sec: float) -> None:
-        self._rclpy.spin_once(self._node, timeout_sec=timeout_sec)
+        self._executor.spin_once(timeout_sec=timeout_sec)
 
     def publish_trajectory_point(
         self,
@@ -814,7 +824,7 @@ class _RclpyBackend:
                 publisher.get_subscription_count() == 0
                 and time.monotonic() < deadline
             ):
-                self._rclpy.spin_once(self._node, timeout_sec=0.05)
+                self._executor.spin_once(timeout_sec=0.05)
             if publisher.get_subscription_count() == 0:
                 raise AdapterUnavailable(
                     f"nothing is subscribed to {topic}; is {controller} active?"
@@ -935,8 +945,8 @@ class _RclpyBackend:
     def _resolve(self, future: Any, timeout_sec: float, name: str) -> Any:
         # A synchronous call() from a node nobody spins deadlocks, because the
         # response can only arrive while the executor is running.
-        self._rclpy.spin_until_future_complete(
-            self._node, future, timeout_sec=timeout_sec
+        self._executor.spin_until_future_complete(
+            future, timeout_sec=timeout_sec
         )
         if not future.done():
             raise AdapterUnavailable(f"{name} did not answer within {timeout_sec} s")

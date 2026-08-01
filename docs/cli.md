@@ -523,6 +523,10 @@ time.
 | `--group` | *required* | Group to move; must have a planning group |
 | `--gravity` | off | Gravity feedforward scale: one value, or one per joint |
 | `--seconds` | `60.0` | How long to follow before stopping on its own |
+| `--kp` | `2.0` | Measured-joint outer feedback gain |
+| `--ki` | `1.0` | Accepted for compatibility; command accumulation already supplies integral action |
+| `--tolerance` | `0.002` | TCP position deadband in metres |
+| `--max-tcp-speed` | `0.05` | Maximum TCP speed in metres per second |
 | `--execute` | off | Publish; without it the command only reports what it would do |
 
 ```bash
@@ -534,7 +538,13 @@ robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
 following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
 drag the marker in RViz; the arm tracks it until the time runs out
 followed 4193 samples; the arm holds its last commanded pose
+  actual control rate: 76.8 Hz; joint-state wait 12.9 ms/sample
+  IK requests 91: 72 succeeded, 3 failed, 16 superseded
   tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
+  last TCP position error: 1.7 mm
+  within 2.0 mm on 1132 of 4193 samples (27.0%)
+  Cartesian speed limit on 271 of 4193 samples
+  last maximum joint error: 0.0041 rad
   velocity limit clamped on 271 of 4193 samples
 ```
 
@@ -544,12 +554,21 @@ followed 4193 samples; the arm holds its last commanded pose
 marker's `feedback` stream — the topic that publishes throughout a drag — and
 commands at the controller rate.
 
-Inverse kinematics is differential here, from the Jacobian, not `/compute_ik`.
-A service round trip per sample cannot keep up with 100 Hz, and a Jacobian step
-is local: the arm sweeps to a nearby solution instead of jumping between IK
-branches the way successive fresh solves can. The inverse is damped least
-squares, so a drag through a singularity produces a bounded step rather than an
-unbounded joint velocity.
+At startup, `pose follow` clutches the marker's first reported position to the
+measured TCP. A stale RViz goal therefore causes no initial jump; subsequent
+marker displacement is followed relative to that TCP position. In contrast,
+`pose ee --from-marker` still treats the marker as an absolute pose in `world`.
+
+When the marker target changes, a background worker calls MoveIt
+`/compute_ik`, seeded from the newest measured joints. It keeps only the newest
+pending request and atomically latches the newest successful solution. The
+control loop therefore keeps streaming the previous valid target while MoveIt
+is busy, rather than blocking on a service round trip.
+
+The fast loop compares that latched target with `/joint_states`. While measured
+joints trail it, the outer feedback advances the position command through the
+motor's impedance droop. The marker's orientation is ignored; the TCP
+orientation captured at startup is included in every IK request.
 
 Every sample goes through `CommandGate.follow`, which **clamps rather than
 refuses**. Dragging faster than the arm can move is normal operation, so the
@@ -557,15 +576,11 @@ step is limited to the profile's velocity bound and the count of clamped samples
 is reported at the end. Position limits clamp the same way: the arm stops at the
 limit and keeps tracking rather than ending the session mid-drag.
 
-Each step is rate-limited from the **previous command**, not from the measured
-position, and that distinction decides whether the arm moves at all. These joints
-hold position by sitting behind their command by the droop that produces their
-holding torque — 0.02 to 0.05 rad measured, against a per-sample budget of
-0.02 rad at 100 Hz. Budgeting from the measured position caps the command at one
-period's travel ahead of where the arm *is*, which is less than that droop, so
-the command lands behind the equilibrium and nothing advances. Fake hardware has
-no droop and tracks perfectly either way, which is exactly why this only appeared
-on the real arm.
+The outer feedback is accumulated from the **previous command**, using error
+against the measured joints. These motors hold position by sitting behind their
+command, so merely sending the IK joint target reproduces a standing error.
+Continuing to advance the command while feedback trails the target closes that
+error; `max_lead` still bounds the compensation if an obstacle blocks the arm.
 
 A third bound follows from that: `max_lead` limits how far the command may run
 ahead of the measured position, so a joint held still by an obstacle cannot wind
@@ -585,14 +600,12 @@ that family you get depends on who solved the inverse kinematics:
 | | Solver | Behaviour |
 | --- | --- | --- |
 | RViz ghost | MoveIt's KDL solver | Whatever it converges to from its seed; the elbow can land differently each solve |
-| `pose follow` | Jacobian, damped least squares | The smallest joint change from where the arm already is |
+| `pose follow` | MoveIt `/compute_ik`, measured-joint seed | Latches the newest valid solution and feedback-tracks it |
 | `pose ee --from-marker` | `/compute_ik`, MoveIt's solver | Matches the ghost, because it is the same solver |
 
-For servoing the local solution is the one you want. Re-solving from scratch each
-sample can send the tool centre point along a smooth path while the elbow flips
-to the other side of its cone — which reads, from the operating position, as the
-arm suddenly swinging for no reason. Check the tool centre point against the
-marker, not the posture against the ghost.
+`pose follow` seeds each request from the measured joints, so MoveIt normally
+selects a nearby branch. The ghost can still differ because RViz solved at a
+different time or with a different seed.
 
 ### Reading the report
 
@@ -604,6 +617,12 @@ the marker.
 | Line | What it means |
 | --- | --- |
 | `trailed the marker by` | The real measure. Average and worst distance from marker to tool centre point |
+| `last TCP position error` | Distance to the marker at shutdown |
+| `within 2.0 mm` | Samples inside the configured deadband |
+| `actual control rate` | Achieved loop frequency and average time waiting for fresh joint feedback |
+| `IK requests` | Submitted, successful, failed, and superseded MoveIt solves |
+| `Cartesian speed limit` | Samples whose TCP request was capped at `--max-tcp-speed` |
+| `last maximum joint error` | Largest absolute joint error against the latched IK target at shutdown |
 | `velocity limit` | Normal. The marker was dragged faster than the profile allows the arm to move |
 | `lead limit` | The arm fell more than `LEAD_SEC` of travel behind its command. Frequent hits mean the arm cannot keep up — try `--gravity`, or drag more slowly |
 | `position limit` | The drag asked for a joint past the profile's bound. The arm stops there and keeps tracking the rest |
@@ -613,16 +632,17 @@ the marker.
 Following ends when `--seconds` runs out, or on Ctrl-C. Either way the last
 thing that happens is that commanding stops and any feedforward torque is set
 back to zero. The trajectory controller holds its last commanded position, which
-is where the arm already is, so it stays where you left it rather than going
-limp or springing anywhere.
+may lead the measured joints by the bounded `max_lead`. The arm can therefore
+settle slightly after shutdown, especially when gravity feedforward is removed;
+it does not go limp because position control remains active.
 
 It ends on its own by design. A servo loop left running is a robot that moves
 when somebody brushes the marker hours later.
 
 ### The all-zeros home pose is singular
 
-At exactly `q = 0` the arm's Jacobian has rank 5, and its entire z row is zero:
-no joint moves the tool centre point vertically from there. Dragging the marker
+At exactly `q = 0` the arm's Jacobian has rank 5, and its entire z row is zero.
+MoveIt can fail to find some directions from that seed. Dragging the marker
 up produces no motion, correctly — the damped inverse asks for the bounded step,
 which is nothing.
 

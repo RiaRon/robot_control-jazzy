@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 import numpy as np
 import pytest
@@ -26,6 +27,40 @@ from robot_control.safety import SafetyError
 
 MOVEIT_SUCCESS = 1
 NEUTRAL = (0.0, 0.0, 0.0, 1.0)
+
+
+def test_real_backends_do_not_share_a_spinning_executor():
+    """Two pose-follow nodes spin concurrently: feedback and blocking MoveIt IK."""
+    pytest.importorskip("rclpy")
+    from robot_control.ros_adapter import _RclpyBackend
+
+    main = _RclpyBackend("robot_control_test_main_executor")
+    worker = _RclpyBackend("robot_control_test_worker_executor")
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def spin(backend):
+        try:
+            barrier.wait()
+            backend.pump(0.05)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=spin, args=(main,)),
+        threading.Thread(target=spin, args=(worker,)),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+    finally:
+        # The first backend owns the shared rclpy context, so close it last.
+        worker.close()
+        main.close()
 
 
 @pytest.fixture

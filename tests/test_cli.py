@@ -412,12 +412,14 @@ def test_pose_gravity_refuses_torque_over_the_profile_limit(stiff, capsys, monke
 class DraggableArm(StiffArm):
     """A stub that reports a marker being dragged, and follows what it is sent."""
 
-    def __init__(self, target=None):
+    def __init__(self, target=None, target_after_anchor=None):
         super().__init__()
         self.joints = np.zeros(7)
         self.streamed = []
         self._target = target
+        self._target_after_anchor = target_after_anchor
         self.pumped = 0
+        self.ik_requests = []
 
     def watch_marker(self):
         self.watching = True
@@ -427,9 +429,17 @@ class DraggableArm(StiffArm):
 
     def pump(self, timeout_sec=0.0):
         self.pumped += 1
+        if self.pumped == 2 and self._target_after_anchor is not None:
+            self._target = self._target_after_anchor
 
     def read_state(self, timeout_sec=None):
         return self.joints.copy()
+
+    def solve_ik(self, pose, seed):
+        self.ik_requests.append((pose, np.asarray(seed, dtype=float).copy()))
+        solution = np.asarray(seed, dtype=float).copy()
+        solution[:3] = np.asarray(pose.position, dtype=float)
+        return solution
 
     def stream_positions(self, positions):
         self.joints = np.asarray(positions, dtype=float).copy()
@@ -457,12 +467,44 @@ def _reachable_target(chain, q):
     )
 
 
+class _CartesianTestChain:
+    """Identity Cartesian axes for testing the CLI control-loop boundary."""
+
+    links = ()
+
+    def pose(self, q):
+        from robot_control.kinematics import _rotation
+
+        q = np.asarray(q, dtype=float)
+        pose = np.eye(4)
+        pose[:3, 3] = q[:3]
+        pose[:3, :3] = (
+            _rotation(np.array([1.0, 0.0, 0.0]), q[3])
+            @ _rotation(np.array([0.0, 1.0, 0.0]), q[4])
+            @ _rotation(np.array([0.0, 0.0, 1.0]), q[5])
+        )
+        return pose
+
+    def delta_q(self, _q, twist):
+        return np.concatenate((np.asarray(twist, dtype=float), [0.0]))
+
+    def gravity_torque(self, _q):
+        return np.zeros(7)
+
+
+def _servo_chain():
+    return _CartesianTestChain()
+
+
 @pytest.fixture
 def draggable(monkeypatch):
     from robot_control import ros_adapter
 
-    chain = _stub_chain([0.2] * 7)
-    arm = DraggableArm(target=_reachable_target(chain, np.full(7, 0.05)))
+    chain = _servo_chain()
+    arm = DraggableArm(
+        target=_reachable_target(chain, np.zeros(7)),
+        target_after_anchor=_reachable_target(chain, np.full(7, 0.05)),
+    )
     arm.load = chain.gravity_torque(np.zeros(7))
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
     monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
@@ -487,12 +529,159 @@ def test_pose_follow_streams_towards_the_dragged_marker(draggable, capsys):
     assert "followed" in capsys.readouterr().out
 
 
+def test_pose_follow_solves_marker_position_from_latest_measured_seed(draggable):
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2"])
+        == 0
+    )
+
+    assert draggable.ik_requests
+    pose, seed = draggable.ik_requests[-1]
+    np.testing.assert_allclose(pose.position, [0.05, 0.05, 0.05])
+    np.testing.assert_allclose(seed, np.zeros(7))
+    np.testing.assert_allclose(pose.orientation, [0.0, 0.0, 0.0, 1.0])
+
+
+def test_pose_follow_rejects_invalid_cartesian_servo_settings(no_ros, capsys):
+    for option, value in (
+        ("--kp", "0"),
+        ("--ki", "-1"),
+        ("--tolerance", "0"),
+        ("--max-tcp-speed", "nan"),
+    ):
+        assert main(["pose", "follow", *RIGHT_ARM, option, value]) == 2
+
+
+def test_pose_follow_ignores_marker_orientation(draggable):
+    from robot_control.kinematics import twist_between
+    from robot_control.ros_adapter import Pose
+
+    chain = _servo_chain()
+    target = draggable._target
+    draggable._target = Pose(
+        target.position,
+        (0.7071068, 0.0, 0.0, 0.7071068),
+        target.frame_id,
+    )
+    start = chain.pose(draggable.joints)
+
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2"])
+        == 0
+    )
+
+    finish = chain.pose(draggable.joints)
+    orientation_change = twist_between(start, finish)[3:]
+    assert np.linalg.norm(orientation_change) < 3e-3
+
+
+def test_pose_follow_recovers_the_held_orientation_after_a_disturbance(
+    monkeypatch,
+):
+    from robot_control import ros_adapter
+    from robot_control.kinematics import twist_between
+
+    chain = _servo_chain()
+
+    class DisturbedArm(DraggableArm):
+        def __init__(self):
+            super().__init__(target=_reachable_target(chain, np.full(7, 0.01)))
+            self.disturbed = False
+
+        def read_state(self, timeout_sec=None):
+            if self.streamed and not self.disturbed:
+                self.joints[3] += 0.02
+                self.disturbed = True
+            return self.joints.copy()
+
+    arm = DisturbedArm()
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+    start = chain.pose(arm.joints)
+
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.3"])
+        == 0
+    )
+
+    finish = chain.pose(arm.joints)
+    orientation_change = twist_between(start, finish)[3:]
+    assert arm.disturbed
+    assert np.linalg.norm(orientation_change) < 3e-3
+
+
+def test_pose_follow_limits_streamed_tcp_speed_to_default(draggable):
+    chain = _servo_chain()
+
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.3"])
+        == 0
+    )
+
+    positions = np.array([chain.pose(q)[:3, 3] for q in draggable.streamed])
+    speeds = np.linalg.norm(np.diff(positions, axis=0), axis=1) / 0.01
+    assert np.max(speeds) <= 0.05 + 1e-9
+
+
+def test_pose_follow_anchors_a_stale_marker_at_the_current_tcp(monkeypatch):
+    from robot_control import ros_adapter
+    from robot_control.ros_adapter import Pose
+
+    chain = _servo_chain()
+    arm = DraggableArm(target=Pose((0.5, -0.4, 0.3), (0, 0, 0, 1), "world"))
+    arm.joints[:3] = np.array([0.1, -0.1, 0.05])
+    start = arm.joints.copy()
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.1"])
+        == 0
+    )
+
+    np.testing.assert_allclose(arm.joints, start, atol=1e-9)
+
+
+def test_pose_follow_tracks_marker_displacement_from_the_anchor(monkeypatch):
+    from robot_control import ros_adapter
+    from robot_control.ros_adapter import Pose
+
+    chain = _servo_chain()
+
+    class MovingMarkerArm(DraggableArm):
+        def pump(self, timeout_sec=0.0):
+            super().pump(timeout_sec)
+            if self.pumped == 2:
+                x, y, z = self._target.position
+                self._target = Pose((x + 0.01, y, z), self._target.orientation, "world")
+
+    arm = MovingMarkerArm(
+        target=Pose((0.5, -0.4, 0.3), (0, 0, 0, 1), "world")
+    )
+    arm.joints[:3] = np.array([0.1, -0.1, 0.05])
+    start = arm.joints.copy()
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+
+    assert (
+        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.5"])
+        == 0
+    )
+
+    # A finite feedback run need not settle completely, but it must interpret
+    # the 10 mm marker motion relative to the clutch point and reduce that error.
+    assert start[0] + 0.005 < arm.joints[0]
+    assert arm.joints[0] <= start[0] + 0.01 + 1e-9
+    assert arm.joints[1] == pytest.approx(start[1], abs=1e-6)
+    assert arm.joints[2] == pytest.approx(start[2], abs=1e-6)
+
+
 def test_pose_follow_holds_still_when_no_marker_has_been_dragged(capsys, monkeypatch):
     """No target is not a reason to command zero; it is a reason to command
     nothing, so the controller keeps holding where the arm already is."""
     from robot_control import ros_adapter
 
-    chain = _stub_chain([0.2] * 7)
+    chain = _servo_chain()
     arm = DraggableArm(target=None)
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
     monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
@@ -551,19 +740,38 @@ def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
     """The regression that a perfect-tracking stub cannot catch."""
     from robot_control import ros_adapter
 
-    chain = _stub_chain([0.2] * 7)
-    arm = DroopingDraggableArm(target=_reachable_target(chain, np.full(7, 0.15)))
+    chain = _servo_chain()
+    arm = DroopingDraggableArm(
+        target=_reachable_target(chain, np.zeros(7)),
+        target_after_anchor=_reachable_target(chain, np.full(7, 0.01)),
+    )
+    arm.DROOP = 0.003
     arm.load = chain.gravity_torque(np.zeros(7))
     monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
     monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
 
-    assert main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "1.0"]) == 0
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                    "1.5",
+                ]
+        )
+        == 0
+    )
 
     assert arm.streamed, "nothing was streamed"
     # The arm has to have actually moved, not merely been commanded at.
-    assert np.abs(arm.joints).max() > DroopingDraggableArm.DROOP, (
+    assert np.abs(arm.joints).max() > arm.DROOP, (
         f"a drooping arm did not advance: {arm.joints}"
     )
+    actual_position = chain.pose(arm.joints)[:3, 3]
+    target_position = np.asarray(arm._target.position)
+    assert np.linalg.norm(target_position - actual_position) <= 0.002
 
 
 def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
@@ -573,6 +781,10 @@ def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
     output = capsys.readouterr().out
     assert "trailed the marker by" in output
     assert "mm on average" in output
+    assert "last TCP position error" in output
+    assert "within 2.0 mm" in output
+    assert "actual control rate" in output
+    assert "IK requests" in output
 
 
 def test_pose_gravity_accepts_one_scale_per_joint(stiff, capsys):

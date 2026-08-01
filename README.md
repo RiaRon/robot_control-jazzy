@@ -355,7 +355,13 @@ robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
 following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
 drag the marker in RViz; the arm tracks it until the time runs out
 followed 634 samples; the arm holds its last commanded pose
+  actual control rate: 76.8 Hz; joint-state wait 12.9 ms/sample
+  IK requests 23: 18 succeeded, 1 failed, 4 superseded
   tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
+  last TCP position error: 1.7 mm
+  within 2.0 mm on 132 of 634 samples (20.8%)
+  Cartesian speed limit on 74 of 634 samples
+  last maximum joint error: 0.0041 rad
   velocity limit clamped on 74 of 634 samples
 ```
 
@@ -365,16 +371,26 @@ followed 634 samples; the arm holds its last commanded pose
 마커의 `feedback` 스트림(드래그 중 계속 나오는 토픽)을 읽어 컨트롤러 주기로
 명령합니다.
 
-역기구학이 `/compute_ik`가 아니라 **자코비안 기반 미분 IK**입니다. 100 Hz에
-서비스 왕복은 못 따라가고, 자코비안 스텝은 국소적이라 팔이 가까운 해로
-쓸려갑니다 — 매번 새로 IK를 풀면 해 분기 사이로 튈 수 있습니다. 역행렬은
-감쇠 최소자승이라 특이점을 지나가도 스텝이 유한합니다.
+`pose follow`를 시작할 때 첫 마커 좌표를 현재 TCP에 앵커링합니다. 따라서
+RViz에 예전 goal이 남아 있어도 팔이 그 위치로 갑자기 이동하지 않으며, 실행
+후 마커를 움직인 **변위만큼** 현재 TCP에서 상대 추종합니다.
+`pose ee --from-marker`는 이와 달리 마커의 `world` 절대좌표로 이동합니다.
+
+마커 목표가 바뀔 때 현재 실측 관절을 seed로 MoveIt `/compute_ik`를 비동기로
+풉니다. 계산 중에는 마지막으로 성공한 관절 목표를 유지하고, 새 목표가 쌓이면
+오래된 요청을 버리고 최신 목표만 계산합니다. 빠른 루프는 `/joint_states`와
+래치된 목표 관절의 오차가 남는 동안 위치 명령을 계속 앞당겨 impedance 처짐을
+보상합니다. 마커 회전은 무시하고 추종 시작 시 TCP 자세를 유지합니다.
+
+MoveIt 서비스는 별도 작업자에서 실행되므로 느린 IK 왕복이 관절 피드백
+스트리밍을 막지 않습니다. 표시되는 100 Hz는 프로파일 목표값이고, 실물에서
+달성한 주파수와 joint-state 대기시간은 종료 보고서에 따로 나옵니다.
 
 모든 샘플이 `CommandGate.follow`를 지나며 **거부가 아니라 클램프**됩니다.
 팔보다 빨리 끄는 건 정상 조작이므로, 프로파일 속도 한계로 제한하고 몇 개가
 제한됐는지 끝에 보고합니다.
 
-레이트 리밋의 기준이 **이전 명령**이라는 점이 팔이 움직이느냐를 결정합니다.
+관절 증분의 누적 기준이 **이전 명령**이라는 점이 팔이 움직이느냐를 결정합니다.
 이 관절들은 버티는 토크를 내기 위해 명령보다 처짐만큼(실측 0.02~0.05 rad) 뒤에
 있는데, 100 Hz에서 샘플당 예산은 0.02 rad입니다. 실측 기준으로 예산을 잡으면
 명령이 실측보다 한 주기치만 앞설 수 있어 처짐보다 작고, 결과적으로 명령이
@@ -389,8 +405,9 @@ followed 634 samples; the arm holds its last commanded pose
 
 `--seconds`가 끝나거나 Ctrl-C로 끝납니다. 어느 쪽이든 마지막에 명령을 멈추고
 피드포워드 토크를 0으로 되돌립니다. 트래젝토리 컨트롤러가 마지막 명령 위치를
-잡고 있고 그게 팔이 이미 있는 곳이므로, 힘이 빠지거나 어디로 튀지 않고 그
-자리에 섭니다.
+계속 잡지만 그 명령은 실측 관절보다 `max_lead` 안에서 앞서 있을 수 있습니다.
+따라서 종료 직후, 특히 중력 보상이 빠질 때 팔이 조금 settling될 수 있습니다.
+위치 제어는 계속 활성이라 힘이 완전히 빠지지는 않습니다.
 
 **스스로 끝나는 게 설계입니다.** 서보 루프를 켜둔 채로 두면, 몇 시간 뒤 누가
 마커를 건드릴 때 움직이는 로봇이 됩니다.
@@ -406,18 +423,18 @@ followed 634 samples; the arm holds its last commanded pose
 | | 솔버 | 특성 |
 |---|---|---|
 | RViz 고스트 | MoveIt KDL | 시드에서 수렴한 해. 팔꿈치가 매번 다를 수 있음 |
-| `pose follow` | 자코비안 감쇠 최소자승 | 현재 자세에서 **최소 관절 변화** |
+| `pose follow` | `/compute_ik` (MoveIt), 실측 관절 seed | 최신 성공 해를 래치하고 실제 관절이 수렴할 때까지 추종 |
 | `pose ee --from-marker` | `/compute_ik` (MoveIt) | 같은 솔버라 고스트와 **일치** |
 
-서보에서는 국소 해가 맞습니다. 매 샘플 새로 풀면 손끝은 매끄럽게 가는데
-팔꿈치가 원뿔 반대편으로 넘어가고, 조작 위치에서는 팔이 이유 없이 휙 도는
-것으로 보입니다. **고스트와 자세를 비교하지 말고, 마커와 TCP를 비교하십시오.**
+`pose follow`는 매 요청을 현재 실측 관절에서 시작하므로 보통 가까운 해를
+선택합니다. 다만 RViz 고스트가 사용한 seed와 시점이 다르면 같은 MoveIt
+솔버라도 자세가 완전히 같지는 않을 수 있습니다.
 
 ### 전 관절 0 자세는 특이점입니다
 
-정확히 `q = 0`에서 자코비안의 **z 행 전체가 0**이고 rank가 5입니다. 그
-자세에서는 어떤 관절도 TCP를 수직으로 움직이지 못합니다. 마커를 위로 끌어도
-움직이지 않는 게 **정상**입니다.
+정확히 `q = 0`에서 자코비안의 **z 행 전체가 0**이고 rank가 5입니다. MoveIt
+IK가 이 seed에서 특정 방향의 해를 찾지 못할 수 있으므로, IK 실패가 반복되면
+팔꿈치를 조금 굽힌 뒤 다시 시작하십시오.
 
 ```
 q = 0      특이값: [1.8674 1.5266 1.4142 0.286 0.2856 0.0000]   rank 5
