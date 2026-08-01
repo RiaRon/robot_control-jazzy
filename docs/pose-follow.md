@@ -9,9 +9,10 @@
 
 ## 기능과 제어 경로
 
-RViz에서 마커를 드래그하면 `pose follow`가 100 Hz로 feedback을 읽고,
+RViz에서 마커를 드래그하면 `pose follow`가 100 Hz를 목표로 feedback을 읽고,
 현재 관절 자세에서 가까운 해를 계산해 trajectory controller에 위치 명령을
-스트리밍합니다.
+스트리밍합니다. 이 모드는 마커의 **위치 변위만** 추종하고, TCP 방향은 시작
+자세로 유지합니다.
 
 - `pose follow`: 시작 시 현재 TCP를 영점으로 잡고 마커의 **변위**를 실시간 추종
 - `pose ee --from-marker`: 마커의 `world` 절대 자세를 한 번 읽어 한 번 이동
@@ -36,15 +37,15 @@ RViz에서 마커를 드래그하면 `pose follow`가 100 Hz로 feedback을 읽�
 브링업 터미널과 명령 터미널 모두 작업 트리에서 ROS 환경을 준비합니다.
 
 ```bash
-cd ~/rl_ws/robot_control/.worktrees/jazzy
+cd ~/rl_ws/robot_control
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 export PYTHONPATH="src:.:$PYTHONPATH"
 alias robotctl='python3 -m robot_control.cli'
 ```
 
-`PYTHONPATH`는 기존 값 뒤에 추가해야 합니다. 다음처럼 대입해 버리면 ROS
-설정이 추가한 Python 경로가 사라질 수 있습니다.
+`src:.`을 기존 `PYTHONPATH` 앞에 추가하되 기존 값은 반드시 보존해야 합니다.
+다음처럼 대입해 버리면 ROS 설정이 추가한 Python 경로가 사라질 수 있습니다.
 
 ```bash
 # 사용하지 마십시오.
@@ -81,12 +82,21 @@ done
 
 ip -details link show can0 | grep -E "state|fd on"
 ip -details link show can1 | grep -E "state|fd on"
+
+# RX/TX packet과 CAN 오류 상태를 함께 확인합니다.
+ip -s -details link show can0
+ip -s -details link show can1
 ```
+
+두 인터페이스 모두 `UP`이고 `fd on`이어야 합니다. `BUS-OFF`이거나 error,
+dropped counter가 계속 증가하면 브링업하지 말고 배선, 종단저항, 전원과
+bitrate를 먼저 확인하십시오. 여기까지는 SocketCAN 설정 확인이며, 모터와 실제
+통신되는지는 브링업 뒤의 `/joint_states` 확인으로 판정합니다.
 
 첫 번째 터미널에서 실물 스택을 실행합니다.
 
 ```bash
-cd ~/rl_ws/robot_control/.worktrees/jazzy
+cd ~/rl_ws/robot_control
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 
@@ -95,6 +105,41 @@ source ros_ws/install/setup.bash
   --right-can can0 \
   --left-can can1
 ```
+
+브링업이 계속 실행 중인 상태에서 두 번째 터미널을 준비하고 controller와
+관절 상태를 확인합니다.
+
+```bash
+cd ~/rl_ws/robot_control
+source /opt/ros/jazzy/setup.bash
+source ros_ws/install/setup.bash
+export PYTHONPATH="src:.:$PYTHONPATH"
+alias robotctl='python3 -m robot_control.cli'
+
+ros2 control list_controllers
+ros2 control list_hardware_interfaces
+ros2 topic echo --once /joint_states
+```
+
+`joint_state_broadcaster`와 좌우 trajectory controller가 `active`여야 하고,
+hardware interface가 `available` 또는 `claimed` 상태여야 합니다.
+`/joint_states`에는 `openarm_right_joint1`부터 `openarm_right_joint7`,
+`openarm_left_joint1`부터 `openarm_left_joint7`까지 보여야 합니다. timeout,
+빈 joint 목록, `unconfigured` controller가 나오면 CAN 통신 성공으로 간주하지
+마십시오.
+
+명령 발행 없이 CLI까지 연결되는지 마지막으로 확인합니다.
+
+```bash
+robotctl pose follow \
+  --group openarm_right_arm \
+  --seconds 60
+```
+
+`DRY RUN: nothing is published`가 출력되면 profile, ROS adapter와
+`/joint_states` 입력 경로까지 연결된 것입니다. marker feedback은 실제 추종을
+시작한 뒤 RViz에서 마커를 드래그할 때 확인됩니다. `--execute`가 없으므로 팔은
+움직이지 않습니다.
 
 > **실물 동작 주의:** CAN 번호만으로 좌우를 검출할 수 없습니다. 오른팔
 > 명령에 왼팔이 반응하면 즉시 중단한 뒤
@@ -108,7 +153,11 @@ source ros_ws/install/setup.bash
 2. Planning Group을 `right_arm`으로 선택합니다.
    `openarm_right_arm`이 아닙니다.
 3. RViz 툴바에서 **Interact**를 선택합니다.
-4. `openarm_right_hand_tcp` 위의 화살표 또는 회전 링을 드래그합니다.
+4. `openarm_right_hand_tcp` 위의 축 화살표를 드래그합니다.
+
+현재 `pose follow`는 위치 변위만 추종하며 회전 링은 추종하지 않습니다. 추종
+중에는 시작 시점의 TCP 방향을 유지합니다. 회전까지 적용하려면 마커 자세를
+정한 뒤 `robotctl pose ee --from-marker`로 한 번 이동하십시오.
 
 왼팔은 Planning Group을 `left_arm`으로 선택합니다. MotionPlanning은 현재
 선택한 그룹의 TCP 마커만 게시합니다.
@@ -124,7 +173,7 @@ RViz 고스트는 목표 운동학 결과이고 실제 모터값은 `/joint_stat
 ```bash
 robotctl pose follow \
   --group openarm_right_arm \
-  --seconds inf \
+  --seconds 60 \
   --execute
 ```
 
@@ -174,7 +223,7 @@ robotctl pose follow \
 실행 중인 상태에서 별도 터미널을 준비한 뒤 먼저 로드합니다.
 
 ```bash
-cd ~/rl_ws/robot_control/.worktrees/jazzy
+cd ~/rl_ws/robot_control
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 
@@ -278,8 +327,9 @@ CLI 그룹명 `openarm_right_arm`과 RViz Planning Group 이름은 다릅니다.
 
 ### 마커가 보이지만 드래그되지 않음
 
-RViz 툴바에서 **Interact** 도구를 선택하고 TCP의 축 화살표나 회전 링을
-잡습니다. 로봇 링크 자체를 드래그하는 것이 아닙니다.
+RViz 툴바에서 **Interact** 도구를 선택하고 TCP의 축 화살표를 잡습니다.
+`pose follow`는 회전 링을 추종하지 않습니다. 로봇 링크 자체를 드래그하는
+것도 아닙니다.
 
 ### 마커는 움직이지만 실제 팔이 움직이지 않음
 
