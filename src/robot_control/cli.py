@@ -123,6 +123,9 @@ DEFAULT_FOLLOW_KP = 2.0
 DEFAULT_FOLLOW_KI = 1.0
 DEFAULT_FOLLOW_TOLERANCE_M = 0.002
 DEFAULT_MAX_TCP_SPEED_M_S = 0.05
+# IK가 한 번에 계산할 Cartesian 중간 목표의 최대 거리다.
+# 먼 마커 목표도 현재 실제 TCP에서 최대 2cm 앞까지만 IK에 전달한다.
+DEFAULT_MAX_IK_STEP_M = 0.02
 ORIENTATION_HOLD_KP = 2.0
 MAX_ORIENTATION_SPEED_RAD_S = 0.5
 # How long a streamed command may be ahead of the arm, expressed as travel time
@@ -551,6 +554,17 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         default=DEFAULT_MAX_TCP_SPEED_M_S,
         help="maximum commanded TCP speed in metres per second",
     )
+    # IK에 전달할 Cartesian 중간 목표의 최대 거리를 설정한다.
+    follow.add_argument(
+        "--max-ik-step",
+        type=float,
+        default=DEFAULT_MAX_IK_STEP_M,
+        help=(
+            "maximum Cartesian distance from the measured TCP "
+            "to each intermediate IK target in metres"
+        ),
+    )
+
     follow.add_argument("--execute", action="store_true")
 
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
@@ -1424,7 +1438,15 @@ def _pose_follow(args, profile) -> int:
         tolerance=args.tolerance,
         max_speed=args.max_tcp_speed,
     )
-
+    # 중간 IK 목표 거리는 유한한 양수여야 하며,
+    # 마커 변화 감지 범위보다 작으면 다음 목표를 제출할 수 없으므로 거부한다.
+    if (
+        not np.isfinite(args.max_ik_step)
+        or args.max_ik_step < args.tolerance
+    ):
+        raise ValueError(
+            "--max-ik-step must be finite and at least --tolerance"
+        )
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group, args.urdf)
@@ -1538,24 +1560,48 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
                 desired_position = tcp_origin + (
                     marker_position - marker_origin
                 )
+                # 현재 실제 TCP에서 최종 마커 목표까지의 방향과 거리를 계산한다.
+                current_position = here[:3, 3]
+                direction_to_marker = desired_position - current_position
+                distance_to_marker = float(
+                    np.linalg.norm(direction_to_marker)
+                )
+
+                # 마커가 2cm보다 멀리 있다면 현재 TCP에서 마커 방향으로
+                # 최대 --max-ik-step만큼 앞에 있는 중간 목표를 만든다.
+                ik_position = desired_position.copy()
+
+                if distance_to_marker > args.max_ik_step:
+                    ik_position = current_position + (
+                        direction_to_marker
+                        * args.max_ik_step
+                        / distance_to_marker
+                    )
+
+                # 이전에 제출한 중간 목표와 충분히 달라졌을 때만
+                # 새로운 IK 계산을 요청한다.
                 if (
                     last_submitted_position is None
                     or np.linalg.norm(
-                        desired_position - last_submitted_position
+                        ik_position - last_submitted_position
                     )
                     >= args.tolerance
                 ):
                     ik_worker.submit(
                         Pose(
-                            tuple(desired_position),
+                            tuple(ik_position),
                             held_orientation,
                             "world",
                         ),
                         state,
                     )
-                    last_submitted_position = desired_position.copy()
-                    requested_positions.append(desired_position.copy())
 
+                    # 다음 IK 요청과 비교하기 위해 중간 목표를 저장한다.
+                    last_submitted_position = ik_position.copy()
+
+                    # TCP 오차 보고는 중간 목표가 아니라 사용자가 지정한
+                    # 실제 마커 최종 위치를 기준으로 유지한다.
+                    requested_positions.append(desired_position.copy())
             status = ik_worker.snapshot()
             if status.target is not None and status.target_sequence is not None:
                 target_joints = status.target

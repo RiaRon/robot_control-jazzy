@@ -558,6 +558,7 @@ time.
 | `--ki` | `1.0` | Accepted for compatibility; command accumulation already supplies integral action |
 | `--tolerance` | `0.002` | TCP position deadband in metres |
 | `--max-tcp-speed` | `0.05` | Maximum TCP speed in metres per second |
+| `--max-ik-step` | `0.02` | Maximum Cartesian distance from the measured TCP to each intermediate IK target |
 | `--execute` | off | Publish; without it the command only reports what it would do |
 
 ```bash

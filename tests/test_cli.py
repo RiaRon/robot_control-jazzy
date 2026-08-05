@@ -529,17 +529,43 @@ def test_pose_follow_streams_towards_the_dragged_marker(draggable, capsys):
     assert "followed" in capsys.readouterr().out
 
 
-def test_pose_follow_solves_marker_position_from_latest_measured_seed(draggable):
+def test_pose_follow_solves_bounded_subgoals_from_measured_seed(draggable):
+    """IK 목표는 실제 TCP에서 최대 2cm 떨어진 중간 목표여야 한다."""
+
     assert (
         main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2"])
         == 0
     )
 
     assert draggable.ik_requests
-    pose, seed = draggable.ik_requests[-1]
-    np.testing.assert_allclose(pose.position, [0.05, 0.05, 0.05])
-    np.testing.assert_allclose(seed, np.zeros(7))
-    np.testing.assert_allclose(pose.orientation, [0.0, 0.0, 0.0, 1.0])
+
+    submitted_distances = []
+
+    for pose, seed in draggable.ik_requests:
+        # 테스트용 로봇에서는 seed의 처음 세 값이 실제 TCP 위치다.
+        measured_tcp = np.asarray(seed[:3], dtype=float)
+        ik_position = np.asarray(pose.position, dtype=float)
+
+        # 실제 TCP에서 IK 중간 목표까지의 거리를 계산한다.
+        submitted_distance = float(
+            np.linalg.norm(ik_position - measured_tcp)
+        )
+        submitted_distances.append(submitted_distance)
+
+        # 어떤 IK 요청도 기본 최대 중간 거리 2cm를 넘으면 안 된다.
+        assert submitted_distance <= 0.020000001
+
+        # 마커의 회전은 무시하고 시작 방향을 계속 유지해야 한다.
+        np.testing.assert_allclose(
+            pose.orientation,
+            [0.0, 0.0, 0.0, 1.0],
+        )
+
+    # 먼 마커 목표가 실제로 2cm 중간 목표로 제한됐는지 확인한다.
+    assert any(
+        np.isclose(distance, 0.02, atol=1e-6)
+        for distance in submitted_distances
+    )
 
 
 def test_pose_follow_rejects_invalid_cartesian_servo_settings(no_ros, capsys):
@@ -548,6 +574,10 @@ def test_pose_follow_rejects_invalid_cartesian_servo_settings(no_ros, capsys):
         ("--ki", "-1"),
         ("--tolerance", "0"),
         ("--max-tcp-speed", "nan"),
+        # 중간 IK 거리는 유한한 값이어야 한다.
+        ("--max-ik-step", "nan"),
+        # 기본 tolerance 0.002m보다 작은 값도 허용하지 않는다.
+        ("--max-ik-step", "0.001"),
     ):
         assert main(["pose", "follow", *RIGHT_ARM, option, value]) == 2
 
