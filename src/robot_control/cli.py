@@ -1485,6 +1485,31 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
     within_tolerance = 0
     speed_limited = 0
     joint_error_last = 0.0
+    # OpenArm의 관절 개수를 가져온다. 오른팔은 J1~J7이므로 7이다.
+    joint_count = len(group.joints)
+
+    # 실험 전체에서 관절별 절댓값 오차를 계속 더한다.
+    # 실험 종료 후 샘플 수로 나누면 관절별 평균 오차가 된다.
+    joint_error_sum_by_joint = np.zeros(joint_count, dtype=float)
+
+    # 실험 중 관절별로 가장 크게 발생한 오차를 저장한다.
+    joint_error_worst_by_joint = np.zeros(joint_count, dtype=float)
+
+    # 가장 마지막 제어주기의 관절별 오차를 저장한다.
+    joint_error_last_by_joint = np.zeros(joint_count, dtype=float)
+
+    # r_aj_4와 같은 관절 이름을 배열 번호로 바꾸기 위한 표를 만든다.
+    # 예: {"r_aj_1": 0, "r_aj_4": 3}
+    joint_index_by_name = {
+        name: index for index, name in enumerate(group.joints)
+    }
+
+    # 각 관절이 속도·lead·위치 제한에 걸린 횟수를 각각 저장한다.
+    joint_clamp_counts = {
+        kind: np.zeros(joint_count, dtype=int)
+        for kind in ("velocity", "lead", "position")
+    }
+
     state_wait_total = 0.0
     started = time.monotonic()
     last_cycle = started
@@ -1545,9 +1570,27 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
                 lag_worst = max(lag_worst, lag)
                 lag_last = lag
                 within_tolerance += int(lag <= args.tolerance)
-                joint_error_last = float(
-                    np.max(np.abs(target_joints - state))
+                # 역기구학이 만든 목표 관절각과 실제 측정 관절각의 차이를
+                # J1~J7별 절댓값으로 계산한다.
+                joint_error_by_joint = np.abs(target_joints - state)
+
+                # 현재 제어주기의 관절별 오차를 마지막 오차로 저장한다.
+                # copy()를 사용해 다음 주기의 배열 변경과 분리한다.
+                joint_error_last_by_joint = joint_error_by_joint.copy()
+
+                # 관절별 오차를 매 제어주기마다 더한다.
+                # 실험 종료 후 샘플 수로 나누어 평균 오차를 계산한다.
+                joint_error_sum_by_joint += joint_error_by_joint
+
+                # 지금까지의 최대 오차와 현재 오차를 관절별로 비교하여,
+                # 더 큰 값을 각 관절의 최대 오차로 저장한다.
+                joint_error_worst_by_joint = np.maximum(
+                    joint_error_worst_by_joint,
+                    joint_error_by_joint,
                 )
+
+                # 기존 출력과 호환되도록 J1~J7 중 가장 큰 마지막 오차도 유지한다.
+                joint_error_last = float(np.max(joint_error_by_joint))
 
                 # The motor's impedance loop holds by sitting behind its
                 # command. Re-sending the IK target preserves that droop;
@@ -1573,7 +1616,19 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
                 command, limited = gate.follow(candidate, state, elapsed)
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
+                for limit_kind, limited_joint_names in (
+                    gate.last_follow_limits.items()
+                ):
+                    # 현재 제한 종류에 해당하는 J1~J7 횟수 배열을 가져온다.
+                    counts = joint_clamp_counts[limit_kind]
+
+                    # 이번 제어주기에 제한된 관절들의 횟수를 각각 1씩 증가시킨다.
+                    for joint_name in limited_joint_names:
+                        joint_index = joint_index_by_name[joint_name]
+                        counts[joint_index] += 1
+
                 adapter.stream_positions(command)
+
                 samples += 1
             time.sleep(max(0.0, period - (time.monotonic() - cycle)))
     except KeyboardInterrupt:
@@ -1611,6 +1666,31 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
                 f"  Cartesian speed limit on {speed_limited} of {samples} samples"
             )
             print(f"  last maximum joint error: {joint_error_last:.4f} rad")
+
+                         # 실험 중 누적한 관절별 오차를 샘플 수로 나누어
+            # J1~J7 각각의 평균 절댓값 오차를 계산한다.
+            joint_error_mean_by_joint = (
+                joint_error_sum_by_joint / samples
+            )
+
+            print("  per-joint tracking diagnostics:")
+            print(
+                "    joint     mean(rad)  worst(rad)  last(rad)"
+                "  velocity  lead  position"
+            )
+
+            # J1~J7을 한 줄씩 출력한다.
+            for joint_index, joint_name in enumerate(group.joints):
+                print(
+                    f"    {joint_name:<9}"
+                    f" {joint_error_mean_by_joint[joint_index]:>9.4f}"
+                    f" {joint_error_worst_by_joint[joint_index]:>11.4f}"
+                    f" {joint_error_last_by_joint[joint_index]:>9.4f}"
+                    f" {joint_clamp_counts['velocity'][joint_index]:>9d}"
+                    f" {joint_clamp_counts['lead'][joint_index]:>5d}"
+                    f" {joint_clamp_counts['position'][joint_index]:>9d}"
+                )
+
         for note, count in sorted(notes.items()):
             print(f"  {note} clamped on {count} of {samples} samples")
 
