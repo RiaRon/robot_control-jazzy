@@ -227,6 +227,49 @@ def test_follow_clamps_into_the_position_limits():
     np.testing.assert_allclose(command, [1.0, 0.0])
     assert limited is not None and "position" in limited
 
+def test_follow_records_the_joints_limited_by_each_safety_rule():
+    """follow()가 제한 종류뿐 아니라 해당 관절 이름도 기록해야 한다."""
+
+    gate = CommandGate(
+        execute=True,
+        lower=np.array([-1.0, -1.0]),
+        upper=np.array([1.0, 1.0]),
+        velocity=np.array([2.0, 2.0]),
+        command_period_sec=0.01,
+        max_lead=np.array([0.1, 0.1]),
+        names=("joint_a", "joint_b"),
+    )
+
+    # joint_a는 속도·lead·위치 제한에 모두 걸리도록 만든다.
+    # joint_b는 lead 제한에만 걸리도록 만든다.
+    command, limited = gate.follow(
+        target=np.array([5.0, 1.0]),
+        measured=np.array([0.99, 0.0]),
+        elapsed_sec=1.0,
+    )
+
+    # 기존 반환값과 최종 안전 명령이 그대로 유지되는지 확인한다.
+    np.testing.assert_allclose(command, [1.0, 0.1])
+    assert limited == "velocity and lead and position limit"
+
+    # 새로 추가한 관절별 제한 정보가 정확한지 확인한다.
+    assert gate.last_follow_limits == {
+        "velocity": ("joint_a",),
+        "lead": ("joint_a", "joint_b"),
+        "position": ("joint_a",),
+    }
+
+    # 다음 호출에서 아무 제한도 발생하지 않으면
+    # 이전 호출의 제한 정보가 남아 있지 않아야 한다.
+    command, limited = gate.follow(
+        target=np.array([0.99, 0.0]),
+        measured=np.array([0.99, 0.0]),
+        elapsed_sec=1.0,
+    )
+
+    np.testing.assert_allclose(command, [0.99, 0.0])
+    assert limited is None
+    assert gate.last_follow_limits == {}
 
 def test_follow_still_refuses_without_execute_and_after_estop():
     gate = _streaming_gate(execute=False)

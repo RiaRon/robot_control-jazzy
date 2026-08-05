@@ -51,6 +51,10 @@ class CommandGate:
     _last: np.ndarray | None = field(default=None, init=False)
     _last_time: float | None = field(default=None, init=False)
     _estopped: bool = field(default=False, init=False)
+    _last_follow_limits: dict[str, tuple[str, ...]] = field(
+        default_factory=dict,
+        init=False,
+    )
 
     def authorize(self, command: np.ndarray, now_sec: float) -> np.ndarray:
         self._refuse_if_closed()
@@ -149,25 +153,65 @@ class CommandGate:
             raise SafetyError("elapsed time must be finite and not negative")
 
         limited: list[str] = []
-        # Nothing to rate-limit from on the first sample, so the measured pose is
-        # the only honest starting point.
+
+        # 이전 제어주기의 제한 정보가 다음 주기에 남지 않도록 초기화한다.
+        self._last_follow_limits = {}
+
+        # 첫 번째 샘플에는 이전 명령이 없으므로 실제 측정 자세에서 시작한다.
         base = measured if self._last is None else self._last
+
+        # 이번 제어주기 동안 각 관절이 이동할 수 있는 최대 각도를 계산한다.
         permitted = self.velocity * max(elapsed_sec, self.command_period_sec)
+
+        # 목표까지 한 번에 이동하지 않고 허용된 관절 이동량 안으로 제한한다.
         step = np.clip(target - base, -permitted, permitted)
-        if np.any(np.abs(target - base) > permitted + 1e-12):
+
+        # 속도 제한을 넘은 관절을 J1~J7별 참·거짓 배열로 계산한다.
+        velocity_limited = np.abs(target - base) > permitted + 1e-12
+
+        if np.any(velocity_limited):
             limited.append("velocity")
 
+            # 속도 제한에 걸린 관절 이름을 마지막 제한 정보에 저장한다.
+            self._last_follow_limits["velocity"] = self._names_from_mask(
+                velocity_limited
+            )
         command = base + step
+
         if self.max_lead is not None:
+            # 명령 관절각이 실제 관절각보다 얼마나 앞서 있는지 계산한다.
             lead = command - measured
+
+            # 모터가 따라오지 못할 때 명령만 계속 앞서가지 않도록 제한한다.
             bounded = np.clip(lead, -self.max_lead, self.max_lead)
-            if np.any(bounded != lead):
+
+            # lead 제한이 실제로 적용된 관절을 찾는다.
+            lead_limited = bounded != lead
+
+            if np.any(lead_limited):
                 limited.append("lead")
+
+                # lead 제한에 걸린 관절 이름을 저장한다.
+                self._last_follow_limits["lead"] = self._names_from_mask(
+                    lead_limited
+                )
+
             command = measured + bounded
 
+         # 명령 관절각을 각 관절의 최소·최대 위치 범위 안으로 제한한다.
         clamped = np.clip(command, self.lower, self.upper)
-        if np.any(clamped != command):
+
+        # 위치 제한이 실제로 적용된 관절을 찾는다.
+        position_limited = clamped != command
+
+        if np.any(position_limited):
             limited.append("position")
+
+            # 위치 제한에 걸린 관절 이름을 저장한다.
+            self._last_follow_limits["position"] = self._names_from_mask(
+                position_limited
+            )
+
         command = clamped
 
         # _last carries the command, which is what the next step budgets from,
@@ -176,6 +220,23 @@ class CommandGate:
         # let a stalled stream look alive.
         self._last = command.copy()
         return command, (" and ".join(limited) + " limit" if limited else None)
+    @property
+    def last_follow_limits(self) -> dict[str, tuple[str, ...]]:
+        """마지막 follow() 호출에서 제한된 관절 정보를 반환한다."""
+
+        # 내부 딕셔너리 자체를 외부에서 수정하지 못하도록 복사해서 반환한다.
+        return dict(self._last_follow_limits)
+
+    def _names_from_mask(self, mask: np.ndarray) -> tuple[str, ...]:
+        """참으로 표시된 배열 위치를 관절 이름으로 변환한다."""
+
+        return tuple(
+            # names가 있으면 canonical 이름을 사용하고,
+            # 없으면 joint 0, joint 1과 같은 기본 이름을 사용한다.
+            self.names[index] if self.names else f"joint {index}"
+            for index in np.flatnonzero(mask)
+        )
+
 
     def authorize_effort(self, effort: np.ndarray) -> np.ndarray:
         """Authorize feedforward torque against the profile's effort limits.
