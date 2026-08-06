@@ -227,6 +227,32 @@ def test_follow_clamps_into_the_position_limits():
     np.testing.assert_allclose(command, [1.0, 0.0])
     assert limited is not None and "position" in limited
 
+def test_follow_records_lower_position_limit_direction():
+    """최솟값 아래로 가려는 관절이 position_lower로 기록되는지 확인한다."""
+
+    # 두 관절의 이름과 허용 범위를 가진 가짜 안전 게이트를 만든다.
+    gate = _streaming_gate(names=("joint_a", "joint_b"))
+
+    # joint_a는 현재 -0.99 rad에 있고, -5.0 rad로 가려고 한다.
+    # 허용 최솟값은 -1.0 rad이므로 아래쪽 위치 제한에 걸려야 한다.
+    command, limited = gate.follow(
+        target=np.array([-5.0, 0.0]),
+        measured=np.array([-0.99, 0.0]),
+        elapsed_sec=1.0,
+    )
+
+    # 실제 명령은 안전한 최솟값 -1.0 rad에서 멈춰야 한다.
+    np.testing.assert_allclose(command, [-1.0, 0.0])
+
+    # 기존 종합 결과에도 position 제한이 표시되어야 한다.
+    assert limited is not None and "position" in limited
+
+    # 새 진단 정보에는 joint_a가 아래쪽 한계에 걸렸다고 기록되어야 한다.
+    assert gate.last_follow_limits["position_lower"] == ("joint_a",)
+
+    # 위쪽 한계에는 걸리지 않았으므로 position_upper가 없어야 한다.
+    assert "position_upper" not in gate.last_follow_limits
+
 def test_follow_records_the_joints_limited_by_each_safety_rule():
     """follow()가 제한 종류뿐 아니라 해당 관절 이름도 기록해야 한다."""
 
@@ -257,6 +283,7 @@ def test_follow_records_the_joints_limited_by_each_safety_rule():
         "velocity": ("joint_a",),
         "lead": ("joint_a", "joint_b"),
         "position": ("joint_a",),
+        "position_upper": ("joint_a",),
     }
 
     # 다음 호출에서 아무 제한도 발생하지 않으면

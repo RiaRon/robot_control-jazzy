@@ -1526,10 +1526,17 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
         name: index for index, name in enumerate(group.joints)
     }
 
-    # 각 관절이 속도·lead·위치 제한에 걸린 횟수를 각각 저장한다.
+    # 각 관절이 안전 제한에 걸린 횟수를 제한 종류별로 저장한다.
+    # position은 전체 위치 제한이고, lower와 upper는 그 방향을 나타낸다.
     joint_clamp_counts = {
         kind: np.zeros(joint_count, dtype=int)
-        for kind in ("velocity", "lead", "position")
+        for kind in (
+            "velocity",
+            "lead",
+            "position",
+            "position_lower",
+            "position_upper",
+        )
     }
 
     state_wait_total = 0.0
@@ -1722,10 +1729,10 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
             print("  per-joint tracking diagnostics:")
             print(
                 "    joint     mean(rad)  worst(rad)  last(rad)"
-                "  velocity  lead  position"
+                "  velocity  lead  position  lower  upper"
             )
 
-            # J1~J7을 한 줄씩 출력한다.
+            # J1~J7의 오차와 제한 발생 횟수를 한 줄씩 출력한다.
             for joint_index, joint_name in enumerate(group.joints):
                 print(
                     f"    {joint_name:<9}"
@@ -1735,6 +1742,8 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
                     f" {joint_clamp_counts['velocity'][joint_index]:>9d}"
                     f" {joint_clamp_counts['lead'][joint_index]:>5d}"
                     f" {joint_clamp_counts['position'][joint_index]:>9d}"
+                    f" {joint_clamp_counts['position_lower'][joint_index]:>6d}"
+                    f" {joint_clamp_counts['position_upper'][joint_index]:>6d}"
                 )
 
         for note, count in sorted(notes.items()):

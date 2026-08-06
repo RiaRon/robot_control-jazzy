@@ -519,15 +519,28 @@ def test_pose_follow_dry_run_streams_nothing(draggable, capsys):
 
 
 def test_pose_follow_streams_towards_the_dragged_marker(draggable, capsys):
+    # 가짜 로봇에서 pose follow를 0.4초 동안 실행한다.
     assert (
         main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.4"]) == 0
     )
 
+    # 실제 관절 명령이 한 번 이상 전송되었는지 확인한다.
     assert draggable.streamed, "nothing was streamed"
-    # Each sample must move the arm towards the marker, not away from it.
-    assert np.abs(draggable.joints).sum() > 0.0
-    assert "followed" in capsys.readouterr().out
 
+    # 관절이 마커 방향으로 실제로 이동했는지 확인한다.
+    assert np.abs(draggable.joints).sum() > 0.0
+
+    # 터미널에 출력된 pose follow 실험 결과를 한 번만 가져온다.
+    output = capsys.readouterr().out
+
+    # 기존 실행 결과가 그대로 출력되는지 확인한다.
+    assert "followed" in output
+
+    # 관절별 진단표가 출력되는지 확인한다.
+    assert "per-joint tracking diagnostics:" in output
+
+    # 위치 제한의 전체·아래쪽·위쪽 열이 모두 출력되는지 확인한다.
+    assert "position  lower  upper" in output
 
 def test_pose_follow_solves_bounded_subgoals_from_measured_seed(draggable):
     """IK 목표는 실제 TCP에서 최대 2cm 떨어진 중간 목표여야 한다."""

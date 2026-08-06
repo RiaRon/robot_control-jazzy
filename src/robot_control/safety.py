@@ -198,20 +198,40 @@ class CommandGate:
 
             command = measured + bounded
 
-         # 명령 관절각을 각 관절의 최소·최대 위치 범위 안으로 제한한다.
+        # 명령이 관절 최솟값보다 작은지 관절별로 확인한다.
+        lower_position_limited = command < self.lower
+
+        # 명령이 관절 최댓값보다 큰지 관절별로 확인한다.
+        upper_position_limited = command > self.upper
+
+        # 아래쪽 또는 위쪽 한계에 걸렸다면 위치 제한이 발생한 것이다.
+        position_limited = (
+            lower_position_limited | upper_position_limited
+        )
+
+        # 실제로 보낼 명령은 기존과 동일하게 허용 범위 안으로 제한한다.
         clamped = np.clip(command, self.lower, self.upper)
 
-        # 위치 제한이 실제로 적용된 관절을 찾는다.
-        position_limited = clamped != command
-
         if np.any(position_limited):
+            # 기존 출력과 호환되도록 전체 이름은 position으로 유지한다.
             limited.append("position")
-
-            # 위치 제한에 걸린 관절 이름을 저장한다.
             self._last_follow_limits["position"] = self._names_from_mask(
                 position_limited
             )
 
+            # 최솟값 아래로 가려던 관절을 별도로 기록한다.
+            if np.any(lower_position_limited):
+                self._last_follow_limits["position_lower"] = (
+                    self._names_from_mask(lower_position_limited)
+                )
+
+            # 최댓값 위로 가려던 관절을 별도로 기록한다.
+            if np.any(upper_position_limited):
+                self._last_follow_limits["position_upper"] = (
+                    self._names_from_mask(upper_position_limited)
+                )
+
+        # 제한된 최종 명령을 다음 제어주기와 실제 컨트롤러에 사용한다.
         command = clamped
 
         # _last carries the command, which is what the next step budgets from,
