@@ -126,6 +126,13 @@ DEFAULT_MAX_TCP_SPEED_M_S = 0.05
 # IK가 한 번에 계산할 Cartesian 중간 목표의 최대 거리다.
 # 먼 마커 목표도 현재 실제 TCP에서 최대 2cm 앞까지만 IK에 전달한다.
 DEFAULT_MAX_IK_STEP_M = 0.02
+# 중력보상을 적용한 뒤 초기 기준점을 잡기 전까지 기다리는 시간이다.
+DEFAULT_STARTUP_SETTLE_SEC = 2.0
+
+# 시작할 때 실제 TCP가 파란 마커를 따라갈 수 있는 최대 거리다.
+# 10cm보다 멀면 오래되거나 잘못된 마커 목표일 수 있으므로 거부한다.
+DEFAULT_MAX_START_DISTANCE_M = 0.10
+
 ORIENTATION_HOLD_KP = 2.0
 MAX_ORIENTATION_SPEED_RAD_S = 0.5
 # How long a streamed command may be ahead of the arm, expressed as travel time
@@ -562,6 +569,27 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help=(
             "maximum Cartesian distance from the measured TCP "
             "to each intermediate IK target in metres"
+        ),
+    )
+    # 중력보상이 켜진 뒤 실물 자세가 안정될 시간을 설정한다.
+    follow.add_argument(
+        "--startup-settle-sec",
+        type=float,
+        default=DEFAULT_STARTUP_SETTLE_SEC,
+        help=(
+            "seconds to apply gravity compensation before accepting "
+            "the initial TCP-to-marker alignment"
+        ),
+    )
+
+    # 시작할 때 파란 마커가 너무 멀면 실물이 움직이지 않도록 제한한다.
+    follow.add_argument(
+        "--max-start-distance",
+        type=float,
+        default=DEFAULT_MAX_START_DISTANCE_M,
+        help=(
+            "maximum allowed TCP-to-marker distance during startup "
+            "alignment in metres"
         ),
     )
 
@@ -1447,11 +1475,35 @@ def _pose_follow(args, profile) -> int:
         raise ValueError(
             "--max-ik-step must be finite and at least --tolerance"
         )
+    # 안정화 시간은 유한한 0 이상의 값이어야 한다.
+    if (
+        not np.isfinite(args.startup_settle_sec)
+        or args.startup_settle_sec < 0.0
+    ):
+        raise ValueError(
+            "--startup-settle-sec must be finite and not negative"
+        )
+
+    # 시작 정렬 허용거리는 최소한 TCP 오차 허용범위보다 커야 한다.
+    if (
+        not np.isfinite(args.max_start_distance)
+        or args.max_start_distance < args.tolerance
+    ):
+        raise ValueError(
+            "--max-start-distance must be finite and at least --tolerance"
+        )
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
+        # 드래그 중 들어오는 마커 변경을 구독한다.
         adapter.watch_marker()
+
+        # 사용자가 아직 드래그하지 않았어도 시작 정렬을 할 수 있도록
+        # RViz가 현재 보관 중인 파란 마커 위치를 한 번 직접 읽는다.
+        startup_marker_target = adapter.read_marker_pose()
+
+        # 시작 시점의 실제 관절각을 읽는다.
         state = adapter.read_state()
         print(
             f"following {group.tip_link} at {1.0 / period:g} Hz for "
@@ -1462,7 +1514,10 @@ def _pose_follow(args, profile) -> int:
                 else f"scale {_scale_label(_scale_vector(args.gravity, group), None)}"
             )
         )
-        print("drag the marker in RViz; the arm tracks it until the time runs out")
+        print(
+            "startup alignment: do not drag until the actual TCP "
+            "reaches the RViz marker"
+        )
         if not args.execute:
             print("DRY RUN: nothing is published; pass --execute to follow")
             return 0
@@ -1477,14 +1532,32 @@ def _pose_follow(args, profile) -> int:
             worker = LatestIkWorker(ik_adapter.solve_ik)
             try:
                 _follow_loop(
-                    adapter, chain, gate, group, state, period, args, worker
+                    adapter,
+                    chain,
+                    gate,
+                    group,
+                    state,
+                    period,
+                    args,
+                    worker,
+                    startup_marker_target,
                 )
             finally:
                 worker.close()
     return 0
 
 
-def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) -> None:
+def _follow_loop(
+    adapter,
+    chain,
+    gate,
+    group,
+    state,
+    period,
+    args,
+    ik_worker,
+    startup_marker_target,
+) -> None:
     from .ros_adapter import Pose
 
     scales = None if args.gravity is None else _scale_vector(args.gravity, group)
@@ -1498,6 +1571,9 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
     tcp_origin = None
     last_submitted_position = None
     requested_positions: list[np.ndarray] = []
+    # 처음에는 RViz 서비스에서 읽은 파란 마커를 사용한다.
+    # 이후 사용자가 드래그하면 최신 피드백으로 교체한다.
+    target = startup_marker_target
     samples = 0
     cycles = 0
     notes: dict[str, int] = {}
@@ -1549,7 +1625,11 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
             elapsed = max(period, cycle - last_cycle)
             last_cycle = cycle
             adapter.pump(timeout_sec=0.0)
-            target = adapter.latest_marker_target()
+            # 드래그 중 새로운 마커 위치가 들어오면 최신 목표로 교체한다.
+            # 새 피드백이 없으면 시작할 때 읽은 마커 위치를 계속 사용한다.
+            latest_target = adapter.latest_marker_target()
+            if latest_target is not None:
+                target = latest_target
             wait_started = time.monotonic()
             state = adapter.read_state(timeout_sec=1.0)
             state_wait_total += time.monotonic() - wait_started
@@ -1559,17 +1639,73 @@ def _follow_loop(adapter, chain, gate, group, state, period, args, ik_worker) ->
                     gate.authorize_effort(chain.gravity_torque(state) * scales)
                 )
             if target is not None:
+                                # 현재 실제 관절각으로 실제 TCP 위치를 계산한다.
                 here = chain.pose(state)
-                marker_position = np.asarray(target.position, dtype=float)
-                if marker_origin is None:
-                    marker_origin = marker_position.copy()
-                    tcp_origin = here[:3, 3].copy()
-                desired_position = tcp_origin + (
-                    marker_position - marker_origin
+                current_position = here[:3, 3].copy()
+
+                # RViz 파란 손끝 마커의 현재 위치를 가져온다.
+                marker_position = np.asarray(
+                    target.position,
+                    dtype=float,
                 )
-                # 현재 실제 TCP에서 최종 마커 목표까지의 방향과 거리를 계산한다.
-                current_position = here[:3, 3]
-                direction_to_marker = desired_position - current_position
+
+                # marker_origin이 아직 없으면 시작 위치 정렬 단계이다.
+                if marker_origin is None:
+                    # 정렬 중에는 상대 이동량이 아니라 파란 마커의
+                    # 절대 위치를 실제 TCP 목표로 사용한다.
+                    desired_position = marker_position.copy()
+
+                    # 실제 TCP와 파란 마커 사이의 직선거리를 계산한다.
+                    startup_distance = float(
+                        np.linalg.norm(
+                            marker_position - current_position
+                        )
+                    )
+
+                    # 시작 마커가 너무 멀면 오래되거나 잘못된 목표일 수 있다.
+                    # 이때는 실물을 움직이지 않고 Pose Follow를 중단한다.
+                    if startup_distance > args.max_start_distance:
+                        raise ValueError(
+                            "startup TCP-to-marker distance "
+                            f"{startup_distance:.3f} m exceeds "
+                            f"--max-start-distance "
+                            f"{args.max_start_distance:.3f} m; "
+                            "move the RViz marker to Current before retrying"
+                        )
+
+                    # 중력보상을 충분히 적용했고 실제 TCP가 파란 마커의
+                    # 오차 허용범위 안에 들어왔을 때만 정렬 완료로 처리한다.
+                    startup_settle_elapsed = cycle - started
+                    if (
+                        startup_settle_elapsed
+                        >= args.startup_settle_sec
+                        and startup_distance <= args.tolerance
+                    ):
+                        # 두 시작점을 동일한 파란 마커 위치로 저장한다.
+                        # 따라서 이후 최종 목표도 파란 마커의 절대 위치와 같다.
+                        marker_origin = marker_position.copy()
+                        tcp_origin = marker_position.copy()
+
+                        # 정렬 완료 지점에서 IK 목표를 한 번 새로 계산한다.
+                        last_submitted_position = None
+
+                        print(
+                            "startup alignment complete; "
+                            "drag the marker in RViz"
+                        )
+
+                else:
+                    # 정렬 완료 후에는 기존 상대 이동 계산을 사용한다.
+                    # 두 origin을 같은 위치로 저장했으므로 결과적으로
+                    # 실제 TCP 목표는 파란 마커의 절대 위치와 일치한다.
+                    desired_position = tcp_origin + (
+                        marker_position - marker_origin
+                    )
+
+                # 실제 TCP에서 현재 목표까지의 방향을 계산한다.
+                direction_to_marker = (
+                    desired_position - current_position
+                )
                 distance_to_marker = float(
                     np.linalg.norm(direction_to_marker)
                 )

@@ -424,6 +424,10 @@ class DraggableArm(StiffArm):
     def watch_marker(self):
         self.watching = True
 
+    def read_marker_pose(self, timeout_sec=None):
+        """RViz가 현재 보관 중인 시작 마커 위치를 반환한다."""
+        return self._target
+
     def latest_marker_target(self):
         return self._target
 
@@ -581,6 +585,126 @@ def test_pose_follow_solves_bounded_subgoals_from_measured_seed(draggable):
     )
 
 
+def test_pose_follow_aligns_actual_tcp_to_initial_marker(monkeypatch):
+    """실제 TCP가 처음부터 떨어진 파란 마커를 향해 이동해야 한다."""
+
+    from robot_control import ros_adapter
+
+    # 위치와 관절축이 일치하는 시험용 가짜 로봇 모델을 만든다.
+    chain = _servo_chain()
+
+    # 실제 로봇은 원점에 있지만 파란 마커는 x축으로 5cm 앞에 둔다.
+    marker_joints = np.zeros(7)
+    marker_joints[0] = 0.05
+    marker = _reachable_target(chain, marker_joints)
+
+    # 마커가 움직이지 않는 가짜 로봇 어댑터를 만든다.
+    class StartupMarkerOnlyArm(DraggableArm):
+        """시작 마커는 서비스로 읽히지만 드래그 피드백은 아직 없다."""
+
+        def latest_marker_target(self):
+            # 실제 RViz처럼 사용자가 드래그하기 전에는 새 피드백이 없다.
+            return None
+
+    arm = StartupMarkerOnlyArm(target=marker)
+    arm.load = chain.gravity_torque(np.zeros(7))
+
+    # 실제 ROS 대신 위에서 만든 가짜 로봇과 가짜 운동학을 사용한다.
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
+    )
+
+    # 시험에서는 안정화 대기시간을 0초로 설정해 바로 정렬을 확인한다.
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.2",
+                "--startup-settle-sec",
+                "0",
+            ]
+        )
+        == 0
+    )
+
+    # 파란 마커를 향한 IK 계산이 실제로 요청되었는지 확인한다.
+    assert arm.ik_requests
+
+    # 첫 번째 IK 목표는 5cm 전체가 아니라 최대 2cm 중간 목표여야 한다.
+    first_pose, _first_seed = arm.ik_requests[0]
+    np.testing.assert_allclose(
+        first_pose.position,
+        [0.02, 0.0, 0.0],
+        atol=1e-6,
+    )
+
+    # 실제 가짜 로봇도 원점에서 파란 마커 방향으로 움직였는지 확인한다.
+    assert arm.joints[0] > 0.0
+    assert arm.joints[0] < 0.05
+
+
+def test_pose_follow_refuses_a_distant_start_marker(monkeypatch, capsys):
+    """시작 마커가 허용거리보다 멀면 실물을 움직이지 않아야 한다."""
+
+    from robot_control import ros_adapter
+
+    # 위치와 관절축이 일치하는 시험용 가짜 로봇 모델을 만든다.
+    chain = _servo_chain()
+
+    # 실제 로봇은 원점이지만 파란 마커를 x축 20cm 앞에 둔다.
+    # 기본 시작 허용거리 10cm를 초과하도록 만든 값이다.
+    marker_joints = np.zeros(7)
+    marker_joints[0] = 0.20
+    marker = _reachable_target(chain, marker_joints)
+
+    arm = DraggableArm(target=marker)
+    arm.load = chain.gravity_torque(np.zeros(7))
+
+    # 실제 ROS 대신 가짜 로봇을 사용한다.
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
+    )
+
+    # 시작 거리가 너무 크므로 안전 오류 코드 2로 종료되어야 한다.
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.2",
+                "--startup-settle-sec",
+                "0",
+            ]
+        )
+        == 2
+    )
+
+    # 너무 멀다는 원인이 터미널에 표시되는지 확인한다.
+    assert "exceeds --max-start-distance" in capsys.readouterr().out
+
+    # 안전 거부가 발생했으므로 관절 명령은 전혀 보내지 않아야 한다.
+    assert arm.streamed == []
+
+
 def test_pose_follow_rejects_invalid_cartesian_servo_settings(no_ros, capsys):
     for option, value in (
         ("--kp", "0"),
@@ -591,6 +715,13 @@ def test_pose_follow_rejects_invalid_cartesian_servo_settings(no_ros, capsys):
         ("--max-ik-step", "nan"),
         # 기본 tolerance 0.002m보다 작은 값도 허용하지 않는다.
         ("--max-ik-step", "0.001"),
+                # 안정화 시간은 음수나 숫자가 아닌 값을 허용하지 않는다.
+        ("--startup-settle-sec", "-1"),
+        ("--startup-settle-sec", "nan"),
+
+        # 시작 허용거리는 유한하고 기본 TCP 허용오차 이상이어야 한다.
+        ("--max-start-distance", "nan"),
+        ("--max-start-distance", "0.001"),
     ):
         assert main(["pose", "follow", *RIGHT_ARM, option, value]) == 2
 
@@ -666,58 +797,131 @@ def test_pose_follow_limits_streamed_tcp_speed_to_default(draggable):
     assert np.max(speeds) <= 0.05 + 1e-9
 
 
-def test_pose_follow_anchors_a_stale_marker_at_the_current_tcp(monkeypatch):
+def test_pose_follow_refuses_a_stale_marker_far_from_current_tcp(
+    monkeypatch,
+):
+    """실제 TCP에서 너무 먼 오래된 마커는 시작 목표로 사용하지 않는다."""
+
     from robot_control import ros_adapter
     from robot_control.ros_adapter import Pose
 
     chain = _servo_chain()
-    arm = DraggableArm(target=Pose((0.5, -0.4, 0.3), (0, 0, 0, 1), "world"))
+
+    # 파란 마커는 실제 TCP에서 약 56cm 떨어진 오래된 위치에 있다.
+    arm = DraggableArm(
+        target=Pose(
+            (0.5, -0.4, 0.3),
+            (0.0, 0.0, 0.0, 1.0),
+            "world",
+        )
+    )
     arm.joints[:3] = np.array([0.1, -0.1, 0.05])
     start = arm.joints.copy()
-    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
-    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
 
-    assert (
-        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.1"])
-        == 0
+    # 실제 ROS 대신 가짜 로봇과 가짜 운동학을 사용한다.
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
     )
 
-    np.testing.assert_allclose(arm.joints, start, atol=1e-9)
+    # 기본 허용거리 10cm를 초과하므로 안전하게 거부되어야 한다.
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.1",
+            ]
+        )
+        == 2
+    )
+
+    # 안전 거부 후 실제 관절 자세가 전혀 바뀌지 않아야 한다.
+    np.testing.assert_allclose(arm.joints, start)
+    assert arm.streamed == []
 
 
-def test_pose_follow_tracks_marker_displacement_from_the_anchor(monkeypatch):
+def test_pose_follow_tracks_marker_after_startup_alignment(monkeypatch):
+    """시작 정렬이 끝난 뒤 마커 이동을 실제 TCP가 따라가야 한다."""
+
     from robot_control import ros_adapter
     from robot_control.ros_adapter import Pose
 
     chain = _servo_chain()
 
     class MovingMarkerArm(DraggableArm):
+        """두 번째 제어주기에 파란 마커를 x축으로 1cm 이동시킨다."""
+
         def pump(self, timeout_sec=0.0):
             super().pump(timeout_sec)
+
+            # 첫 제어주기에는 실제 TCP와 파란 마커가 같은 위치이므로
+            # 시작 정렬이 완료된다. 그다음 주기에 마커를 1cm 움직인다.
             if self.pumped == 2:
                 x, y, z = self._target.position
-                self._target = Pose((x + 0.01, y, z), self._target.orientation, "world")
+                self._target = Pose(
+                    (x + 0.01, y, z),
+                    self._target.orientation,
+                    "world",
+                )
 
+    # 실제 TCP와 파란 마커를 처음부터 같은 위치에 둔다.
+    start_position = np.array([0.1, -0.1, 0.05])
     arm = MovingMarkerArm(
-        target=Pose((0.5, -0.4, 0.3), (0, 0, 0, 1), "world")
+        target=Pose(
+            tuple(start_position),
+            (0.0, 0.0, 0.0, 1.0),
+            "world",
+        )
     )
-    arm.joints[:3] = np.array([0.1, -0.1, 0.05])
+    arm.joints[:3] = start_position
     start = arm.joints.copy()
-    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
-    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
 
+    # 실제 ROS 대신 가짜 로봇과 가짜 운동학을 사용한다.
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
+    )
+
+    # 시험에서는 안정화 시간을 0초로 설정해 첫 주기에 정렬을 완료한다.
     assert (
-        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.5"])
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.5",
+                "--startup-settle-sec",
+                "0",
+            ]
+        )
         == 0
     )
 
-    # A finite feedback run need not settle completely, but it must interpret
-    # the 10 mm marker motion relative to the clutch point and reduce that error.
-    assert start[0] + 0.005 < arm.joints[0]
-    assert arm.joints[0] <= start[0] + 0.01 + 1e-9
-    assert arm.joints[1] == pytest.approx(start[1], abs=1e-6)
-    assert arm.joints[2] == pytest.approx(start[2], abs=1e-6)
+    # 정렬 후 파란 마커가 움직인 x축 방향으로 실제 TCP도 이동해야 한다.
+    assert arm.joints[0] > start[0]
 
+    # 움직이지 않은 y축과 z축은 시작 위치를 유지해야 한다.
+    np.testing.assert_allclose(
+        arm.joints[1:3],
+        start[1:3],
+        atol=1e-6,
+    )
 
 def test_pose_follow_holds_still_when_no_marker_has_been_dragged(capsys, monkeypatch):
     """No target is not a reason to command zero; it is a reason to command

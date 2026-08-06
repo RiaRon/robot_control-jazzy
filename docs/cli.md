@@ -559,7 +559,21 @@ time.
 | `--tolerance` | `0.002` | TCP position deadband in metres |
 | `--max-tcp-speed` | `0.05` | Maximum TCP speed in metres per second |
 | `--max-ik-step` | `0.02` | Maximum Cartesian distance from the measured TCP to each intermediate IK target |
+| `--startup-settle-sec` | `2.0` | Time to apply gravity compensation before accepting startup alignment |
+| `--max-start-distance` | `0.10` | Maximum allowed distance between the actual TCP and RViz marker during startup alignment |
 | `--execute` | off | Publish; without it the command only reports what it would do |
+
+At startup, `pose follow` first applies gravity compensation and moves the
+measured TCP towards the RViz marker using the same Cartesian speed and IK-step
+limits used during normal following. Do not drag the marker until the command
+prints `startup alignment complete`.
+
+Alignment is accepted only after `--startup-settle-sec` has elapsed and the TCP
+is within `--tolerance` of the marker. If the distance exceeds
+`--max-start-distance`, the command refuses to move and asks the operator to move
+the RViz marker to Current before retrying. After alignment, the actual TCP
+target matches the marker's absolute position instead of preserving an initial
+offset.
 
 ```bash
 # --execute streams position commands and the arm moves while you drag:
@@ -568,7 +582,8 @@ robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
 
 ```text
 following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
-drag the marker in RViz; the arm tracks it until the time runs out
+startup alignment: do not drag until the actual TCP reaches the RViz marker
+startup alignment complete; drag the marker in RViz
 followed 4193 samples; the arm holds its last commanded pose
   actual control rate: 76.8 Hz; joint-state wait 12.9 ms/sample
   IK requests 91: 72 succeeded, 3 failed, 16 superseded
