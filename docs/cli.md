@@ -557,23 +557,35 @@ time.
 | `--kp` | `2.0` | Measured-joint outer feedback gain |
 | `--ki` | `1.0` | Accepted for compatibility; command accumulation already supplies integral action |
 | `--tolerance` | `0.002` | TCP position deadband in metres |
-| `--max-tcp-speed` | `0.05` | Maximum TCP speed in metres per second |
+| `--orientation-tolerance` | `0.035` | TCP orientation deadband in radians, approximately 2 degrees |
+| `--max-tcp-speed` | `0.05` | Maximum TCP linear speed in metres per second |
+| `--max-tcp-angular-speed` | `0.20` | Maximum TCP angular speed in radians per second |
 | `--max-ik-step` | `0.02` | Maximum Cartesian distance from the measured TCP to each intermediate IK target |
+| `--max-ik-angular-step` | `0.10` | Maximum angular distance from the measured TCP to each intermediate IK target |
 | `--startup-settle-sec` | `2.0` | Time to apply gravity compensation before accepting startup alignment |
-| `--max-start-distance` | `0.10` | Maximum allowed distance between the actual TCP and RViz marker during startup alignment |
+| `--max-start-distance` | `0.10` | Maximum allowed position distance between the actual TCP and RViz marker during startup alignment |
+| `--max-start-angle` | `0.35` | Maximum allowed orientation difference during startup alignment, approximately 20 degrees |
 | `--execute` | off | Publish; without it the command only reports what it would do |
 
 At startup, `pose follow` first applies gravity compensation and moves the
-measured TCP towards the RViz marker using the same Cartesian speed and IK-step
-limits used during normal following. Do not drag the marker until the command
-prints `startup alignment complete`.
+measured TCP pose towards the RViz marker. Both position and orientation are
+aligned. The position target is limited by `--max-ik-step`, while the
+orientation follows the shortest quaternion path and is limited by
+`--max-ik-angular-step`. Do not drag the marker until the command prints
+`startup alignment complete`.
 
-Alignment is accepted only after `--startup-settle-sec` has elapsed and the TCP
-is within `--tolerance` of the marker. If the distance exceeds
-`--max-start-distance`, the command refuses to move and asks the operator to move
-the RViz marker to Current before retrying. After alignment, the actual TCP
-target matches the marker's absolute position instead of preserving an initial
-offset.
+Alignment is accepted only after `--startup-settle-sec` has elapsed, the TCP
+position is within `--tolerance`, and its orientation is within
+`--orientation-tolerance`. If the initial position distance exceeds
+`--max-start-distance`, or the initial orientation difference exceeds
+`--max-start-angle`, the command refuses to move and asks the operator to move
+the RViz marker to Current before retrying.
+
+After alignment, the actual TCP target matches both the marker's absolute
+position and orientation. During following, the command stream is limited by
+`--max-tcp-speed` and `--max-tcp-angular-speed`. Translation and rotation share
+the stricter scaling factor so that the seven-joint motion keeps the IK path
+while satisfying both limits.
 
 ```bash
 # --execute streams position commands and the arm moves while you drag:
@@ -590,7 +602,11 @@ followed 4193 samples; the arm holds its last commanded pose
   tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
   last TCP position error: 1.7 mm
   within 2.0 mm on 1132 of 4193 samples (27.0%)
+  TCP orientation trailed the marker by 3.8 deg on average, 12.4 deg at worst
+  last TCP orientation error: 1.2 deg
+  within 2.0 deg on 1540 of 4193 samples (36.7%)
   Cartesian speed limit on 271 of 4193 samples
+  Cartesian angular speed limit on 418 of 4193 samples
   last maximum joint error: 0.0041 rad
   velocity limit clamped on 271 of 4193 samples
 ```
@@ -666,9 +682,13 @@ the marker.
 | `trailed the marker by` | The real measure. Average and worst distance from marker to tool centre point |
 | `last TCP position error` | Distance to the marker at shutdown |
 | `within 2.0 mm` | Samples inside the configured deadband |
+| `TCP orientation trailed the marker by` | Average and worst orientation error between the RViz marker and measured TCP |
+| `last TCP orientation error` | Orientation error to the RViz marker at shutdown |
+| `within 2.0 deg` | Samples inside the configured orientation deadband |
 | `actual control rate` | Achieved loop frequency and average time waiting for fresh joint feedback |
 | `IK requests` | Submitted, successful, failed, and superseded MoveIt solves |
 | `Cartesian speed limit` | Samples whose TCP request was capped at `--max-tcp-speed` |
+| `Cartesian angular speed limit` | Samples whose TCP rotation request was capped at `--max-tcp-angular-speed` |
 | `last maximum joint error` | Largest absolute joint error against the latched IK target at shutdown |
 | `velocity limit` | Normal. The marker was dragged faster than the profile allows the arm to move |
 | `lead limit` | The arm fell more than `LEAD_SEC` of travel behind its command. Frequent hits mean the arm cannot keep up — try `--gravity`, or drag more slowly |

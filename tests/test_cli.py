@@ -440,9 +440,56 @@ class DraggableArm(StiffArm):
         return self.joints.copy()
 
     def solve_ik(self, pose, seed):
-        self.ik_requests.append((pose, np.asarray(seed, dtype=float).copy()))
+        """테스트용 IK가 위치와 Roll·Pitch·Yaw를 모두 관절값으로 바꾼다."""
+        from robot_control.cli import _rotation_from_quaternion
+
+        self.ik_requests.append(
+            (
+                pose,
+                np.asarray(seed, dtype=float).copy(),
+            )
+        )
+
         solution = np.asarray(seed, dtype=float).copy()
-        solution[:3] = np.asarray(pose.position, dtype=float)
+
+        # 테스트 체인의 J1~J3은 x, y, z 위치를 직접 나타낸다.
+        solution[:3] = np.asarray(
+            pose.position,
+            dtype=float,
+        )
+
+        # 목표 quaternion을 3x3 회전행렬로 바꾼다.
+        rotation = _rotation_from_quaternion(
+            pose.orientation
+        )
+
+        # 테스트 체인은 Rx(roll) @ Ry(pitch) @ Rz(yaw) 순서로 회전한다.
+        # 같은 순서의 Roll·Pitch·Yaw를 회전행렬에서 다시 추출한다.
+        pitch = float(
+            np.arcsin(
+                np.clip(rotation[0, 2], -1.0, 1.0)
+            )
+        )
+        roll = float(
+            np.arctan2(
+                -rotation[1, 2],
+                rotation[2, 2],
+            )
+        )
+        yaw = float(
+            np.arctan2(
+                -rotation[0, 1],
+                rotation[0, 0],
+            )
+        )
+
+        # 테스트 체인의 J4~J6이 Roll·Pitch·Yaw 역할을 한다.
+        solution[3:6] = [
+            roll,
+            pitch,
+            yaw,
+        ]
+
         return solution
 
     def stream_positions(self, positions):
@@ -515,6 +562,224 @@ def draggable(monkeypatch):
     return arm
 
 
+def test_quaternion_angular_distance_treats_opposite_sign_as_same():
+    """q와 -q가 같은 방향으로 처리되는지 확인한다."""
+    from robot_control.cli import _quaternion_angular_distance
+
+    quaternion = (0.0, 0.0, 0.0, 1.0)
+    opposite_sign = (0.0, 0.0, 0.0, -1.0)
+
+    # Quaternion의 부호는 반대지만 실제 공간 방향은 완전히 같다.
+    assert _quaternion_angular_distance(
+        quaternion,
+        opposite_sign,
+    ) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        # Roll: 손끝 x축을 기준으로 90도 회전한다.
+        pytest.param(
+            (np.sin(np.pi / 4.0), 0.0, 0.0, np.cos(np.pi / 4.0)),
+            id="roll",
+        ),
+
+        # Pitch: 손끝 y축을 기준으로 90도 회전한다.
+        pytest.param(
+            (0.0, np.sin(np.pi / 4.0), 0.0, np.cos(np.pi / 4.0)),
+            id="pitch",
+        ),
+
+        # Yaw: 손끝 z축을 기준으로 90도 회전한다.
+        pytest.param(
+            (0.0, 0.0, np.sin(np.pi / 4.0), np.cos(np.pi / 4.0)),
+            id="yaw",
+        ),
+    ],
+)
+def test_quaternion_step_limits_all_three_rotation_axes(goal):
+    """Roll, Pitch, Yaw 모두 한 번에 최대 0.10 rad만 이동해야 한다."""
+    from robot_control.cli import (
+        _quaternion_angular_distance,
+        _step_quaternion_towards,
+    )
+
+    current = (0.0, 0.0, 0.0, 1.0)
+
+    stepped, original_distance = _step_quaternion_towards(
+        current,
+        goal,
+        max_step_rad=0.10,
+    )
+
+    # 원래 목표는 현재 방향에서 90도, 즉 pi/2 rad 떨어져 있다.
+    assert original_distance == pytest.approx(np.pi / 2.0)
+
+    # 생성된 중간목표는 현재 방향에서 정확히 0.10 rad 앞이어야 한다.
+    assert _quaternion_angular_distance(
+        current,
+        stepped,
+    ) == pytest.approx(0.10)
+
+    # 중간목표에서 최종 목표까지 남은 각도도 올바르게 감소해야 한다.
+    assert _quaternion_angular_distance(
+        stepped,
+        goal,
+    ) == pytest.approx(np.pi / 2.0 - 0.10)
+
+
+def test_quaternion_step_uses_goal_when_it_is_inside_the_limit():
+    """목표가 0.10 rad 이내라면 중간값이 아니라 최종 목표를 사용한다."""
+    from robot_control.cli import (
+        _quaternion_angular_distance,
+        _step_quaternion_towards,
+    )
+
+    current = (0.0, 0.0, 0.0, 1.0)
+
+    # x축으로 0.05 rad 회전한 quaternion이다.
+    goal = (
+        np.sin(0.05 / 2.0),
+        0.0,
+        0.0,
+        np.cos(0.05 / 2.0),
+    )
+
+    stepped, original_distance = _step_quaternion_towards(
+        current,
+        goal,
+        max_step_rad=0.10,
+    )
+
+    assert original_distance == pytest.approx(0.05)
+
+    # 제한 안쪽이므로 반환된 방향과 최종 목표의 차이는 0이어야 한다.
+    assert _quaternion_angular_distance(
+        stepped,
+        goal,
+    ) == pytest.approx(0.0)
+
+@pytest.mark.parametrize(
+    "rotation_joint",
+    [
+        pytest.param(3, id="roll"),
+        pytest.param(4, id="pitch"),
+        pytest.param(5, id="yaw"),
+    ],
+)
+def test_pose_follow_tracks_all_rotation_axes_with_speed_limit(
+    monkeypatch,
+    rotation_joint,
+    capsys,
+):
+    """Roll·Pitch·Yaw를 추종하며 최대 회전속도를 지켜야 한다."""
+    from robot_control import ros_adapter
+    from robot_control.cli import (
+        _quaternion_angular_distance,
+        _quaternion_from_rotation,
+    )
+
+    chain = _servo_chain()
+
+    # 처음에는 실제 팔과 RViz 마커가 같은 영점자세에 있다.
+    start_joints = np.zeros(7)
+    start_target = _reachable_target(
+        chain,
+        start_joints,
+    )
+
+    # 드래그 후에는 선택된 한 회전축만 0.20 rad 회전한다.
+    goal_joints = np.zeros(7)
+    goal_joints[rotation_joint] = 0.20
+    goal_target = _reachable_target(
+        chain,
+        goal_joints,
+    )
+
+    arm = DraggableArm(
+        target=start_target,
+        target_after_anchor=goal_target,
+    )
+    arm.load = chain.gravity_torque(start_joints)
+
+    # 실제 ROS와 MoveIt 대신 테스트용 가짜 로봇과 체인을 연결한다.
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
+    )
+
+    start_pose = chain.pose(arm.joints)
+    goal_pose = chain.pose(goal_joints)
+
+    start_orientation = _quaternion_from_rotation(
+        start_pose[:3, :3]
+    )
+    goal_orientation = _quaternion_from_rotation(
+        goal_pose[:3, :3]
+    )
+    error_before = _quaternion_angular_distance(
+        start_orientation,
+        goal_orientation,
+    )
+
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.6",
+            ]
+        )
+        == 0
+    )
+
+    # 실행 후 실제 가짜 로봇 방향이 목표 방향에 가까워졌는지 확인한다.
+    finish_pose = chain.pose(arm.joints)
+    finish_orientation = _quaternion_from_rotation(
+        finish_pose[:3, :3]
+    )
+    error_after = _quaternion_angular_distance(
+        finish_orientation,
+        goal_orientation,
+    )
+
+    assert error_after < error_before
+    assert arm.streamed
+
+    # 연속된 모든 명령 자세의 회전속도를 계산한다.
+    streamed_orientations = [
+        _quaternion_from_rotation(
+            chain.pose(command)[:3, :3]
+        )
+        for command in arm.streamed
+    ]
+    angular_speeds = [
+        _quaternion_angular_distance(first, second)
+        / 0.01
+        for first, second in zip(
+            streamed_orientations,
+            streamed_orientations[1:],
+        )
+    ]
+
+    assert angular_speeds
+
+    # 기본 제한인 0.20 rad/s를 넘어서는 명령이 없어야 한다.
+    assert max(angular_speeds) <= 0.2000001
+    # 실행 결과에 방향 추종 오차와 회전속도 제한 횟수가 출력되어야 한다.
+    output = capsys.readouterr().out
+    assert "TCP orientation trailed the marker" in output
+    assert "last TCP orientation error" in output
+    assert "Cartesian angular speed limit" in output
 def test_pose_follow_dry_run_streams_nothing(draggable, capsys):
     assert main(["pose", "follow", *RIGHT_ARM, "--seconds", "0.1"]) == 0
 
@@ -547,6 +812,12 @@ def test_pose_follow_streams_towards_the_dragged_marker(draggable, capsys):
     assert "position  lower  upper" in output
 
 def test_pose_follow_solves_bounded_subgoals_from_measured_seed(draggable):
+    from robot_control.cli import (
+        _quaternion_angular_distance,
+        _quaternion_from_rotation,
+    )
+    # 테스트에서 사용하는 가짜 7자유도 로봇의 순기구학 모델을 만든다.
+    chain = _servo_chain()
     """IK 목표는 실제 TCP에서 최대 2cm 떨어진 중간 목표여야 한다."""
 
     assert (
@@ -572,11 +843,20 @@ def test_pose_follow_solves_bounded_subgoals_from_measured_seed(draggable):
         # 어떤 IK 요청도 기본 최대 중간 거리 2cm를 넘으면 안 된다.
         assert submitted_distance <= 0.020000001
 
-        # 마커의 회전은 무시하고 시작 방향을 계속 유지해야 한다.
-        np.testing.assert_allclose(
-            pose.orientation,
-            [0.0, 0.0, 0.0, 1.0],
+        # IK 계산에 사용한 실제 관절 seed로 현재 TCP 방향을 계산한다.
+        measured_orientation = _quaternion_from_rotation(
+            chain.pose(seed)[:3, :3]
         )
+
+        # 현재 실제 방향과 IK 회전 중간목표 사이의 회전각을 계산한다.
+        submitted_angle = _quaternion_angular_distance(
+            measured_orientation,
+            pose.orientation,
+        )
+
+        # 어떤 IK 요청도 기본 최대 회전 중간간격인 0.10 rad를
+        # 넘어서는 안 된다.
+        assert submitted_angle <= 0.100000001
 
     # 먼 마커 목표가 실제로 2cm 중간 목표로 제한됐는지 확인한다.
     assert any(
@@ -722,66 +1002,156 @@ def test_pose_follow_rejects_invalid_cartesian_servo_settings(no_ros, capsys):
         # 시작 허용거리는 유한하고 기본 TCP 허용오차 이상이어야 한다.
         ("--max-start-distance", "nan"),
         ("--max-start-distance", "0.001"),
+                # 방향 허용오차는 유한한 양수여야 한다.
+        ("--orientation-tolerance", "0"),
+        ("--orientation-tolerance", "nan"),
+
+        # 최대 회전속도는 유한한 양수여야 한다.
+        ("--max-tcp-angular-speed", "0"),
+        ("--max-tcp-angular-speed", "nan"),
+
+        # 회전 중간목표는 방향 허용오차 이상이어야 한다.
+        ("--max-ik-angular-step", "nan"),
+        ("--max-ik-angular-step", "0.01"),
+
+        # 시작 허용각은 방향 허용오차 이상이고 pi 이하여야 한다.
+        ("--max-start-angle", "nan"),
+        ("--max-start-angle", "0.01"),
+        ("--max-start-angle", "4.0"),
     ):
         assert main(["pose", "follow", *RIGHT_ARM, option, value]) == 2
 
 
-def test_pose_follow_ignores_marker_orientation(draggable):
-    from robot_control.kinematics import twist_between
+def test_pose_follow_refuses_large_startup_orientation_difference(
+    draggable,
+    capsys,
+):
+    """시작 방향 차이가 너무 크면 실물 명령을 거부해야 한다."""
     from robot_control.ros_adapter import Pose
 
-    chain = _servo_chain()
     target = draggable._target
+
+    # 현재 방향에서 Roll 방향으로 90도 회전된 마커를 만든다.
+    # 기본 시작 허용각 0.35 rad보다 훨씬 큰 1.57 rad 차이다.
     draggable._target = Pose(
         target.position,
-        (0.7071068, 0.0, 0.0, 0.7071068),
+        (
+            np.sin(np.pi / 4.0),
+            0.0,
+            0.0,
+            np.cos(np.pi / 4.0),
+        ),
         target.frame_id,
     )
-    start = chain.pose(draggable.joints)
 
-    assert (
-        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.2"])
-        == 0
+    code = main(
+        [
+            "pose",
+            "follow",
+            *RIGHT_ARM,
+            "--execute",
+            "--seconds",
+            "0.2",
+        ]
     )
 
-    finish = chain.pose(draggable.joints)
-    orientation_change = twist_between(start, finish)[3:]
-    assert np.linalg.norm(orientation_change) < 3e-3
+    # 위험한 시작 방향 차이이므로 명령을 실행하지 않고 오류로 종료한다.
+    assert code == 2
+    assert "--max-start-angle" in capsys.readouterr().out
+    assert draggable.streamed == []
 
 
-def test_pose_follow_recovers_the_held_orientation_after_a_disturbance(
+def test_pose_follow_recovers_marker_orientation_after_a_disturbance(
     monkeypatch,
 ):
+    """외란을 받은 뒤에도 시작 방향이 아니라 RViz 목표 방향으로 복귀한다."""
     from robot_control import ros_adapter
-    from robot_control.kinematics import twist_between
+    from robot_control.cli import (
+        _quaternion_angular_distance,
+        _quaternion_from_rotation,
+    )
 
     chain = _servo_chain()
+
+    # RViz 마커의 목표 위치와 방향을 만드는 관절값이다.
+    goal_joints = np.full(7, 0.01)
+    goal_target = _reachable_target(
+        chain,
+        goal_joints,
+    )
 
     class DisturbedArm(DraggableArm):
         def __init__(self):
-            super().__init__(target=_reachable_target(chain, np.full(7, 0.01)))
+            super().__init__(target=goal_target)
             self.disturbed = False
+            self.joints_after_disturbance = None
 
         def read_state(self, timeout_sec=None):
+            # 첫 명령이 전달된 뒤 Roll 역할을 하는 테스트 관절에
+            # 0.02 rad의 외란을 한 번 추가한다.
             if self.streamed and not self.disturbed:
                 self.joints[3] += 0.02
                 self.disturbed = True
+                self.joints_after_disturbance = (
+                    self.joints.copy()
+                )
+
             return self.joints.copy()
 
     arm = DisturbedArm()
-    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
-    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
-    start = chain.pose(arm.joints)
+
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
+    )
 
     assert (
-        main(["pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "0.3"])
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.3",
+            ]
+        )
         == 0
     )
 
-    finish = chain.pose(arm.joints)
-    orientation_change = twist_between(start, finish)[3:]
     assert arm.disturbed
-    assert np.linalg.norm(orientation_change) < 3e-3
+    assert arm.joints_after_disturbance is not None
+
+    # RViz 마커의 목표 방향을 계산한다.
+    goal_orientation = _quaternion_from_rotation(
+        chain.pose(goal_joints)[:3, :3]
+    )
+
+    # 외란 직후의 방향 오차를 계산한다.
+    disturbed_orientation = _quaternion_from_rotation(
+        chain.pose(arm.joints_after_disturbance)[:3, :3]
+    )
+    disturbed_error = _quaternion_angular_distance(
+        disturbed_orientation,
+        goal_orientation,
+    )
+
+    # 제어가 끝났을 때의 방향 오차를 계산한다.
+    finish_orientation = _quaternion_from_rotation(
+        chain.pose(arm.joints)[:3, :3]
+    )
+    finish_error = _quaternion_angular_distance(
+        finish_orientation,
+        goal_orientation,
+    )
+
+    # 제어 후 방향 오차가 외란 직후보다 작아져야 한다.
+    assert finish_error < disturbed_error
 
 
 def test_pose_follow_limits_streamed_tcp_speed_to_default(draggable):

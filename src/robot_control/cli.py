@@ -121,20 +121,36 @@ MAX_GRAVITY_SCALE = 1.5
 DEFAULT_FOLLOW_SEC = 60.0
 DEFAULT_FOLLOW_KP = 2.0
 DEFAULT_FOLLOW_KI = 1.0
+# 손끝 위치가 목표에서 2mm 이내이면 위치가 도착한 것으로 판단한다.
 DEFAULT_FOLLOW_TOLERANCE_M = 0.002
+
+# 손끝 방향이 목표에서 약 2도 이내이면 방향이 도착한 것으로 판단한다.
+DEFAULT_FOLLOW_ORIENTATION_TOLERANCE_RAD = 0.035
+
+# 손끝의 최대 직선 이동속도이다.
 DEFAULT_MAX_TCP_SPEED_M_S = 0.05
-# IK가 한 번에 계산할 Cartesian 중간 목표의 최대 거리다.
-# 먼 마커 목표도 현재 실제 TCP에서 최대 2cm 앞까지만 IK에 전달한다.
+
+# 손끝의 최대 회전속도이다.
+# 0.20 rad/s는 약 11.5 deg/s이다.
+DEFAULT_MAX_TCP_ANGULAR_SPEED_RAD_S = 0.20
+
+# IK가 한 번에 계산할 Cartesian 위치 중간목표의 최대 거리이다.
+# 먼 목표도 실제 TCP에서 최대 2cm 앞까지만 IK에 전달한다.
 DEFAULT_MAX_IK_STEP_M = 0.02
-# 중력보상을 적용한 뒤 초기 기준점을 잡기 전까지 기다리는 시간이다.
+
+# IK가 한 번에 계산할 방향 중간목표의 최대 회전각이다.
+# 0.10 rad는 약 5.7도이다.
+DEFAULT_MAX_IK_ANGULAR_STEP_RAD = 0.10
+
+# 중력보상을 적용한 뒤 초기 정렬 완료를 판단하기 전까지 기다린다.
 DEFAULT_STARTUP_SETTLE_SEC = 2.0
 
-# 시작할 때 실제 TCP가 파란 마커를 따라갈 수 있는 최대 거리다.
-# 10cm보다 멀면 오래되거나 잘못된 마커 목표일 수 있으므로 거부한다.
+# 시작할 때 실제 TCP와 RViz 마커 사이에 허용할 최대 거리이다.
 DEFAULT_MAX_START_DISTANCE_M = 0.10
 
-ORIENTATION_HOLD_KP = 2.0
-MAX_ORIENTATION_SPEED_RAD_S = 0.5
+# 시작할 때 실제 TCP와 RViz 마커 사이에 허용할 최대 방향 차이이다.
+# 0.35 rad는 약 20도이다.
+DEFAULT_MAX_START_ANGLE_RAD = 0.35
 # How long a streamed command may be ahead of the arm, expressed as travel time
 # at the joint's velocity limit. It has to exceed the standing droop or the arm
 # cannot advance at all, and stay small enough that a blocked joint does not wind
@@ -549,19 +565,39 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         default=DEFAULT_FOLLOW_KI,
         help="Cartesian position integral gain",
     )
+    # 손끝 위치가 목표에 도착했다고 판단할 거리 오차를 설정한다.
     follow.add_argument(
         "--tolerance",
         type=float,
         default=DEFAULT_FOLLOW_TOLERANCE_M,
         help="TCP position deadband in metres",
     )
+
+    # 손끝 방향이 목표에 도착했다고 판단할 각도 오차를 설정한다.
+    follow.add_argument(
+        "--orientation-tolerance",
+        type=float,
+        default=DEFAULT_FOLLOW_ORIENTATION_TOLERANCE_RAD,
+        help="TCP orientation deadband in radians",
+    )
+
+    # 실제 손끝에 보낼 최대 직선 이동속도를 설정한다.
     follow.add_argument(
         "--max-tcp-speed",
         type=float,
         default=DEFAULT_MAX_TCP_SPEED_M_S,
         help="maximum commanded TCP speed in metres per second",
     )
-    # IK에 전달할 Cartesian 중간 목표의 최대 거리를 설정한다.
+
+    # 실제 손끝에 보낼 최대 회전속도를 설정한다.
+    follow.add_argument(
+        "--max-tcp-angular-speed",
+        type=float,
+        default=DEFAULT_MAX_TCP_ANGULAR_SPEED_RAD_S,
+        help="maximum commanded TCP angular speed in radians per second",
+    )
+
+    # IK에 전달할 위치 중간목표의 최대 거리를 설정한다.
     follow.add_argument(
         "--max-ik-step",
         type=float,
@@ -571,7 +607,19 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
             "to each intermediate IK target in metres"
         ),
     )
-    # 중력보상이 켜진 뒤 실물 자세가 안정될 시간을 설정한다.
+
+    # IK에 전달할 방향 중간목표의 최대 회전각을 설정한다.
+    follow.add_argument(
+        "--max-ik-angular-step",
+        type=float,
+        default=DEFAULT_MAX_IK_ANGULAR_STEP_RAD,
+        help=(
+            "maximum angular distance from the measured TCP "
+            "to each intermediate IK target in radians"
+        ),
+    )
+
+    # 중력보상이 켜진 뒤 실제 자세가 안정될 시간을 설정한다.
     follow.add_argument(
         "--startup-settle-sec",
         type=float,
@@ -582,7 +630,7 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         ),
     )
 
-    # 시작할 때 파란 마커가 너무 멀면 실물이 움직이지 않도록 제한한다.
+    # 시작할 때 RViz 마커가 너무 멀면 실물이 움직이지 않도록 제한한다.
     follow.add_argument(
         "--max-start-distance",
         type=float,
@@ -590,6 +638,17 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help=(
             "maximum allowed TCP-to-marker distance during startup "
             "alignment in metres"
+        ),
+    )
+
+    # 시작할 때 방향 차이가 너무 크면 실물이 회전하지 않도록 제한한다.
+    follow.add_argument(
+        "--max-start-angle",
+        type=float,
+        default=DEFAULT_MAX_START_ANGLE_RAD,
+        help=(
+            "maximum allowed TCP-to-marker orientation difference "
+            "during startup alignment in radians"
         ),
     )
 
@@ -1466,6 +1525,25 @@ def _pose_follow(args, profile) -> int:
         tolerance=args.tolerance,
         max_speed=args.max_tcp_speed,
     )
+        # 방향 허용오차는 0보다 크고 최대 회전각인 pi 이하여야 한다.
+    if (
+        not np.isfinite(args.orientation_tolerance)
+        or args.orientation_tolerance <= 0.0
+        or args.orientation_tolerance > np.pi
+    ):
+        raise ValueError(
+            "--orientation-tolerance must be finite, positive, "
+            "and no greater than pi"
+        )
+
+    # 손끝 최대 회전속도는 유한한 양수여야 한다.
+    if (
+        not np.isfinite(args.max_tcp_angular_speed)
+        or args.max_tcp_angular_speed <= 0.0
+    ):
+        raise ValueError(
+            "--max-tcp-angular-speed must be finite and positive"
+        )
     # 중간 IK 목표 거리는 유한한 양수여야 하며,
     # 마커 변화 감지 범위보다 작으면 다음 목표를 제출할 수 없으므로 거부한다.
     if (
@@ -1474,6 +1552,16 @@ def _pose_follow(args, profile) -> int:
     ):
         raise ValueError(
             "--max-ik-step must be finite and at least --tolerance"
+        )
+    # 회전 중간목표는 방향 허용오차보다 크고 pi 이하여야 한다.
+    if (
+        not np.isfinite(args.max_ik_angular_step)
+        or args.max_ik_angular_step < args.orientation_tolerance
+        or args.max_ik_angular_step > np.pi
+    ):
+        raise ValueError(
+            "--max-ik-angular-step must be finite, no greater than pi, "
+            "and at least --orientation-tolerance"
         )
     # 안정화 시간은 유한한 0 이상의 값이어야 한다.
     if (
@@ -1491,6 +1579,16 @@ def _pose_follow(args, profile) -> int:
     ):
         raise ValueError(
             "--max-start-distance must be finite and at least --tolerance"
+        )
+    # 시작 방향 허용각은 방향 허용오차보다 크고 pi 이하여야 한다.
+    if (
+        not np.isfinite(args.max_start_angle)
+        or args.max_start_angle < args.orientation_tolerance
+        or args.max_start_angle > np.pi
+    ):
+        raise ValueError(
+            "--max-start-angle must be finite, no greater than pi, "
+            "and at least --orientation-tolerance"
         )
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
@@ -1565,12 +1663,19 @@ def _follow_loop(
         scales = None
 
     command = np.asarray(state, dtype=float).copy()
-    startup_pose = chain.pose(state)
-    held_orientation = _quaternion_from_rotation(startup_pose[:3, :3])
+
+    # 시작 정렬이 완료되었는지 판단하기 위한 위치 기준점이다.
     marker_origin = None
     tcp_origin = None
+
+    # 마지막으로 IK에 제출한 위치와 방향을 각각 저장한다.
+    # 마커 변화가 충분히 클 때만 새 IK를 요청하기 위해 사용한다.
     last_submitted_position = None
+    last_submitted_orientation = None
+
+    # 각 IK 결과가 어떤 최종 마커 목표를 기준으로 계산됐는지 저장한다.
     requested_positions: list[np.ndarray] = []
+    requested_orientations: list[tuple[float, float, float, float]] = []
     # 처음에는 RViz 서비스에서 읽은 파란 마커를 사용한다.
     # 이후 사용자가 드래그하면 최신 피드백으로 교체한다.
     target = startup_marker_target
@@ -1581,7 +1686,15 @@ def _follow_loop(
     lag_worst = 0.0
     lag_last = 0.0
     within_tolerance = 0
+    # 실험 중 방향 오차의 합계·최대·마지막 값을 rad 단위로 저장한다.
+    orientation_lag_total = 0.0
+    orientation_lag_worst = 0.0
+    orientation_lag_last = 0.0
+
+    # 방향 오차가 허용범위 안에 있었던 제어주기 수를 저장한다.
+    orientation_within_tolerance = 0
     speed_limited = 0
+    angular_speed_limited = 0
     joint_error_last = 0.0
     # OpenArm의 관절 개수를 가져온다. 오른팔은 J1~J7이므로 7이다.
     joint_count = len(group.joints)
@@ -1640,14 +1753,25 @@ def _follow_loop(
                 )
             if target is not None:
                                 # 현재 실제 관절각으로 실제 TCP 위치를 계산한다.
+                # 실제 관절각으로 현재 TCP의 전체 자세를 계산한다.
                 here = chain.pose(state)
                 current_position = here[:3, 3].copy()
+                current_orientation = _quaternion_from_rotation(
+                    here[:3, :3]
+                )
 
-                # RViz 파란 손끝 마커의 현재 위치를 가져온다.
+                # RViz 마커의 위치와 방향을 모두 가져온다.
                 marker_position = np.asarray(
                     target.position,
                     dtype=float,
                 )
+                marker_orientation = tuple(
+                    float(value)
+                    for value in _normalize_quaternion(target.orientation)
+                )
+
+                # 시작 정렬과 일반 추종 모두 RViz 마커 방향을 목표로 사용한다.
+                desired_orientation = marker_orientation
 
                 # marker_origin이 아직 없으면 시작 위치 정렬 단계이다.
                 if marker_origin is None:
@@ -1661,7 +1785,11 @@ def _follow_loop(
                             marker_position - current_position
                         )
                     )
-
+                    # 실제 TCP와 RViz 마커 사이의 방향 차이를 계산한다.
+                    startup_angle = _quaternion_angular_distance(
+                        current_orientation,
+                        desired_orientation,
+                    )
                     # 시작 마커가 너무 멀면 오래되거나 잘못된 목표일 수 있다.
                     # 이때는 실물을 움직이지 않고 Pose Follow를 중단한다.
                     if startup_distance > args.max_start_distance:
@@ -1672,7 +1800,15 @@ def _follow_loop(
                             f"{args.max_start_distance:.3f} m; "
                             "move the RViz marker to Current before retrying"
                         )
-
+                    # 시작 방향이 너무 다르면 갑작스러운 손목 회전을 막는다.
+                    if startup_angle > args.max_start_angle:
+                        raise ValueError(
+                            "startup TCP-to-marker orientation difference "
+                            f"{startup_angle:.3f} rad exceeds "
+                            f"--max-start-angle "
+                            f"{args.max_start_angle:.3f} rad; "
+                            "move the RViz marker to Current before retrying"
+                        )
                     # 중력보상을 충분히 적용했고 실제 TCP가 파란 마커의
                     # 오차 허용범위 안에 들어왔을 때만 정렬 완료로 처리한다.
                     startup_settle_elapsed = cycle - started
@@ -1680,6 +1816,8 @@ def _follow_loop(
                         startup_settle_elapsed
                         >= args.startup_settle_sec
                         and startup_distance <= args.tolerance
+                        and startup_angle
+                        <= args.orientation_tolerance
                     ):
                         # 두 시작점을 동일한 파란 마커 위치로 저장한다.
                         # 따라서 이후 최종 목표도 파란 마커의 절대 위치와 같다.
@@ -1688,7 +1826,7 @@ def _follow_loop(
 
                         # 정렬 완료 지점에서 IK 목표를 한 번 새로 계산한다.
                         last_submitted_position = None
-
+                        last_submitted_orientation = None
                         print(
                             "startup alignment complete; "
                             "drag the marker in RViz"
@@ -1720,35 +1858,59 @@ def _follow_loop(
                         * args.max_ik_step
                         / distance_to_marker
                     )
-
+                # 현재 TCP 방향에서 RViz 목표 방향으로 최대 약 5.7도 앞의
+                # quaternion을 만들어 IK의 회전 중간목표로 사용한다.
+                ik_orientation, orientation_distance = (
+                    _step_quaternion_towards(
+                        current_orientation,
+                        desired_orientation,
+                        args.max_ik_angular_step,
+                    )
+                )
                 # 이전에 제출한 중간 목표와 충분히 달라졌을 때만
                 # 새로운 IK 계산을 요청한다.
-                if (
+                # 위치 또는 방향 중 하나라도 충분히 변하면 새 IK를 요청한다.
+                position_changed = (
                     last_submitted_position is None
                     or np.linalg.norm(
                         ik_position - last_submitted_position
                     )
                     >= args.tolerance
-                ):
+                )
+                orientation_changed = (
+                    last_submitted_orientation is None
+                    or _quaternion_angular_distance(
+                        last_submitted_orientation,
+                        ik_orientation,
+                    )
+                    >= args.orientation_tolerance
+                )
+
+                if position_changed or orientation_changed:
                     ik_worker.submit(
                         Pose(
                             tuple(ik_position),
-                            held_orientation,
+                            ik_orientation,
                             "world",
                         ),
                         state,
                     )
 
-                    # 다음 IK 요청과 비교하기 위해 중간 목표를 저장한다.
+                    # 다음 IK 요청과 비교할 위치·방향 중간목표를 저장한다.
                     last_submitted_position = ik_position.copy()
+                    last_submitted_orientation = ik_orientation
 
-                    # TCP 오차 보고는 중간 목표가 아니라 사용자가 지정한
-                    # 실제 마커 최종 위치를 기준으로 유지한다.
+                    # IK 결과와 최종 마커 목표의 오차를 연결하기 위해 저장한다.
                     requested_positions.append(desired_position.copy())
+                    requested_orientations.append(desired_orientation)
             status = ik_worker.snapshot()
             if status.target is not None and status.target_sequence is not None:
                 target_joints = status.target
                 accepted_position = requested_positions[
+                    status.target_sequence - 1
+                ]
+                # 같은 IK 요청에 대응하는 최종 RViz 마커 방향을 가져온다.
+                accepted_orientation = requested_orientations[
                     status.target_sequence - 1
                 ]
                 here = chain.pose(state)
@@ -1759,6 +1921,28 @@ def _follow_loop(
                 lag_worst = max(lag_worst, lag)
                 lag_last = lag
                 within_tolerance += int(lag <= args.tolerance)
+                # 현재 실제 TCP 방향을 quaternion으로 변환한다.
+                here_orientation = _quaternion_from_rotation(
+                    here[:3, :3]
+                )
+
+                # RViz 최종 목표 방향과 실제 TCP 방향 사이의 회전각을 계산한다.
+                orientation_lag = _quaternion_angular_distance(
+                    accepted_orientation,
+                    here_orientation,
+                )
+
+                # 매 제어주기의 방향 오차를 누적하고 최대값을 갱신한다.
+                orientation_lag_total += orientation_lag
+                orientation_lag_worst = max(
+                    orientation_lag_worst,
+                    orientation_lag,
+                )
+                orientation_lag_last = orientation_lag
+                orientation_within_tolerance += int(
+                    orientation_lag
+                    <= args.orientation_tolerance
+                )
                 # 역기구학이 만든 목표 관절각과 실제 측정 관절각의 차이를
                 # J1~J7별 절댓값으로 계산한다.
                 joint_error_by_joint = np.abs(target_joints - state)
@@ -1788,20 +1972,72 @@ def _follow_loop(
                 candidate = command + (
                     args.kp * (target_joints - state) * elapsed
                 )
-                command_tcp = chain.pose(command)[:3, 3]
-                target_tcp = chain.pose(candidate)[:3, 3]
+                # 현재 명령 자세와 새 후보 명령 자세를 순기구학으로 계산한다.
+                command_pose = chain.pose(command)
+                candidate_pose = chain.pose(candidate)
+
+                # 두 명령 자세 사이의 직선 이동거리를 계산한다.
                 tcp_distance = float(
-                    np.linalg.norm(target_tcp - command_tcp)
+                    np.linalg.norm(
+                        candidate_pose[:3, 3]
+                        - command_pose[:3, 3]
+                    )
                 )
-                # The published point is one nominal controller period ahead.
-                # Keeping its spatial increment within that period makes the
-                # stream safe even when joint feedback arrives late.
-                permitted = args.max_tcp_speed * period
-                fraction = 1.0
-                if tcp_distance > permitted and tcp_distance > 0.0:
-                    fraction = permitted / tcp_distance
+
+                # 두 명령 자세 사이의 회전 이동각을 계산한다.
+                command_orientation = _quaternion_from_rotation(
+                    command_pose[:3, :3]
+                )
+                candidate_orientation = _quaternion_from_rotation(
+                    candidate_pose[:3, :3]
+                )
+                command_angular_distance = (
+                    _quaternion_angular_distance(
+                        command_orientation,
+                        candidate_orientation,
+                    )
+                )
+
+                # 100 Hz의 한 제어주기 동안 허용되는 최대 직선거리와
+                # 최대 회전각을 각각 계산한다.
+                permitted_distance = args.max_tcp_speed * period
+                permitted_angle = (
+                    args.max_tcp_angular_speed * period
+                )
+
+                linear_fraction = 1.0
+                angular_fraction = 1.0
+
+                # 후보 명령의 직선 이동이 너무 크면 이동 비율을 줄인다.
+                if (
+                    tcp_distance > permitted_distance
+                    and tcp_distance > 0.0
+                ):
+                    linear_fraction = (
+                        permitted_distance / tcp_distance
+                    )
                     speed_limited += 1
-                candidate = command + fraction * (candidate - command)
+
+                # 후보 명령의 회전 이동이 너무 크면 이동 비율을 줄인다.
+                if (
+                    command_angular_distance > permitted_angle
+                    and command_angular_distance > 0.0
+                ):
+                    angular_fraction = (
+                        permitted_angle
+                        / command_angular_distance
+                    )
+                    angular_speed_limited += 1
+
+                # 위치와 회전 중 더 강하게 제한된 비율을 전체 관절 명령에
+                # 적용하여 두 제한을 동시에 만족시키도록 한다.
+                fraction = min(
+                    linear_fraction,
+                    angular_fraction,
+                )
+                candidate = command + fraction * (
+                    candidate - command
+                )
                 command, limited = gate.follow(candidate, state, elapsed)
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
@@ -1851,8 +2087,29 @@ def _follow_loop(
                 f"{within_tolerance} of {samples} samples "
                 f"({within_tolerance / samples * 100:.1f}%)"
             )
+            # 사람이 이해하기 쉽도록 rad 단위 방향 오차를 deg로 바꿔 출력한다.
+            print(
+                "  TCP orientation trailed the marker by "
+                f"{np.degrees(orientation_lag_total / samples):.1f} deg "
+                "on average, "
+                f"{np.degrees(orientation_lag_worst):.1f} deg at worst"
+            )
+            print(
+                "  last TCP orientation error: "
+                f"{np.degrees(orientation_lag_last):.1f} deg"
+            )
+            print(
+                "  within "
+                f"{np.degrees(args.orientation_tolerance):.1f} deg on "
+                f"{orientation_within_tolerance} of {samples} samples "
+                f"({orientation_within_tolerance / samples * 100:.1f}%)"
+            )
             print(
                 f"  Cartesian speed limit on {speed_limited} of {samples} samples"
+            )
+            print(
+                "  Cartesian angular speed limit on "
+                f"{angular_speed_limited} of {samples} samples"
             )
             print(f"  last maximum joint error: {joint_error_last:.4f} rad")
 
@@ -1937,6 +2194,99 @@ def _rotation_from_quaternion(orientation) -> np.ndarray:
             [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
             [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
         ]
+    )
+
+
+def _normalize_quaternion(orientation) -> np.ndarray:
+    """Quaternion을 길이가 1인 정상적인 quaternion으로 만든다."""
+    quaternion = np.asarray(orientation, dtype=float)
+
+    # Quaternion은 반드시 x, y, z, w 네 개의 값이어야 한다.
+    if quaternion.shape != (4,):
+        raise ValueError("orientation quaternion must contain four values")
+
+    # nan이나 inf가 포함된 방향은 회전 계산에 사용할 수 없다.
+    if not np.isfinite(quaternion).all():
+        raise ValueError("orientation quaternion must be finite")
+
+    length = float(np.linalg.norm(quaternion))
+
+    # 길이가 0인 quaternion은 어떤 방향도 나타내지 못한다.
+    if length <= 1e-12:
+        raise ValueError("orientation quaternion must not have zero length")
+
+    return quaternion / length
+
+
+def _quaternion_angular_distance(first, second) -> float:
+    """두 quaternion 사이의 가장 짧은 회전각을 rad 단위로 반환한다."""
+    first_quaternion = _normalize_quaternion(first)
+    second_quaternion = _normalize_quaternion(second)
+
+    # q와 -q는 같은 방향을 나타내므로 내적의 절댓값을 사용한다.
+    cosine_half_angle = abs(
+        float(np.dot(first_quaternion, second_quaternion))
+    )
+    cosine_half_angle = float(
+        np.clip(cosine_half_angle, 0.0, 1.0)
+    )
+
+    # Quaternion 내적은 회전각의 절반에 대한 cos 값이다.
+    return 2.0 * float(np.arccos(cosine_half_angle))
+
+
+def _step_quaternion_towards(
+    current,
+    goal,
+    max_step_rad: float,
+) -> tuple[tuple[float, float, float, float], float]:
+    """현재 방향에서 목표 방향으로 최대 max_step_rad만큼 이동한다."""
+    current_quaternion = _normalize_quaternion(current)
+    goal_quaternion = _normalize_quaternion(goal)
+
+    dot = float(np.dot(current_quaternion, goal_quaternion))
+
+    # q와 -q는 같은 방향이다.
+    # 내적이 음수이면 목표 quaternion의 부호를 바꿔 짧은 경로를 선택한다.
+    if dot < 0.0:
+        goal_quaternion = -goal_quaternion
+        dot = -dot
+
+    dot = float(np.clip(dot, 0.0, 1.0))
+    angular_distance = 2.0 * float(np.arccos(dot))
+
+    # 목표가 최대 회전 간격 안에 있으면 목표 방향을 그대로 반환한다.
+    if angular_distance <= max_step_rad:
+        return (
+            tuple(float(value) for value in goal_quaternion),
+            angular_distance,
+        )
+
+    # 전체 회전 중 이번 중간목표까지 진행할 비율을 계산한다.
+    fraction = max_step_rad / angular_distance
+    half_angle = float(np.arccos(dot))
+    sine_half_angle = float(np.sin(half_angle))
+
+    # 두 방향이 거의 같으면 수치적으로 안전한 선형 보간을 사용한다.
+    if abs(sine_half_angle) <= 1e-12:
+        stepped = (
+            current_quaternion
+            + fraction * (goal_quaternion - current_quaternion)
+        )
+    else:
+        # SLERP: quaternion 구면 위의 가장 짧은 회전 경로를 따라간다.
+        current_weight = np.sin((1.0 - fraction) * half_angle)
+        goal_weight = np.sin(fraction * half_angle)
+        stepped = (
+            current_weight * current_quaternion
+            + goal_weight * goal_quaternion
+        ) / sine_half_angle
+
+    stepped = _normalize_quaternion(stepped)
+
+    return (
+        tuple(float(value) for value in stepped),
+        angular_distance,
     )
 
 
