@@ -12,6 +12,10 @@ merge the two distribution branches wholesale.
 The first complete profile is `openarm_tesollo`. RH56F1 and the simple gripper
 currently provide static component contracts only.
 
+이 저장소의 기준 개발 브랜치는 `jazzy`입니다. 개발 PC에서 수정하고 OpenArm
+컴퓨터에서는 배포와 실물 테스트만 수행하는 절차는
+[OpenArm 개발·실물 테스트 워크플로](docs/openarm-test-workflow.md)를 따르십시오.
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
