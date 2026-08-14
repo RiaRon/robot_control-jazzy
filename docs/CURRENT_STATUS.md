@@ -12,7 +12,7 @@
 - 개발 기준 저장소: `RiaRon/robot_control-jazzy`
 - 개발 PC 작업 폴더: `/home/cbj4/robot_control-jazzy`
 - 기준 브랜치: `jazzy`
-- 2026-08-14 기준 `jazzy` 커밋: `6fb9911`
+- 2026-08-14 기능 작업 기준 커밋: `6fb9911` (이 인계 문서 추가 직전)
 - 개발 PC의 `origin`: `https://github.com/RiaRon/robot_control-jazzy.git`
 - OpenArm 컴퓨터는 배포, 실물 실행, 측정 전용이다.
 - `RiaRon/robot_control`은 선배 저장소를 fork한 별도 저장소이며 현재 작업 대상이
