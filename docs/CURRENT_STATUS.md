@@ -10,11 +10,11 @@
 - 저장소: `RiaRon/robot_control-jazzy`
 - 개발 PC: `/home/cbj4/robot_control-jazzy`
 - 안정 브랜치: `jazzy`
-- 이번 기준 `jazzy`: `9262b0f`
-- 진행 브랜치: `feature/pose-follow-lag-diagnostics`
-- 기능 커밋: `01cd476`
+- 이번 기준 `jazzy`: `6b4b51c`
+- 병합된 기능 커밋: `4e39f3d`
+- 병합된 상태 커밋: `6b4b51c`
 - Pull Request:
-  [#9](https://github.com/RiaRon/robot_control-jazzy/pull/9)
+  [#9](https://github.com/RiaRon/robot_control-jazzy/pull/9) (merged)
 - OpenArm 컴퓨터: `user-NUC14SRK-B`
 - OpenArm 저장소: `/home/user/robot_control-jazzy`
 - HDGP: `/home/user/rl_ws/hdgp`
@@ -96,9 +96,9 @@ J4 지연의 소프트웨어·실물 기여를 구분할 수 있다. 기존
 
 ## 현재 중단 지점
 
-- PR #9가 `jazzy` 대상으로 열려 있다.
-- 코드, 테스트, CLI 문서, Work 인계와 이 상태 갱신을 PR #9에 포함한다.
-- 검증 후 PR #9를 병합하고 로컬 `jazzy`를 원격과 동기화한다.
+- PR #9의 코드, 테스트, CLI 문서, Work 인계와 상태 문서가 `jazzy`에
+  rebase 병합됐다.
+- 개발 PC의 로컬·원격 `jazzy`는 `6b4b51c`로 동기화됐다.
 - 다음 실물 단계는 Work에서 최신 `jazzy` 배포 후 동일한 `kp=2.0`
   기준선을 새 JSON으로 한 번 수집하는 것이다.
 
