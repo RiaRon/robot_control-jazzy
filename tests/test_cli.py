@@ -1,3 +1,4 @@
+import json
 import sys
 
 import numpy as np
@@ -271,6 +272,84 @@ def test_pose_show_reports_every_executable_group_offline(capsys):
     output = capsys.readouterr().out
     assert "openarm_right_arm" in output
     assert "right_joint_trajectory_controller" in output
+
+
+class ShowBackend:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class ShowArm:
+    def __init__(self, *_args, **_kwargs):
+        from robot_control.ros_adapter import Pose
+
+        self._Pose = Pose
+
+    def read_state(self):
+        return np.arange(7, dtype=float) / 10
+
+    def read_pose(self):
+        return self._Pose(
+            (0.1, -0.2, 0.3),
+            (0.0, 0.0, 0.0, 1.0),
+            "world",
+        )
+
+
+def test_pose_show_writes_a_complete_json_snapshot(monkeypatch, tmp_path, capsys):
+    from robot_control import ros_adapter
+
+    backend = ShowBackend()
+    monkeypatch.setattr(ros_adapter, "make_backend", lambda: backend)
+    monkeypatch.setattr(ros_adapter, "RosAdapter", ShowArm)
+    output = tmp_path / "snapshots" / "right.json"
+
+    assert main(["pose", "show", *RIGHT_ARM, "--output", str(output)]) == 0
+
+    payload = json.loads(output.read_text())
+    assert payload["schema_version"] == 1
+    assert payload["kind"] == "pose_snapshot"
+    assert payload["profile"] == "openarm_tesollo"
+    assert len(payload["groups"]) == 1
+    group = payload["groups"][0]
+    assert group["name"] == "openarm_right_arm"
+    assert group["joint_names"] == [f"r_aj_{index}" for index in range(1, 8)]
+    assert group["joint_positions_rad"] == pytest.approx(
+        [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    )
+    assert group["tcp"] == {
+        "frame_id": "world",
+        "tip_link": "openarm_right_hand_tcp",
+        "xyz_m": [0.1, -0.2, 0.3],
+        "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "rpy_rad": [0.0, 0.0, 0.0],
+    }
+    assert backend.closed
+    screen = capsys.readouterr().out
+    assert "openarm_right_arm: +0.0000 +0.1000" in screen
+    assert f"wrote pose snapshot: {output}" in screen
+
+
+def test_pose_show_read_failure_does_not_replace_output(monkeypatch, tmp_path):
+    from robot_control import ros_adapter
+
+    class FailingArm(ShowArm):
+        def read_state(self):
+            raise ros_adapter.AdapterUnavailable("joint states timed out")
+
+    backend = ShowBackend()
+    monkeypatch.setattr(ros_adapter, "make_backend", lambda: backend)
+    monkeypatch.setattr(ros_adapter, "RosAdapter", FailingArm)
+    output = tmp_path / "right.json"
+    output.write_text("previous complete snapshot\n")
+
+    assert main(["pose", "show", *RIGHT_ARM, "--output", str(output)]) == 2
+
+    assert output.read_text() == "previous complete snapshot\n"
+    assert backend.closed
 
 
 class StiffArm:

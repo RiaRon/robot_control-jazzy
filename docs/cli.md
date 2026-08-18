@@ -219,6 +219,7 @@ group, its end-effector pose from `/compute_fk`.
 | --- | --- | --- |
 | `--profile` | `openarm_tesollo` | Built-in profile to load |
 | `--group` | all executable groups | Restrict the report to one group |
+| `--output` | — | Atomically write the measured joints and TCP pose as JSON |
 
 Reading state is not publishing, so `show` needs no `--execute`. It does need a
 running stack.
@@ -226,6 +227,20 @@ running stack.
 ```bash
 robotctl pose show --group openarm_right_arm
 ```
+
+To keep a small pose snapshot for transfer to another computer, add an output
+path:
+
+```bash
+robotctl pose show --group openarm_right_arm --output right-pose.json
+```
+
+The JSON records the profile and every selected group, including canonical
+joint names and positions in radians. Groups with a MoveIt planning group also
+record the TCP frame and tip link, XYZ in metres, XYZW quaternion, and RPY in
+radians. The normal screen report is unchanged. The file is replaced
+atomically only after every requested ROS read succeeds, so a failed read does
+not leave a partial snapshot or overwrite an earlier one.
 
 ```text
 openarm_right_arm: controller=right_joint_trajectory_controller planning_group=right_arm
@@ -236,7 +251,8 @@ openarm_right_arm: openarm_right_hand_tcp xyz [+0.0000 -0.1535 +0.0819] rpy [-3.
 The first line is static profile data and is printed even with no robot
 running; the command then exits `2` if it cannot read live state.
 
-**Exit codes:** `0` read; `2` no ROS, no running stack, or unknown group.
+**Exit codes:** `0` read (and, when requested, written); `2` no ROS, no running
+stack, unknown group, or output error.
 
 ## `robotctl pose joints`
 
