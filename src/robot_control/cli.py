@@ -659,6 +659,15 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         ),
     )
 
+    follow.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "write a JSON trace that separates marker, IK, command, and "
+            "measured tracking lag"
+        ),
+    )
+
     follow.add_argument("--execute", action="store_true")
 
     rviz = stages.add_parser("rviz", help="launch the MoveIt stack with RViz")
@@ -1577,6 +1586,10 @@ def _pose_follow(args, profile) -> int:
     _check_scales(_scale_vector(args.gravity, group), group)
     if args.seconds <= 0:
         raise ValueError("--seconds must be positive")
+    if args.output is not None and not args.execute:
+        raise ValueError(
+            "--output records a pose follow run, so it needs --execute"
+        )
     # These legacy flags remain accepted while the MoveIt-target follower uses
     # kp as its measured-joint outer-loop gain. Constructing the old controller
     # here retains the established finite/range validation for all four values.
@@ -1690,7 +1703,7 @@ def _pose_follow(args, profile) -> int:
         ) as ik_adapter:
             worker = LatestIkWorker(ik_adapter.solve_ik)
             try:
-                _follow_loop(
+                diagnostics = _follow_loop(
                     adapter,
                     chain,
                     gate,
@@ -1703,6 +1716,17 @@ def _pose_follow(args, profile) -> int:
                 )
             finally:
                 worker.close()
+    if args.output is not None:
+        _write_json_atomic(
+            args.output,
+            {
+                "schema_version": 1,
+                "kind": "pose_follow_diagnostics",
+                "profile": profile.name,
+                **diagnostics,
+            },
+        )
+        print(f"wrote pose follow diagnostics: {args.output}")
     return 0
 
 
@@ -1716,7 +1740,7 @@ def _follow_loop(
     args,
     ik_worker,
     startup_marker_target,
-) -> None:
+) -> dict:
     from .ros_adapter import Pose
 
     scales = None if args.gravity is None else _scale_vector(args.gravity, group)
@@ -1737,6 +1761,7 @@ def _follow_loop(
     # 각 IK 결과가 어떤 최종 마커 목표를 기준으로 계산됐는지 저장한다.
     requested_positions: list[np.ndarray] = []
     requested_orientations: list[tuple[float, float, float, float]] = []
+
     # 처음에는 RViz 서비스에서 읽은 파란 마커를 사용한다.
     # 이후 사용자가 드래그하면 최신 피드백으로 교체한다.
     target = startup_marker_target
@@ -1747,6 +1772,7 @@ def _follow_loop(
     lag_worst = 0.0
     lag_last = 0.0
     within_tolerance = 0
+    live_within_tolerance = 0
     # 실험 중 방향 오차의 합계·최대·마지막 값을 rad 단위로 저장한다.
     orientation_lag_total = 0.0
     orientation_lag_worst = 0.0
@@ -1754,9 +1780,37 @@ def _follow_loop(
 
     # 방향 오차가 허용범위 안에 있었던 제어주기 수를 저장한다.
     orientation_within_tolerance = 0
+    live_orientation_within_tolerance = 0
     speed_limited = 0
     angular_speed_limited = 0
     joint_error_last = 0.0
+
+    # The old headline error is tied to the marker snapshot that produced the
+    # currently accepted IK result. Keep it for baseline comparisons, but also
+    # record the live marker and every downstream layer so IK latency, servo
+    # backlog, and actuator tracking are no longer folded into one number.
+    component_names = (
+        "live_marker_to_measured",
+        "accepted_marker_to_measured",
+        "marker_update_staleness",
+        "accepted_marker_to_ik_target",
+        "ik_target_to_command",
+        "command_to_measured",
+    )
+    position_components = {
+        name: {"total": 0.0, "worst": 0.0, "last": 0.0}
+        for name in component_names
+    }
+    orientation_components = {
+        name: {"total": 0.0, "worst": 0.0, "last": 0.0}
+        for name in component_names
+    }
+
+    # A bounded JSON trace is small at 100 Hz (roughly 3,000 records for the
+    # 30-second field test) and preserves transient IK branch changes that a
+    # mean/worst/last summary cannot explain.
+    trace: list[dict] = []
+
     # OpenArm의 관절 개수를 가져온다. 오른팔은 J1~J7이므로 7이다.
     joint_count = len(group.joints)
 
@@ -1769,6 +1823,16 @@ def _follow_loop(
 
     # 가장 마지막 제어주기의 관절별 오차를 저장한다.
     joint_error_last_by_joint = np.zeros(joint_count, dtype=float)
+
+    # Split the IK-target-to-measured joint error at the command boundary. The
+    # first half diagnoses controller/cap backlog; the second diagnoses how far
+    # the physical joint trails the command it was actually sent.
+    joint_target_to_command_sum = np.zeros(joint_count, dtype=float)
+    joint_target_to_command_worst = np.zeros(joint_count, dtype=float)
+    joint_target_to_command_last = np.zeros(joint_count, dtype=float)
+    joint_command_to_measured_sum = np.zeros(joint_count, dtype=float)
+    joint_command_to_measured_worst = np.zeros(joint_count, dtype=float)
+    joint_command_to_measured_last = np.zeros(joint_count, dtype=float)
 
     # r_aj_4와 같은 관절 이름을 배열 번호로 바꾸기 위한 표를 만든다.
     # 예: {"r_aj_1": 0, "r_aj_4": 3}
@@ -1793,6 +1857,7 @@ def _follow_loop(
     started = time.monotonic()
     last_cycle = started
     deadline = started + args.seconds
+    termination = "completed"
     try:
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -1975,6 +2040,7 @@ def _follow_loop(
                     status.target_sequence - 1
                 ]
                 here = chain.pose(state)
+                ik_target_pose = chain.pose(target_joints)
                 lag = float(
                     np.linalg.norm(accepted_position - here[:3, 3])
                 )
@@ -2030,6 +2096,7 @@ def _follow_loop(
                 # command. Re-sending the IK target preserves that droop;
                 # advancing the command while measured joints still trail the
                 # target is the outer feedback loop that removes it.
+                active_command = command.copy()
                 candidate = command + (
                     args.kp * (target_joints - state) * elapsed
                 )
@@ -2068,6 +2135,8 @@ def _follow_loop(
 
                 linear_fraction = 1.0
                 angular_fraction = 1.0
+                linear_speed_limited = False
+                angular_speed_was_limited = False
 
                 # 후보 명령의 직선 이동이 너무 크면 이동 비율을 줄인다.
                 if (
@@ -2078,6 +2147,7 @@ def _follow_loop(
                         permitted_distance / tcp_distance
                     )
                     speed_limited += 1
+                    linear_speed_limited = True
 
                 # 후보 명령의 회전 이동이 너무 크면 이동 비율을 줄인다.
                 if (
@@ -2089,6 +2159,7 @@ def _follow_loop(
                         / command_angular_distance
                     )
                     angular_speed_limited += 1
+                    angular_speed_was_limited = True
 
                 # 위치와 회전 중 더 강하게 제한된 비율을 전체 관절 명령에
                 # 적용하여 두 제한을 동시에 만족시키도록 한다.
@@ -2113,11 +2184,203 @@ def _follow_loop(
                         joint_index = joint_index_by_name[joint_name]
                         counts[joint_index] += 1
 
+                # Measure against the command that was active when this state
+                # was sampled, not the next command sent below. That timing
+                # boundary keeps one cycle of intentional motion out of the
+                # physical tracking-lag measurement.
+                ik_target_orientation = _quaternion_from_rotation(
+                    ik_target_pose[:3, :3]
+                )
+
+                position_errors = {
+                    "live_marker_to_measured": float(
+                        np.linalg.norm(desired_position - here[:3, 3])
+                    ),
+                    "accepted_marker_to_measured": lag,
+                    "marker_update_staleness": float(
+                        np.linalg.norm(desired_position - accepted_position)
+                    ),
+                    "accepted_marker_to_ik_target": float(
+                        np.linalg.norm(
+                            accepted_position - ik_target_pose[:3, 3]
+                        )
+                    ),
+                    "ik_target_to_command": float(
+                        np.linalg.norm(
+                            ik_target_pose[:3, 3]
+                            - command_pose[:3, 3]
+                        )
+                    ),
+                    "command_to_measured": float(
+                        np.linalg.norm(
+                            command_pose[:3, 3] - here[:3, 3]
+                        )
+                    ),
+                }
+                orientation_errors = {
+                    "live_marker_to_measured": (
+                        _quaternion_angular_distance(
+                            desired_orientation,
+                            here_orientation,
+                        )
+                    ),
+                    "accepted_marker_to_measured": orientation_lag,
+                    "marker_update_staleness": (
+                        _quaternion_angular_distance(
+                            desired_orientation,
+                            accepted_orientation,
+                        )
+                    ),
+                    "accepted_marker_to_ik_target": (
+                        _quaternion_angular_distance(
+                            accepted_orientation,
+                            ik_target_orientation,
+                        )
+                    ),
+                    "ik_target_to_command": (
+                        _quaternion_angular_distance(
+                            ik_target_orientation,
+                            command_orientation,
+                        )
+                    ),
+                    "command_to_measured": (
+                        _quaternion_angular_distance(
+                            command_orientation,
+                            here_orientation,
+                        )
+                    ),
+                }
+                for name, value in position_errors.items():
+                    component = position_components[name]
+                    component["total"] += value
+                    component["worst"] = max(component["worst"], value)
+                    component["last"] = value
+                live_within_tolerance += int(
+                    position_errors["live_marker_to_measured"]
+                    <= args.tolerance
+                )
+                for name, value in orientation_errors.items():
+                    component = orientation_components[name]
+                    component["total"] += value
+                    component["worst"] = max(component["worst"], value)
+                    component["last"] = value
+                live_orientation_within_tolerance += int(
+                    orientation_errors["live_marker_to_measured"]
+                    <= args.orientation_tolerance
+                )
+
+                target_to_command = np.abs(
+                    target_joints - active_command
+                )
+                command_to_measured = np.abs(active_command - state)
+                joint_target_to_command_sum += target_to_command
+                joint_target_to_command_worst = np.maximum(
+                    joint_target_to_command_worst,
+                    target_to_command,
+                )
+                joint_target_to_command_last = target_to_command.copy()
+                joint_command_to_measured_sum += command_to_measured
+                joint_command_to_measured_worst = np.maximum(
+                    joint_command_to_measured_worst,
+                    command_to_measured,
+                )
+                joint_command_to_measured_last = command_to_measured.copy()
+
+                trace.append(
+                    {
+                        "elapsed_sec": float(cycle - started),
+                        "ik_sequence": int(status.target_sequence),
+                        "tcp_positions_m": {
+                            "live_marker": [
+                                float(value) for value in desired_position
+                            ],
+                            "accepted_marker": [
+                                float(value) for value in accepted_position
+                            ],
+                            "ik_target": [
+                                float(value)
+                                for value in ik_target_pose[:3, 3]
+                            ],
+                            "command": [
+                                float(value)
+                                for value in command_pose[:3, 3]
+                            ],
+                            "measured": [
+                                float(value) for value in here[:3, 3]
+                            ],
+                        },
+                        "tcp_orientations_xyzw": {
+                            "live_marker": [
+                                float(value)
+                                for value in desired_orientation
+                            ],
+                            "accepted_marker": [
+                                float(value)
+                                for value in accepted_orientation
+                            ],
+                            "ik_target": [
+                                float(value)
+                                for value in ik_target_orientation
+                            ],
+                            "command": [
+                                float(value)
+                                for value in command_orientation
+                            ],
+                            "measured": [
+                                float(value) for value in here_orientation
+                            ],
+                        },
+                        "position_error_m": position_errors,
+                        "orientation_error_rad": orientation_errors,
+                        "joint_positions_rad": {
+                            "ik_target": [
+                                float(value) for value in target_joints
+                            ],
+                            "command": [
+                                float(value) for value in active_command
+                            ],
+                            "next_command": [
+                                float(value) for value in command
+                            ],
+                            "measured": [
+                                float(value) for value in state
+                            ],
+                        },
+                        "joint_error_rad": {
+                            "ik_target_to_measured": [
+                                float(value)
+                                for value in joint_error_by_joint
+                            ],
+                            "ik_target_to_command": [
+                                float(value)
+                                for value in target_to_command
+                            ],
+                            "command_to_measured": [
+                                float(value)
+                                for value in command_to_measured
+                            ],
+                        },
+                        "limits": {
+                            "cartesian_speed": linear_speed_limited,
+                            "cartesian_angular_speed": (
+                                angular_speed_was_limited
+                            ),
+                            "joint": {
+                                name: list(joints)
+                                for name, joints in (
+                                    gate.last_follow_limits.items()
+                                )
+                            },
+                        },
+                    }
+                )
+
                 adapter.stream_positions(command)
 
                 samples += 1
             time.sleep(max(0.0, period - (time.monotonic() - cycle)))
     except KeyboardInterrupt:
+        termination = "interrupted"
         print("\ninterrupted")
     finally:
         # Stop streaming and release feedforward. Position control holds the
@@ -2148,6 +2411,27 @@ def _follow_loop(
                 f"{within_tolerance} of {samples} samples "
                 f"({within_tolerance / samples * 100:.1f}%)"
             )
+            live_position = position_components[
+                "live_marker_to_measured"
+            ]
+            print(
+                "  live marker to measured TCP: "
+                f"{live_position['total'] / samples * 1000:.1f} mm "
+                "on average, "
+                f"{live_position['worst'] * 1000:.1f} mm at worst, "
+                f"{live_position['last'] * 1000:.1f} mm last"
+            )
+            print("  mean position lag decomposition (norms are non-additive):")
+            for name in (
+                "marker_update_staleness",
+                "accepted_marker_to_ik_target",
+                "ik_target_to_command",
+                "command_to_measured",
+            ):
+                print(
+                    f"    {name}: "
+                    f"{position_components[name]['total'] / samples * 1000:.1f} mm"
+                )
             # 사람이 이해하기 쉽도록 rad 단위 방향 오차를 deg로 바꿔 출력한다.
             print(
                 "  TCP orientation trailed the marker by "
@@ -2200,8 +2484,154 @@ def _follow_loop(
                     f" {joint_clamp_counts['position_upper'][joint_index]:>6d}"
                 )
 
+            print("  per-joint lag decomposition:")
+            print(
+                "    joint     target-command mean/worst(rad)"
+                "  command-measured mean/worst(rad)"
+            )
+            for joint_index, joint_name in enumerate(group.joints):
+                print(
+                    f"    {joint_name:<9}"
+                    f" {joint_target_to_command_sum[joint_index] / samples:>9.4f}"
+                    f"/{joint_target_to_command_worst[joint_index]:<10.4f}"
+                    f" {joint_command_to_measured_sum[joint_index] / samples:>9.4f}"
+                    f"/{joint_command_to_measured_worst[joint_index]:<10.4f}"
+                )
+
         for note, count in sorted(notes.items()):
             print(f"  {note} clamped on {count} of {samples} samples")
+
+    sample_divisor = max(samples, 1)
+    position_summary = {
+        name: {
+            "mean": float(component["total"] / sample_divisor),
+            "worst": float(component["worst"]),
+            "last": float(component["last"]),
+        }
+        for name, component in position_components.items()
+    }
+    orientation_summary = {
+        name: {
+            "mean": float(component["total"] / sample_divisor),
+            "worst": float(component["worst"]),
+            "last": float(component["last"]),
+        }
+        for name, component in orientation_components.items()
+    }
+    per_joint = []
+    for joint_index, joint_name in enumerate(group.joints):
+        per_joint.append(
+            {
+                "name": joint_name,
+                "ik_target_to_measured_rad": {
+                    "mean": float(
+                        joint_error_sum_by_joint[joint_index]
+                        / sample_divisor
+                    ),
+                    "worst": float(
+                        joint_error_worst_by_joint[joint_index]
+                    ),
+                    "last": float(
+                        joint_error_last_by_joint[joint_index]
+                    ),
+                },
+                "ik_target_to_command_rad": {
+                    "mean": float(
+                        joint_target_to_command_sum[joint_index]
+                        / sample_divisor
+                    ),
+                    "worst": float(
+                        joint_target_to_command_worst[joint_index]
+                    ),
+                    "last": float(
+                        joint_target_to_command_last[joint_index]
+                    ),
+                },
+                "command_to_measured_rad": {
+                    "mean": float(
+                        joint_command_to_measured_sum[joint_index]
+                        / sample_divisor
+                    ),
+                    "worst": float(
+                        joint_command_to_measured_worst[joint_index]
+                    ),
+                    "last": float(
+                        joint_command_to_measured_last[joint_index]
+                    ),
+                },
+                "clamp_samples": {
+                    kind: int(counts[joint_index])
+                    for kind, counts in joint_clamp_counts.items()
+                },
+            }
+        )
+
+    return {
+        "group": group.name,
+        "joint_names": list(group.joints),
+        "settings": {
+            "requested_seconds": (
+                float(args.seconds) if np.isfinite(args.seconds) else None
+            ),
+            "unbounded_duration": not np.isfinite(args.seconds),
+            "gravity_scale": (
+                None
+                if scales is None
+                else [float(value) for value in scales]
+            ),
+            "kp_per_sec": float(args.kp),
+            "position_tolerance_m": float(args.tolerance),
+            "orientation_tolerance_rad": float(
+                args.orientation_tolerance
+            ),
+            "max_tcp_speed_m_s": float(args.max_tcp_speed),
+            "max_tcp_angular_speed_rad_s": float(
+                args.max_tcp_angular_speed
+            ),
+            "max_ik_step_m": float(args.max_ik_step),
+            "max_ik_angular_step_rad": float(
+                args.max_ik_angular_step
+            ),
+            "max_joint_lead_sec": LEAD_SEC,
+            "command_rate_hz": float(1.0 / period),
+        },
+        "result": {
+            "termination": termination,
+            "duration_sec": float(elapsed_total),
+            "cycles": int(cycles),
+            "samples": int(samples),
+            "actual_control_rate_hz": float(cycles / elapsed_total),
+            "joint_state_wait_mean_ms": float(
+                state_wait_total / max(cycles, 1) * 1000
+            ),
+            "ik": {
+                "submitted": int(status.submitted),
+                "succeeded": int(status.succeeded),
+                "failed": int(status.failed),
+                "superseded": int(status.superseded),
+            },
+            "position_error_m": position_summary,
+            "orientation_error_rad": orientation_summary,
+            "within_accepted_marker_position_tolerance_samples": int(
+                within_tolerance
+            ),
+            "within_live_marker_position_tolerance_samples": int(
+                live_within_tolerance
+            ),
+            "within_accepted_marker_orientation_tolerance_samples": int(
+                orientation_within_tolerance
+            ),
+            "within_live_marker_orientation_tolerance_samples": int(
+                live_orientation_within_tolerance
+            ),
+            "cartesian_speed_limited_samples": int(speed_limited),
+            "cartesian_angular_speed_limited_samples": int(
+                angular_speed_limited
+            ),
+            "per_joint": per_joint,
+        },
+        "trace": trace,
+    }
 
 
 def _quaternion_from_rotation(rotation) -> tuple[float, float, float, float]:

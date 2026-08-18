@@ -15,7 +15,7 @@ def test_walkthrough_uses_the_official_root_checkout():
     document = _document()
 
     assert "~/rl_ws/robot_control/.worktrees" not in document
-    assert "cd ~/rl_ws/robot_control" in document
+    assert "cd /home/user/robot_control-jazzy" in document
 
 
 def test_the_sixty_second_trial_is_bounded():
@@ -31,12 +31,26 @@ def test_the_sixty_second_trial_is_bounded():
     assert "--seconds inf" not in section.group("body")
 
 
-def test_walkthrough_says_follow_holds_orientation():
+def test_walkthrough_says_follow_tracks_orientation():
     document = _document()
 
-    assert "회전 링은 추종하지" in document
-    assert "축 화살표나 회전 링" not in document
-    assert "pose ee --from-marker" in document
+    assert "축 화살표와 회전 링을 모두 추종" in document
+    assert "회전 링은 추종하지" not in document
+    assert "--max-tcp-angular-speed" in document
+
+
+def test_walkthrough_records_layered_diagnostics():
+    document = _document()
+
+    for evidence in (
+        "--output /tmp/right-follow.json",
+        "live marker to measured TCP",
+        "marker_update_staleness",
+        "accepted_marker_to_ik_target",
+        "ik_target_to_command",
+        "command_to_measured",
+    ):
+        assert evidence in document
 
 
 def test_can_section_verifies_runtime_communication():

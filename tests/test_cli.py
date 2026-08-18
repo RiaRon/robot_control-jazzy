@@ -1483,6 +1483,158 @@ def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
     assert "IK requests" in output
 
 
+def test_pose_follow_writes_layered_json_diagnostics(
+    draggable,
+    tmp_path,
+    capsys,
+):
+    output = tmp_path / "follow" / "right.json"
+
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.3",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["schema_version"] == 1
+    assert payload["kind"] == "pose_follow_diagnostics"
+    assert payload["profile"] == "openarm_tesollo"
+    assert payload["group"] == "openarm_right_arm"
+    assert payload["settings"]["kp_per_sec"] == pytest.approx(2.0)
+    assert payload["settings"]["max_tcp_speed_m_s"] == pytest.approx(0.05)
+
+    result = payload["result"]
+    trace = payload["trace"]
+    assert result["termination"] == "completed"
+    assert result["samples"] == len(trace)
+    assert trace
+    assert (
+        result[
+            "within_accepted_marker_position_tolerance_samples"
+        ]
+        <= result["samples"]
+    )
+    assert (
+        result["within_live_marker_position_tolerance_samples"]
+        <= result["samples"]
+    )
+    assert set(result["position_error_m"]) == {
+        "live_marker_to_measured",
+        "accepted_marker_to_measured",
+        "marker_update_staleness",
+        "accepted_marker_to_ik_target",
+        "ik_target_to_command",
+        "command_to_measured",
+    }
+
+    for sample in trace:
+        positions = sample["tcp_positions_m"]
+        expected = np.linalg.norm(
+            np.asarray(positions["live_marker"])
+            - np.asarray(positions["measured"])
+        )
+        assert sample["position_error_m"][
+            "live_marker_to_measured"
+        ] == pytest.approx(expected)
+
+    # The perfect-tracking fake applies each command before the next state
+    # sample, so the active command and measurement must have no hardware lag.
+    assert result["position_error_m"]["command_to_measured"][
+        "worst"
+    ] == pytest.approx(0.0, abs=1e-12)
+    assert all(
+        joint["command_to_measured_rad"]["worst"]
+        == pytest.approx(0.0, abs=1e-12)
+        for joint in result["per_joint"]
+    )
+    assert "mean position lag decomposition" in capsys.readouterr().out
+
+
+def test_pose_follow_diagnostics_separate_physical_droop(
+    monkeypatch,
+    tmp_path,
+):
+    from robot_control import ros_adapter
+
+    chain = _servo_chain()
+    arm = DroopingDraggableArm(
+        target=_reachable_target(chain, np.zeros(7)),
+        target_after_anchor=_reachable_target(
+            chain,
+            np.full(7, 0.01),
+        ),
+    )
+    arm.DROOP = 0.003
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *args, **kwargs: arm,
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain",
+        lambda *args: chain,
+    )
+    output = tmp_path / "drooping.json"
+
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--execute",
+                "--seconds",
+                "0.5",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    result = json.loads(output.read_text())["result"]
+    assert result["position_error_m"]["command_to_measured"]["worst"] > 0.0
+    assert any(
+        joint["command_to_measured_rad"]["worst"] > 0.0
+        for joint in result["per_joint"]
+    )
+
+
+def test_pose_follow_output_requires_execute_and_preserves_existing_file(
+    no_ros,
+    tmp_path,
+):
+    output = tmp_path / "right.json"
+    output.write_text("previous complete run\n")
+
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--seconds",
+                "0.1",
+                "--output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert output.read_text() == "previous complete run\n"
+
+
 def test_pose_gravity_accepts_one_scale_per_joint(stiff, capsys):
     """The measured optima differ per joint, so one number is a compromise."""
     assert (
