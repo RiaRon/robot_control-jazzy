@@ -4,8 +4,10 @@ import argparse
 from collections.abc import Sequence
 import dataclasses
 import json
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 
 import numpy as np
@@ -410,6 +412,11 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     show = stages.add_parser("show", help="report the current pose")
     show.add_argument("--profile", default="openarm_tesollo")
     show.add_argument("--group")
+    show.add_argument(
+        "--output",
+        type=Path,
+        help="write the measured joints and end-effector pose as JSON",
+    )
 
     joints = stages.add_parser("joints", help="set a group by joint values")
     joints.add_argument("--profile", default="openarm_tesollo")
@@ -814,20 +821,74 @@ def _pose_show(args, profile) -> int:
     except AdapterUnavailable as error:
         print(f"unavailable: {error}")
         return UNUSABLE
+    snapshots = []
     try:
         for name, group in groups.items():
             adapter = RosAdapter(profile, name, execute=False, backend=backend)
             state = adapter.read_state()
             values = " ".join(f"{value:+.4f}" for value in state)
             print(f"{name}: {values}")
+            tcp = None
             if group.moveit_group is not None and group.tip_link is not None:
                 pose = adapter.read_pose()
                 xyz = " ".join(f"{value:+.4f}" for value in pose.position)
                 rpy = " ".join(f"{value:+.4f}" for value in pose.rpy)
                 print(f"{name}: {group.tip_link} xyz [{xyz}] rpy [{rpy}]")
+                tcp = {
+                    "frame_id": pose.frame_id,
+                    "tip_link": group.tip_link,
+                    "xyz_m": [float(value) for value in pose.position],
+                    "quaternion_xyzw": [
+                        float(value) for value in pose.orientation
+                    ],
+                    "rpy_rad": [float(value) for value in pose.rpy],
+                }
+            snapshots.append(
+                {
+                    "name": name,
+                    "joint_names": list(group.joints),
+                    "joint_positions_rad": [float(value) for value in state],
+                    "tcp": tcp,
+                }
+            )
     finally:
         backend.close()
+    if args.output is not None:
+        _write_json_atomic(
+            args.output,
+            {
+                "schema_version": 1,
+                "kind": "pose_snapshot",
+                "profile": profile.name,
+                "groups": snapshots,
+            },
+        )
+        print(f"wrote pose snapshot: {args.output}")
     return 0
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """Write one complete JSON object without exposing a partial destination."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, indent=2, sort_keys=True, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _ramp(

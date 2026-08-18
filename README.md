@@ -138,6 +138,8 @@ ID(송신 `0x01`~`0x07`, 수신 `0x11`~`0x17`, 그리퍼 `0x08`/`0x18`)로 주�
 
 ```bash
 robotctl pose show --group openarm_right_arm
+# 같은 읽기 결과를 작은 JSON 파일로 보관하려면:
+robotctl pose show --group openarm_right_arm --output right-pose.json
 ```
 
 ```text
@@ -148,6 +150,9 @@ openarm_right_arm: openarm_right_hand_tcp xyz [+0.0134 -0.1435 +0.0822] rpy [-3.
 
 읽기는 발행이 아니므로 `--execute`가 필요 없습니다. 관절값이 정확히 0이 아니라
 미세하게 떨리면 실물이고, 딱 `0.0000`이면 가짜 하드웨어입니다.
+
+`--output`은 모든 읽기가 성공한 뒤 프로필, 관절각, TCP XYZ·Quaternion·RPY를
+원자적으로 저장하므로 읽기 실패 시 불완전한 JSON을 남기지 않습니다.
 
 ## 4. 마커를 끌어서 그 자세로 보내기
 
