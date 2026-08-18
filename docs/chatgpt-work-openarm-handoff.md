@@ -1,51 +1,31 @@
-# ChatGPT Work 인계 — OpenArm 연구진행
+# ChatGPT Work 인계 — OpenArm 오른팔 `pose follow`
 
-아래 내용은 ChatGPT 계정의 `OpenArm 연구진행` Work가 OpenArm 컴퓨터 작업을
-이어가기 위한 인계 문서이다. Codex는 개발 PC에서 코드 수정·테스트·가짜
-하드웨어 검증을 담당하고, 이 Work는 OpenArm 컴퓨터의 배포·CAN·실물 검증과
-현장 안전 기록을 담당한다.
+작성일: 2026-08-18 (Asia/Seoul)
 
-## 저장소와 현재 코드
+이 문서는 ChatGPT 계정의 `OpenArm 연구진행` Work가 OpenArm 컴퓨터의
+배포·CAN·실물 검증을 이어가기 위한 현재 인계이다. Codex는 개발 PC에서 코드
+수정, 테스트, ROS 빌드와 가짜 하드웨어 검증만 담당한다.
 
-- 기준 저장소: `RiaRon/robot_control-jazzy`
-- 기준 브랜치: `jazzy`
-- 인계문 작성 직전 `jazzy`: `d55d2b3`
-- pose JSON 기능 커밋: `e168919`
-- 기능 PR: <https://github.com/RiaRon/robot_control-jazzy/pull/5>
-- OpenArm 가짜 검증 기록 PR: <https://github.com/RiaRon/robot_control-jazzy/pull/7>
-- OpenArm 컴퓨터 저장소: `/home/user/robot_control-jazzy`
-- OpenArm 컴퓨터 HDGP: `/home/user/rl_ws/hdgp`
+## 범위와 안전
 
-작업 시작 시 문서의 커밋을 그대로 가정하지 말고 실제 Git 상태를 확인한다.
+- 현재 실물 연구 대상은 오른팔 `openarm_right_arm`만이다.
+- 오른팔 CAN은 `can0`, 왼팔 CAN은 `can1`로 물리 확인됐다.
+- 실물 움직임은 매 작업에서 사용자가 명시 승인한 뒤에만 수행한다.
+- 오른팔 명령에는 항상 `--group openarm_right_arm`을 쓴다.
+- effort controller와 중력 보상은 오른팔만 사용한다.
+- 비상정지를 준비하고 작업 공간에서 사람·케이블·공구를 치운다.
+- rosbag, HDF5, MCAP, JSON trace와 영상 같은 실험 데이터는 Git에 올리지 않는다.
 
-```bash
-cd /home/user/robot_control-jazzy
-git status --short --branch
-git remote -v
-git fetch origin
-git switch jazzy
-git pull --ff-only origin jazzy
-git log -1 --oneline --decorate
+## OpenArm 컴퓨터 환경
+
+```text
+호스트: user-NUC14SRK-B
+저장소: /home/user/robot_control-jazzy
+HDGP: /home/user/rl_ws/hdgp
+ROS: ROS 2 Jazzy
 ```
 
-미커밋 변경이 있으면 pull이나 switch를 계속하지 말고 먼저 내용을 검토한다.
-
-## 완료된 개발·검증
-
-- `robotctl pose show --output <파일.json>`이 구현되어 `jazzy`에 병합됐다.
-- JSON에는 schema version, 프로필, 선택 그룹, canonical 관절 이름·위치와
-  TCP frame·tip link·XYZ·XYZW Quaternion·RPY가 기록된다.
-- 모든 ROS 읽기가 성공한 뒤에만 목적 파일을 원자적으로 교체한다. 읽기 실패 시
-  기존 JSON을 보존한다.
-- 개발 PC 전체 Python 테스트: `615 passed, 4 skipped`.
-- 개발 PC ROS 2 Jazzy 빌드: 11개 패키지 성공.
-- 개발 PC 가짜 하드웨어 JSON 통합 검증 성공.
-- OpenArm 컴퓨터에서도 가짜 하드웨어 JSON 생성과 파싱에 성공했다.
-
-## OpenArm 컴퓨터에서 확인된 환경
-
-기본 asset 경로와 실제 HDGP 위치가 다르므로 ROS/CLI를 사용하는 각 터미널에서
-다음을 먼저 설정한다.
+각 터미널에서 다음 환경을 사용한다.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -54,56 +34,121 @@ export PYTHONPATH="/home/user/robot_control-jazzy/src:/home/user/robot_control-j
 export HDGP_ROOT=/home/user/rl_ws/hdgp
 ```
 
-가짜 하드웨어 오른팔 결과:
+## 확인 완료 상태
 
-- 관절 `r_aj_1`~`r_aj_7`: 모두 `0.0 rad`
-- TCP XYZ: `[0.0, -0.1534977369405261, 0.08189955003653106] m`
-- JSON: `/tmp/right-pose-fake.json`
-- `python3 -m json.tool /tmp/right-pose-fake.json` 파싱 성공
+- CAN `can0`과 `can1`: `UP`, `ERROR-ACTIVE`, CAN FD 사용
+- bitrate 1 Mbit/s, data bitrate 5 Mbit/s, tx/rx error counter 0
+- 오른팔 실물 관절 상태, canonical 변환, FK와 자세 JSON 저장·파싱 정상
+- 오른팔 `pose follow` 실제 제어주기 약 99.1 Hz
+- 두 실물 시험의 MoveIt IK 실패 0회
+- 중력 보상 기준값: 오른팔 전 관절 `1.0`
 
-CAN과 실물 모터는 이 검증에 사용하지 않았다.
+두 번째 30초 시험은 다음 기준선이다.
 
-## 아직 하지 않은 일
+```text
+TCP position error: mean 12.0 mm, worst 63.3 mm, last 1.4 mm
+TCP orientation error: mean 1.1 deg, worst 3.6 deg, last 0.4 deg
+Cartesian speed limit: 1025 / 2866 samples (35.8%)
+last maximum joint error: 0.0063 rad
+all joint velocity/lead/position clamps: 0
+```
 
-- 실물 OpenArm의 JSON 자세 읽기
-- 현재 CAN FD 링크 상태 확인
-- 오른팔·왼팔의 물리적 CAN 인터페이스 매핑 확인
-- 실물 움직임 명령
+J4가 이동 중 가장 크게 뒤처졌다.
 
-`pose show` 자체는 읽기 전용이지만 `--real` 브링업은 하드웨어와 컨트롤러를
-활성화한다. 따라서 읽기 작업이라도 CAN 매핑과 현장 안전 준비 없이 실물
-브링업을 실행하지 않는다.
+```text
+r_aj_4: mean 0.0178 rad, worst 0.1921 rad, last 0.0063 rad
+```
 
-## Work에서 다음에 할 일
+첫 시험의 J3/J5 약 0.98 rad 순간 오차는 두 번째 시험에서 재현되지 않았다.
+현재는 결함으로 단정하지 않고 trace에서 IK 해와 명령 경계를 확인한다.
 
-1. 가짜 브링업이 남아 있으면 `Ctrl+C`로 종료하고 ROS 노드가 남지 않았는지
-   확인한다.
-2. 다음 읽기 전용 명령의 전체 출력을 기록한다.
+## Codex 분석과 변경
 
-   ```bash
-   ip -br link show type can
-   ip -details link show can0
-   ip -details link show can1
-   ```
+기존 `trailed the marker by` 값은 실시간 마커가 아니라 현재 채택된 IK 요청에
+연결된 마커 스냅샷과 실측 TCP의 거리였다. 빠르게 드래그하면 IK 요청이 처리되는
+동안 최신 마커와 차이가 날 수 있으므로 이동 중 전체 지연을 완전히 분리하지
+못했다.
 
-3. 케이블을 물리적으로 따라 오른팔과 왼팔이 각각 어느 인터페이스인지 확인한다.
-   두 팔은 같은 모터 ID를 사용하므로 소프트웨어 출력만으로 좌우를 추측할 수
-   없다.
-4. 두 링크의 `state UP`, `fd on`, 정확한 좌우 매핑과 비상정지 준비를 기록한다.
-5. 위 조건을 확인한 뒤에만 실물 브링업 명령을 구성한다. `--right-can`과
-   `--left-can` 값은 확인된 실제 매핑을 사용하고 추측하지 않는다.
-6. 실물 자세 읽기에는 `pose show`만 사용하며 `--execute`를 붙이지 않는다.
-7. 실물 움직임은 사용자가 그 작업에서 별도로 명시 승인하기 전에는 실행하지
-   않는다.
+또한 외부 루프 기본값은 `kp=2.0 s^-1`이다. 20 mm/s로 일정하게 움직이는
+목표를 이상적인 1차 추종기로 따라가도 `속도 / kp`에 해당하는 약 10 mm의
+정상상태 지연이 생길 수 있다. 이는 현재 12 mm의 원인에 대한 코드 기반
+추론이며, 실제 기여도는 새 로그로 확인해야 한다.
 
-## Codex로 돌려보낼 결과
+새 `pose follow --output <파일.json>`은 제어 한계나 명령을 바꾸지 않고 다음
+계층을 100 Hz trace와 요약으로 기록한다.
 
-- OpenArm 컴퓨터의 `git status --short --branch`와 최종 커밋
-- ROS 빌드 결과 요약
-- CAN FD 상태와 물리적으로 확인한 좌우 매핑
-- 실물 브링업 여부와 사용한 정확한 명령
-- `pose show` 화면 출력과 생성한 작은 JSON
-- 실물 움직임이 있었는지 여부
+1. `live_marker_to_measured`: 최신 마커에서 실측 TCP까지의 전체 오차
+2. `marker_update_staleness`: 최신 마커와 채택된 IK 요청의 마커 차이
+3. `accepted_marker_to_ik_target`: 최종 마커와 제한된 IK 중간목표 차이
+4. `ik_target_to_command`: IK 목표와 상태 샘플 시점의 활성 명령 차이
+5. `command_to_measured`: 활성 명령과 실측 TCP의 물리 추종 차이
 
-rosbag, HDF5, MCAP, 영상과 대용량 센서 데이터는 GitHub에 올리지 않고 USB나
-별도 실험 데이터 저장소로 전달한다.
+관절별로도 `IK target → command`와 `command → measured`를 분리한다.
+따라서 J4가 제어 계산에서 많이 요구된 것인지, 실제 모터가 보낸 명령을
+뒤따르는 것인지 구분할 수 있다. `--output`은 측정값이 없는 dry run에서는
+거부되고, 정상 종료된 실행만 원자적으로 저장한다.
+
+## 다음 Work 절차
+
+먼저 최신 `jazzy`를 받고 빌드한다. 미커밋 변경이 있으면 중단하고 검토한다.
+
+```bash
+cd /home/user/robot_control-jazzy
+git status --short --branch
+git remote -v
+git fetch origin
+git switch jazzy
+git pull --ff-only origin jazzy
+source /opt/ros/jazzy/setup.bash
+./ros_ws/build.sh
+```
+
+실물 시험은 사용자의 해당 작업 승인을 받은 뒤에만 수행한다. 기존 기준선을
+그대로 재현하고 새 로그만 추가한다. 첫 비교에서는 `kp`, `max_lead`,
+`max-tcp-speed`를 바꾸지 않는다.
+
+```bash
+robotctl pose follow \
+  --group openarm_right_arm \
+  --gravity 1.0 \
+  --seconds 30 \
+  --max-tcp-speed 0.02 \
+  --max-tcp-angular-speed 0.10 \
+  --output /tmp/right-follow-kp2.json \
+  --execute
+```
+
+마커를 움직인 뒤 마지막 수 초 동안 고정해 최종 수렴도 함께 기록한다.
+종료 후 JSON 문법만 먼저 확인한다.
+
+```bash
+python3 -m json.tool /tmp/right-follow-kp2.json >/dev/null
+```
+
+Work가 Codex로 돌려보낼 것은 다음과 같다.
+
+- 터미널의 전체 종료 요약
+- `/tmp/right-follow-kp2.json` 파일 자체 또는 별도 실험 저장소 경로
+- 마커를 움직인 대략적인 구간과 고정한 구간
+- E-stop 사용 여부, 비정상 소음·진동·발열·충돌 여부
+- OpenArm 컴퓨터의 최종 Git 커밋
+
+## 다음 조정 판단
+
+새 기준선 한 번을 받은 뒤 한 항목만 바꾼다.
+
+- `command_to_measured`와 J4의 `command → measured`가 크면 `kp`를 먼저
+  올리지 않는다. 부하, 중력 보상, 모터 추종과 J4 상태를 확인한다.
+- `ik_target_to_command`가 지배적이고 Cartesian speed limit가 적으면
+  `kp=3.0`의 작은 비교 시험을 검토한다.
+- Cartesian speed limit가 계속 지배적이면 `kp`를 올려도 제한 구간은 빨라지지
+  않는다. 속도 한계 상향은 별도 안전 승인과 한 항목 비교가 필요하다.
+- `marker_update_staleness`가 크면 IK 요청 처리율과 superseded 비율을 먼저
+  분석한다.
+- `accepted_marker_to_ik_target`가 크면 `--max-ik-step` 영향이 크다.
+- 첫 시험 같은 J3/J5 순간 오차가 다시 나오면 해당 trace의 IK sequence,
+  target, command와 measured 관절값으로 해 전환 여부를 확인한다.
+
+현재 결론은 정적 도달 실패가 아니다. 오른팔은 마커 정지 후 1.4 mm까지
+수렴했다. 다음 목표는 기존 안전 제한을 유지하면서 이동 중 지연의 원인을
+분리한 뒤 가장 큰 한 계층만 조정하는 것이다.

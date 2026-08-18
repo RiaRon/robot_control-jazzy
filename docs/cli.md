@@ -581,6 +581,7 @@ time.
 | `--startup-settle-sec` | `2.0` | Time to apply gravity compensation before accepting startup alignment |
 | `--max-start-distance` | `0.10` | Maximum allowed position distance between the actual TCP and RViz marker during startup alignment |
 | `--max-start-angle` | `0.35` | Maximum allowed orientation difference during startup alignment, approximately 20 degrees |
+| `--output` | off | Write a JSON trace separating live marker, accepted IK request, IK target, active command, and measured state |
 | `--execute` | off | Publish; without it the command only reports what it would do |
 
 At startup, `pose follow` first applies gravity compensation and moves the
@@ -605,7 +606,11 @@ while satisfying both limits.
 
 ```bash
 # --execute streams position commands and the arm moves while you drag:
-robotctl pose follow --group openarm_right_arm --execute --gravity 0.75
+robotctl pose follow \
+  --group openarm_right_arm \
+  --execute \
+  --gravity 0.75 \
+  --output /tmp/right-follow.json
 ```
 
 ```text
@@ -618,6 +623,12 @@ followed 4193 samples; the arm holds its last commanded pose
   tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
   last TCP position error: 1.7 mm
   within 2.0 mm on 1132 of 4193 samples (27.0%)
+  live marker to measured TCP: 9.1 mm on average, 63.0 mm at worst, 1.7 mm last
+  mean position lag decomposition (norms are non-additive):
+    marker_update_staleness: 0.7 mm
+    accepted_marker_to_ik_target: 1.8 mm
+    ik_target_to_command: 5.2 mm
+    command_to_measured: 2.1 mm
   TCP orientation trailed the marker by 3.8 deg on average, 12.4 deg at worst
   last TCP orientation error: 1.2 deg
   within 2.0 deg on 1540 of 4193 samples (36.7%)
@@ -633,10 +644,11 @@ followed 4193 samples; the arm holds its last commanded pose
 marker's `feedback` stream — the topic that publishes throughout a drag — and
 commands at the controller rate.
 
-At startup, `pose follow` clutches the marker's first reported position to the
-measured TCP. A stale RViz goal therefore causes no initial jump; subsequent
-marker displacement is followed relative to that TCP position. In contrast,
-`pose ee --from-marker` still treats the marker as an absolute pose in `world`.
+At startup, `pose follow` treats the marker as an absolute pose in `world`.
+It refuses a marker farther than `--max-start-distance` or
+`--max-start-angle`; otherwise it approaches the marker through the same
+bounded IK and command path used during following. Move the marker to
+**Current** before starting instead of relying on an old RViz goal.
 
 When the marker target changes, a background worker calls MoveIt
 `/compute_ik`, seeded from the newest measured joints. It keeps only the newest
@@ -646,8 +658,9 @@ is busy, rather than blocking on a service round trip.
 
 The fast loop compares that latched target with `/joint_states`. While measured
 joints trail it, the outer feedback advances the position command through the
-motor's impedance droop. The marker's orientation is ignored; the TCP
-orientation captured at startup is included in every IK request.
+motor's impedance droop. The marker's orientation is followed along the shortest
+quaternion path, with both the intermediate IK step and commanded angular speed
+bounded.
 
 Every sample goes through `CommandGate.follow`, which **clamps rather than
 refuses**. Dragging faster than the arm can move is normal operation, so the
@@ -688,14 +701,20 @@ different time or with a different seed.
 
 ### Reading the report
 
-The clamp counts describe the *command*, not the arm — they were all zero during
-the run where nothing moved at all. The line above them is the measurement that
-answers whether following works: how far the tool centre point actually trailed
-the marker.
+The clamp counts describe the *command*, not the arm. The original
+`trailed the marker by` line is retained for baseline comparison, but it uses
+the marker snapshot associated with the currently accepted IK result. During a
+fast drag that snapshot can be older than the live RViz marker. The new live
+marker line and lag decomposition make that delay explicit.
 
 | Line | What it means |
 | --- | --- |
-| `trailed the marker by` | The real measure. Average and worst distance from marker to tool centre point |
+| `trailed the marker by` | Baseline-compatible distance from the accepted IK request's marker snapshot to measured TCP |
+| `live marker to measured TCP` | Current RViz marker to measured TCP; use this as total moving-target error |
+| `marker_update_staleness` | Distance the live marker moved beyond the marker snapshot used by the accepted IK result |
+| `accepted_marker_to_ik_target` | Backlog created by the bounded intermediate IK target |
+| `ik_target_to_command` | Outer-loop and Cartesian-cap backlog between the IK target and active command |
+| `command_to_measured` | Physical lag from the command active at state-sample time to measured TCP |
 | `last TCP position error` | Distance to the marker at shutdown |
 | `within 2.0 mm` | Samples inside the configured deadband |
 | `TCP orientation trailed the marker by` | Average and worst orientation error between the RViz marker and measured TCP |
@@ -709,6 +728,12 @@ the marker.
 | `velocity limit` | Normal. The marker was dragged faster than the profile allows the arm to move |
 | `lead limit` | The arm fell more than `LEAD_SEC` of travel behind its command. Frequent hits mean the arm cannot keep up — try `--gravity`, or drag more slowly |
 | `position limit` | The drag asked for a joint past the profile's bound. The arm stops there and keeps tracking the rest |
+
+`--output` needs `--execute`, because a dry run contains no measured samples.
+The JSON stores the same summaries plus a 100 Hz trace with TCP poses, joint
+positions, IK sequence and per-sample limit flags. It is intended for temporary
+experiment storage such as `/tmp/right-follow.json`; do not commit large run
+files to Git.
 
 ### Stopping, and what the arm does then
 

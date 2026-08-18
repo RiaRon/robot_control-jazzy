@@ -1,8 +1,8 @@
 # RViz에서 `robotctl pose follow` 사용하기
 
 `robotctl pose follow`는 RViz의 TCP 인터랙티브 마커를 계속 읽어 실제 팔이
-마커를 따라가게 하는 GUI 제어 모드입니다. 오른팔은
-`openarm_right_hand_tcp`, 왼팔은 `openarm_left_hand_tcp`를 추종합니다.
+마커를 따라가게 하는 GUI 제어 모드입니다. 현재 실물 연구 범위는 오른팔
+`openarm_right_arm`과 `openarm_right_hand_tcp`입니다.
 
 이 문서는 ROS 2 Jazzy, 실물 OpenArm, `can0`/`can1` 두 버스를 기준으로
 설명합니다. 실제 인터페이스 이름이 다르면 해당 이름으로 바꾸십시오.
@@ -11,10 +11,9 @@
 
 RViz에서 마커를 드래그하면 `pose follow`가 100 Hz를 목표로 feedback을 읽고,
 현재 관절 자세에서 가까운 해를 계산해 trajectory controller에 위치 명령을
-스트리밍합니다. 이 모드는 마커의 **위치 변위만** 추종하고, TCP 방향은 시작
-자세로 유지합니다.
+스트리밍합니다. 마커의 `world` 절대 위치와 방향을 모두 추종합니다.
 
-- `pose follow`: 시작 시 현재 TCP를 영점으로 잡고 마커의 **변위**를 실시간 추종
+- `pose follow`: 안전한 시작 거리·각도를 확인한 뒤 마커의 절대 자세를 실시간 추종
 - `pose ee --from-marker`: 마커의 `world` 절대 자세를 한 번 읽어 한 번 이동
 - RViz의 **Plan & Execute**: 이 프로젝트의 운영자 제어 경로가 아님
 
@@ -37,7 +36,7 @@ RViz에서 마커를 드래그하면 `pose follow`가 100 Hz를 목표로 feedba
 브링업 터미널과 명령 터미널 모두 작업 트리에서 ROS 환경을 준비합니다.
 
 ```bash
-cd ~/rl_ws/robot_control
+cd /home/user/robot_control-jazzy
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 export PYTHONPATH="src:.:$PYTHONPATH"
@@ -96,7 +95,7 @@ bitrate를 먼저 확인하십시오. 여기까지는 SocketCAN 설정 확인이
 첫 번째 터미널에서 실물 스택을 실행합니다.
 
 ```bash
-cd ~/rl_ws/robot_control
+cd /home/user/robot_control-jazzy
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 
@@ -110,7 +109,7 @@ source ros_ws/install/setup.bash
 관절 상태를 확인합니다.
 
 ```bash
-cd ~/rl_ws/robot_control
+cd /home/user/robot_control-jazzy
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 export PYTHONPATH="src:.:$PYTHONPATH"
@@ -155,9 +154,8 @@ robotctl pose follow \
 3. RViz 툴바에서 **Interact**를 선택합니다.
 4. `openarm_right_hand_tcp` 위의 축 화살표를 드래그합니다.
 
-현재 `pose follow`는 위치 변위만 추종하며 회전 링은 추종하지 않습니다. 추종
-중에는 시작 시점의 TCP 방향을 유지합니다. 회전까지 적용하려면 마커 자세를
-정한 뒤 `robotctl pose ee --from-marker`로 한 번 이동하십시오.
+축 화살표는 위치를, 회전 링은 TCP 방향을 바꿉니다. 방향도 가장 짧은
+quaternion 경로로 추종하며 `--max-tcp-angular-speed` 제한을 적용합니다.
 
 왼팔은 Planning Group을 `left_arm`으로 선택합니다. MotionPlanning은 현재
 선택한 그룹의 TCP 마커만 게시합니다.
@@ -174,6 +172,7 @@ RViz 고스트는 목표 운동학 결과이고 실제 모터값은 `/joint_stat
 robotctl pose follow \
   --group openarm_right_arm \
   --seconds 60 \
+  --output /tmp/right-follow.json \
   --execute
 ```
 
@@ -186,15 +185,19 @@ following openarm_right_hand_tcp at 100 Hz for 60 s, gravity off
 drag the marker in RViz; the arm tracks it until the time runs out
 ```
 
-시작 순간 RViz 마커가 실제 TCP와 다른 곳에 남아 있어도 그 위치로 바로
-이동하지 않습니다. 첫 마커 좌표를 현재 TCP에 앵커링한 뒤, 그 지점에서 마커를
-움직인 거리와 방향만큼 상대적으로 따라갑니다.
+시작 순간 RViz 마커는 절대 목표입니다. 실제 TCP와 10 cm 또는 약 20도를
+초과해 다르면 명령을 거부하므로, 먼저 RViz에서 마커를 **Current**로
+옮깁니다. 허용 범위 안에서는 제한된 IK 중간목표로 접근하고
+`startup alignment complete`가 출력된 뒤 드래그합니다.
 
 `--seconds`를 생략해도 기본값은 60초입니다. 생략한다고 무기한 실행되지는
 않습니다.
 
 60초가 지나거나 터미널에서 `Ctrl+C`를 누르면 추종이 끝납니다. trajectory
 controller는 마지막 명령 위치를 유지하므로 팔은 마지막 위치를 계속 잡습니다.
+`/tmp/right-follow.json`에는 마커, IK, 활성 명령, 실측 상태를 분리한 요약과
+100 Hz trace가 저장됩니다. 이 파일은 비교 분석용 실험 데이터이며 Git에
+커밋하지 않습니다.
 
 ## 5. 무기한 운전
 
@@ -223,7 +226,7 @@ robotctl pose follow \
 실행 중인 상태에서 별도 터미널을 준비한 뒤 먼저 로드합니다.
 
 ```bash
-cd ~/rl_ws/robot_control
+cd /home/user/robot_control-jazzy
 source /opt/ros/jazzy/setup.bash
 source ros_ws/install/setup.bash
 
@@ -238,13 +241,13 @@ source ros_ws/install/setup.bash
 robotctl pose follow \
   --group openarm_right_arm \
   --seconds inf \
-  --gravity 0.75 \
+  --gravity 1.0 \
   --execute
 ```
 
 > **이 명령은 위치 명령과 effort 명령을 함께 발행해 실물을 움직입니다.**
 
-`0.75`는 모델 중력 토크의 75%라는 뜻이며 모든 로봇에 정확한 값은 아닙니다.
+`1.0`은 현재 오른팔에서 보존한 기준값이며 모든 로봇에 정확한 값은 아닙니다.
 관절마다 튜닝된 값이 있다면 7개를 쉼표로 전달할 수도 있습니다.
 
 ```bash
@@ -289,13 +292,24 @@ followed 4193 samples; the arm holds its last commanded pose
   IK requests 91: 72 succeeded, 3 failed, 16 superseded
   tool centre point trailed the marker by 8.4 mm on average, 61.2 mm at worst
   last TCP position error: 1.7 mm
+  live marker to measured TCP: 9.1 mm on average, 63.0 mm at worst, 1.7 mm last
+  mean position lag decomposition (norms are non-additive):
+    marker_update_staleness: 0.7 mm
+    accepted_marker_to_ik_target: 1.8 mm
+    ik_target_to_command: 5.2 mm
+    command_to_measured: 2.1 mm
   last maximum joint error: 0.0041 rad
   velocity limit clamped on 271 of 4193 samples
 ```
 
 | 출력 | 의미 | 대응 |
 | --- | --- | --- |
-| `trailed the marker by` | 실제 TCP와 마커 사이 평균·최대 거리 | 값이 크면 천천히 드래그하고 중력 보상을 검토 |
+| `trailed the marker by` | 채택된 IK 요청 시점의 마커와 실측 TCP 오차(기존 기준선) | 이전 시험과 수치 비교 |
+| `live marker to measured TCP` | 현재 마커와 실측 TCP의 전체 오차 | 이동 중 실제 지연 판단 |
+| `marker_update_staleness` | 최신 마커와 채택된 IK 요청의 마커 차이 | 크면 IK 요청 지연·대체 영향 확인 |
+| `accepted_marker_to_ik_target` | 최종 마커와 제한된 IK 중간목표 차이 | 크면 `--max-ik-step` 영향 확인 |
+| `ik_target_to_command` | IK 목표와 당시 활성 명령 차이 | `kp`와 Cartesian 속도 제한 영향 확인 |
+| `command_to_measured` | 당시 활성 명령과 실측 TCP 차이 | 실제 관절·부하·중력 추종 지연 확인 |
 | `actual control rate` | 실물에서 달성한 루프 주파수와 joint-state 평균 대기시간 | 100 Hz 표시는 목표값이며 이 값이 실제값 |
 | `IK requests` | MoveIt IK 요청의 성공·실패·최신 목표 대체 횟수 | 실패가 많으면 작업공간·특이점·충돌을 확인 |
 | `last maximum joint error` | 마지막 IK 목표 대비 가장 큰 실측 관절 오차 | 값이 계속 크면 부하·장애물·중력 보상을 확인 |
@@ -303,8 +317,10 @@ followed 4193 samples; the arm holds its last commanded pose
 | `lead limit` | 실제 팔이 명령을 따라가지 못해 명령 선행량이 제한됨 | 장애물·부하를 확인하고 중력 보상을 검토 |
 | `position limit` | 요청한 관절 자세가 프로파일 위치 한계를 넘음 | 마커를 작업 공간 안쪽으로 이동 |
 
-clamp 횟수는 명령이 제한된 횟수입니다. 실제 추종 품질은
-`trailed the marker by` 값을 기준으로 판단하십시오.
+각 분해값은 방향이 있는 벡터가 아니라 거리 norm이므로 서로 단순 합산하지
+않습니다. 전체 이동 중 품질은 `live marker to measured TCP`, 정지 후
+수렴은 마지막 오차, 원인은 네 분해값과 관절별
+`target-command`/`command-measured` 표를 함께 봅니다.
 
 ## 9. 문제 해결
 
@@ -328,8 +344,8 @@ CLI 그룹명 `openarm_right_arm`과 RViz Planning Group 이름은 다릅니다.
 ### 마커가 보이지만 드래그되지 않음
 
 RViz 툴바에서 **Interact** 도구를 선택하고 TCP의 축 화살표를 잡습니다.
-`pose follow`는 회전 링을 추종하지 않습니다. 로봇 링크 자체를 드래그하는
-것도 아닙니다.
+`pose follow`는 축 화살표와 회전 링을 모두 추종합니다. 로봇 링크 자체를
+드래그하는 것은 아닙니다.
 
 ### 마커는 움직이지만 실제 팔이 움직이지 않음
 
@@ -414,7 +430,7 @@ robotctl pose follow --group openarm_right_arm --seconds inf --execute
 robotctl pose follow \
   --group openarm_right_arm \
   --seconds inf \
-  --gravity 0.75 \
+  --gravity 1.0 \
   --execute
 
 # 왼팔: 60초 시험 — 실물 이동
