@@ -12,7 +12,7 @@
 - 개발 기준 저장소: `RiaRon/robot_control-jazzy`
 - 개발 PC 작업 폴더: `/home/cbj4/robot_control-jazzy`
 - 기준 브랜치: `jazzy`
-- 2026-08-18 `jazzy` 기준 커밋: `7afdae2`
+- 2026-08-18 `jazzy` 기준 커밋: `93a4c1f`
 - 개발 PC의 `origin`: `https://github.com/RiaRon/robot_control-jazzy.git`
 - OpenArm 컴퓨터는 배포, 실물 실행, 측정 전용이다.
 - `RiaRon/robot_control`은 선배 저장소를 fork한 별도 저장소이며 현재 작업 대상이
@@ -24,9 +24,11 @@
 
 - `feature/pose-show-json`에서 `robotctl pose show --output <파일.json>`을
   구현했다.
-- 기능 커밋은 `46c4645`이고 원격 브랜치에 push했다.
+- 기능 브랜치의 원래 커밋은 `46c4645`이고, rebase 병합된 `jazzy`의 기능
+  커밋은 `e168919`이다.
 - `jazzy` 대상 Pull Request는
-  [#5](https://github.com/RiaRon/robot_control-jazzy/pull/5)이다.
+  [#5](https://github.com/RiaRon/robot_control-jazzy/pull/5)이며 `93a4c1f`까지
+  병합됐다.
 - JSON에는 schema version, 프로필, 선택한 그룹, canonical 관절 이름·위치와
   TCP frame·tip link·XYZ·XYZW Quaternion·RPY가 기록된다.
 - 기존 화면 출력과 읽기 전용 동작은 유지된다. 모든 ROS 읽기가 성공한 뒤에만
@@ -67,9 +69,13 @@
 
 ## 현재 중단 지점
 
-- 기능 구현, 로컬 테스트, 가짜 하드웨어 검증, push와 PR 생성까지 완료했다.
-- 현재 작업 브랜치는 `feature/pose-show-json`이고 PR #5는 검토·병합 전이다.
+- 기능 구현, 로컬 테스트, 가짜 하드웨어 검증과 PR #5의 `jazzy` 병합까지
+  완료했다.
+- 이 상태 문서 갱신 직전 개발 PC의 로컬·원격 `jazzy`는 `93a4c1f`로
+  동기화됐다.
 - 실물 OpenArm에서는 아직 빌드하거나 JSON 자세를 읽지 않았다.
+- 과거 문서의 5070ti 접속 후보는 2026-08-18 SSH 연결이 시간 초과됐다. 현재
+  OpenArm 컴퓨터의 호스트나 주소를 확인하기 전에는 다른 대상을 추측하지 않는다.
 - 실물 OpenArm을 움직이는 시험은 수행하지 않았고 현재 승인도 없다.
 
 ## 다음 재개 절차
@@ -83,8 +89,9 @@
    git log -1 --oneline --decorate
    ```
 
-2. PR #5의 diff와 GitHub 검사를 확인한 뒤 `jazzy`에 병합한다.
-3. OpenArm 컴퓨터의 clone 경로와 GitHub 접근 여부를 확인하고 병합된 `jazzy`를
+2. 현재 OpenArm 컴퓨터의 호스트 또는 주소, clone 경로와 GitHub 접근 여부를
+   확인한다.
+3. OpenArm 컴퓨터에서 병합된 `jazzy`를
    fetch·checkout한 뒤 그 컴퓨터에서 다시 빌드한다.
 4. 먼저 움직임 없는 자세 읽기만 실행한다.
 
