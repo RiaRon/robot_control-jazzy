@@ -10,7 +10,7 @@
 - 저장소: `RiaRon/robot_control-jazzy`
 - 개발 PC: `/home/cbj4/robot_control-jazzy`
 - 안정 브랜치: `jazzy`
-- 이번 기준 `jazzy`: `6b4b51c`
+- PR #9 병합 기준 `jazzy`: `6b4b51c`
 - 병합된 기능 커밋: `4e39f3d`
 - 병합된 상태 커밋: `6b4b51c`
 - Pull Request:
@@ -98,7 +98,8 @@ J4 지연의 소프트웨어·실물 기여를 구분할 수 있다. 기존
 
 - PR #9의 코드, 테스트, CLI 문서, Work 인계와 상태 문서가 `jazzy`에
   rebase 병합됐다.
-- 개발 PC의 로컬·원격 `jazzy`는 `6b4b51c`로 동기화됐다.
+- 개발 PC의 로컬·원격 `jazzy`는 동기화했다. 문서 후속 커밋이 있으므로
+  재개할 때 실제 HEAD를 다시 확인한다.
 - 다음 실물 단계는 Work에서 최신 `jazzy` 배포 후 동일한 `kp=2.0`
   기준선을 새 JSON으로 한 번 수집하는 것이다.
 
