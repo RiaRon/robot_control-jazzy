@@ -1,6 +1,6 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-14 (Asia/Seoul)
+마지막 갱신: 2026-08-18 (Asia/Seoul)
 
 이 문서는 새 Codex 세션이 이전 대화를 기억하지 못해도 작업을 안전하게 이어가기
 위한 짧은 인계 문서이다. 상세 연구 기록은 아래 Notion 연구일지를 참고한다.
@@ -12,13 +12,31 @@
 - 개발 기준 저장소: `RiaRon/robot_control-jazzy`
 - 개발 PC 작업 폴더: `/home/cbj4/robot_control-jazzy`
 - 기준 브랜치: `jazzy`
-- 2026-08-14 기능 작업 기준 커밋: `6fb9911` (이 인계 문서 추가 직전)
+- 2026-08-18 `jazzy` 기준 커밋: `7afdae2`
 - 개발 PC의 `origin`: `https://github.com/RiaRon/robot_control-jazzy.git`
 - OpenArm 컴퓨터는 배포, 실물 실행, 측정 전용이다.
 - `RiaRon/robot_control`은 선배 저장소를 fork한 별도 저장소이며 현재 작업 대상이
   아니다.
 
 위 값은 스냅샷이므로 작업을 시작할 때 실제 Git 상태를 다시 확인한다.
+
+## 2026-08-18 완료 내용
+
+- `feature/pose-show-json`에서 `robotctl pose show --output <파일.json>`을
+  구현했다.
+- 기능 커밋은 `46c4645`이고 원격 브랜치에 push했다.
+- `jazzy` 대상 Pull Request는
+  [#5](https://github.com/RiaRon/robot_control-jazzy/pull/5)이다.
+- JSON에는 schema version, 프로필, 선택한 그룹, canonical 관절 이름·위치와
+  TCP frame·tip link·XYZ·XYZW Quaternion·RPY가 기록된다.
+- 기존 화면 출력과 읽기 전용 동작은 유지된다. 모든 ROS 읽기가 성공한 뒤에만
+  임시 파일을 목적 파일로 원자적으로 교체하며, 읽기 실패 시 기존 파일을
+  보존하는 단위 테스트를 추가했다.
+- 관련 테스트는 `3 passed`, 전체 테스트는 `615 passed, 4 skipped`였다.
+- ROS 2 Jazzy 워크스페이스의 11개 패키지 빌드에 성공했다.
+- `mock_components/GenericSystem`에서 오른팔 JSON을 `/tmp`에 실제 생성했고,
+  관절 7개와 TCP XYZ·Quaternion·RPY를 확인했다. CAN과 실물 모터는 사용하지
+  않았다.
 
 ## 2026-08-14 완료 내용
 
@@ -49,18 +67,12 @@
 
 ## 현재 중단 지점
 
-- 기능 코드는 아직 수정하지 않았다.
-- 로컬 `feature/pose-show-json` 브랜치는 `6fb9911`에서 만들기만 했고 변경이나
-  원격 push는 없다.
-- 다음 기능 후보는 `robotctl pose show --output <파일.json>`이다.
-- 목적은 OpenArm 컴퓨터에서 읽은 프로필, 그룹, 관절 위치, TCP XYZ·Quaternion·
-  RPY를 작은 JSON 파일로 저장해 개발 PC로 가져오는 것이다.
-- 기존 `pose show`의 화면 출력과 읽기 전용 동작은 유지해야 한다.
-- ROS 읽기가 실패하면 불완전한 JSON 파일을 만들지 않아야 한다.
+- 기능 구현, 로컬 테스트, 가짜 하드웨어 검증, push와 PR 생성까지 완료했다.
+- 현재 작업 브랜치는 `feature/pose-show-json`이고 PR #5는 검토·병합 전이다.
+- 실물 OpenArm에서는 아직 빌드하거나 JSON 자세를 읽지 않았다.
+- 실물 OpenArm을 움직이는 시험은 수행하지 않았고 현재 승인도 없다.
 
 ## 다음 재개 절차
-
-다음 작업 예정일은 2026-08-18 화요일이다.
 
 1. 실제 상태를 확인한다.
 
@@ -71,35 +83,26 @@
    git log -1 --oneline --decorate
    ```
 
-2. `jazzy`를 본인 GitHub와 동기화한다.
+2. PR #5의 diff와 GitHub 검사를 확인한 뒤 `jazzy`에 병합한다.
+3. OpenArm 컴퓨터의 clone 경로와 GitHub 접근 여부를 확인하고 병합된 `jazzy`를
+   fetch·checkout한 뒤 그 컴퓨터에서 다시 빌드한다.
+4. 먼저 움직임 없는 자세 읽기만 실행한다.
 
    ```bash
-   git switch jazzy
-   git pull --ff-only origin jazzy
+   robotctl pose show --group openarm_right_arm --output right-pose.json
    ```
 
-3. 준비된 기능 브랜치로 이동한다. `jazzy`가 그 사이 변경됐다면 작업 전에 최신
-   기준에서 브랜치를 갱신할 방법을 검토한다.
-
-   ```bash
-   git switch feature/pose-show-json
-   ```
-
-4. JSON 저장 기능과 단위 테스트, CLI 문서를 최소 범위로 수정한다.
-5. 관련 테스트 후 전체 `pytest`와 ROS 빌드를 위험에 비례해 다시 실행한다.
-6. remote가 본인 저장소인지 확인한 뒤 기능 브랜치를 push하고 `jazzy` 대상 Pull
-   Request를 만든다.
-7. OpenArm 컴퓨터에서 기능 브랜치를 fetch하고 그 컴퓨터에서 다시 빌드한다.
-8. 실물 시험 전 `README.md`와 `docs/openarm-test-workflow.md`를 읽고 정확한 좌우
-   CAN FD 매핑, 비상정지 준비, 현재 브랜치와 커밋을 확인한다.
-9. 드라이런과 자세 읽기부터 수행하고, 사용자가 현재 작업에서 명시적으로 승인한
-   경우에만 저속 실물 명령을 실행한다.
-10. 작은 JSON 결과는 `test/2026-08-18-*` 브랜치나 검토된 별도 파일로, rosbag·
-    HDF5·MCAP 등 큰 데이터는 USB로 개발 PC에 가져온다.
+5. 화면 결과와 JSON의 프로필, 그룹, 7개 관절, TCP XYZ·Quaternion·RPY를
+   대조하고 작은 JSON을 개발 PC로 가져온다.
+6. 위 읽기 작업에는 `--execute`, CAN 매핑, 실물 움직임 승인이 필요 없다.
+7. 이후 움직임 시험이 필요해지면 먼저 `README.md`와
+   `docs/openarm-test-workflow.md`를 전부 읽고 좌우 CAN FD 매핑, 비상정지,
+   현재 브랜치·커밋을 확인한다. 사용자가 그 작업에서 명시적으로 승인한 경우에만
+   저속 실물 명령을 실행한다.
 
 ## 재개할 때 사용자에게 확인할 내용
 
 - OpenArm 컴퓨터에서 이 저장소를 이미 clone했는지와 실제 경로
 - OpenArm 컴퓨터의 네트워크 또는 GitHub 접근 가능 여부
-- 실제로 확인된 오른팔·왼팔 CAN 인터페이스 매핑
-- 당일 실물 움직임을 실행해도 되는지에 대한 명시적 승인
+- 움직임 시험까지 진행할 경우에만 실제 오른팔·왼팔 CAN 인터페이스 매핑
+- 움직임 시험까지 진행할 경우에만 당일 실물 움직임에 대한 명시적 승인
