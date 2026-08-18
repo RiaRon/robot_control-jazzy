@@ -20,6 +20,15 @@
 
 위 값은 스냅샷이므로 작업을 시작할 때 실제 Git 상태를 다시 확인한다.
 
+## 작업 공간 역할 분리
+
+- Codex는 개발 PC에서 코드 수정, 테스트, ROS 빌드와 가짜 하드웨어 검증을
+  담당한다.
+- ChatGPT 계정의 `OpenArm 연구진행` Work는 OpenArm 컴퓨터의 배포, CAN 확인,
+  실물 브링업·측정과 현장 안전 기록을 담당한다.
+- 두 공간은 GitHub 커밋과 작은 JSON·Markdown 결과로 인계한다. 실물 작업은
+  Work에서 진행하고, Codex는 전달받은 결과를 바탕으로 개발 PC 코드를 수정한다.
+
 ## 2026-08-18 완료 내용
 
 - `feature/pose-show-json`에서 `robotctl pose show --output <파일.json>`을
@@ -86,15 +95,16 @@
   아직 확인되지 않았다. 과거 5070ti 후보 주소는 연결이 시간 초과됐다.
 - 실물 OpenArm을 움직이는 시험은 수행하지 않았고 현재 승인도 없다.
 
-## 다음 재개 절차
+## `OpenArm 연구진행` Work에서 다음 재개 절차
 
-1. 실제 상태를 확인한다.
+1. OpenArm 컴퓨터의 실제 상태를 확인한다.
 
    ```bash
-   cd /home/cbj4/robot_control-jazzy
+   cd /home/user/robot_control-jazzy
    git status --short --branch
    git remote -v
    git log -1 --oneline --decorate
+   export HDGP_ROOT=/home/user/rl_ws/hdgp
    ```
 
 2. OpenArm 컴퓨터의 저장소는 `/home/user/robot_control-jazzy`, HDGP 경로는
