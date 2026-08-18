@@ -35,6 +35,13 @@ def test_latest_ik_worker_latches_a_successful_solution():
         assert status.submitted == 1
         assert status.failed == 0
         assert status.superseded == 0
+        assert len(status.timings) == 1
+        timing = status.timings[0]
+        assert timing.sequence == 1
+        assert timing.outcome == "accepted"
+        assert timing.started_at_sec >= timing.requested_at_sec
+        assert timing.completed_at_sec >= timing.started_at_sec
+        assert timing.accepted_at_sec == timing.completed_at_sec
     finally:
         worker.close()
 
@@ -69,6 +76,12 @@ def test_latest_ik_worker_discards_pending_and_inflight_stale_results():
         assert solved == [1.0, 3.0]
         assert status.submitted == 3
         assert status.superseded == 2
+        assert [timing.outcome for timing in status.timings] == [
+            "superseded_after_complete",
+            "superseded_before_start",
+            "accepted",
+        ]
+        assert status.timings[1].completed_at_sec is None
     finally:
         worker.close()
 

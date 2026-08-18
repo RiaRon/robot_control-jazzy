@@ -582,6 +582,16 @@ time.
 | `--max-start-distance` | `0.10` | Maximum allowed position distance between the actual TCP and RViz marker during startup alignment |
 | `--max-start-angle` | `0.35` | Maximum allowed orientation difference during startup alignment, approximately 20 degrees |
 | `--output` | off | Write a JSON trace separating live marker, accepted IK request, IK target, active command, and measured state |
+| `--diagnostic-profile` | off | Deterministic `translation`, `rotation`, or `translation-rotation` round trip after startup alignment |
+| `--diagnostic-distance` | `0.010` | Translation distance; hard maximum 0.030 m |
+| `--diagnostic-angle` | 5 degrees | Rotation angle in radians; hard maximum 10 degrees |
+| `--diagnostic-linear-speed` | `0.005` | Target translation speed; hard maximum 0.020 m/s and cannot exceed `--max-tcp-speed` |
+| `--diagnostic-angular-speed` | `0.05` | Target rotation speed; hard maximum 0.10 rad/s and cannot exceed `--max-tcp-angular-speed` |
+| `--diagnostic-hold-sec` | `3.0` | Hold time at the displaced target and at the origin; hard maximum 10 s |
+| `--diagnostic-repetitions` | `1` | Round trips; hard maximum 3 |
+| `--diagnostic-translation-axis` | `x` | World-frame translation axis: x, y, or z |
+| `--diagnostic-rotation-axis` | `z` | Startup-TCP local rotation axis: x, y, or z |
+| `--ik-jump-threshold` | `0.10` | Record an IK target transition event at this joint delta; diagnostic only, never blocks a command |
 | `--execute` | off | Publish; without it the command only reports what it would do |
 
 At startup, `pose follow` first applies gravity compensation and moves the
@@ -612,6 +622,44 @@ robotctl pose follow \
   --gravity 0.75 \
   --output /tmp/right-follow.json
 ```
+
+### Deterministic diagnostic profiles
+
+The optional diagnostic target replaces live marker updates only after normal
+startup alignment. Each motion ramps away from the startup marker, holds,
+returns on the same path, and holds at the origin. The combined profile runs
+the translation round trip followed by the rotation round trip. Repetitions do
+not accumulate position or angle.
+
+Without `--execute`, the command prints the design and publishes nothing:
+
+```bash
+robotctl pose follow \
+  --group openarm_right_arm \
+  --diagnostic-profile translation \
+  --diagnostic-translation-axis x
+```
+
+A measured fake or real run additionally needs `--execute` and can write JSON:
+
+```bash
+# --execute publishes the profile and moves the selected arm.
+robotctl pose follow \
+  --group openarm_right_arm \
+  --diagnostic-profile translation-rotation \
+  --diagnostic-distance 0.01 \
+  --diagnostic-angle 0.0872665 \
+  --diagnostic-linear-speed 0.005 \
+  --diagnostic-angular-speed 0.05 \
+  --diagnostic-hold-sec 3 \
+  --diagnostic-repetitions 1 \
+  --output /tmp/right-follow-profile.json \
+  --execute
+```
+
+The profile has its own conservative hard bounds in addition to the unchanged
+pose-follow Cartesian and joint safety gates. A profile automatically ends
+after its final origin hold. Do not drag the marker during a profile.
 
 ```text
 following openarm_right_hand_tcp at 100 Hz for 60 s, gravity scale 0.75
@@ -734,6 +782,19 @@ The JSON stores the same summaries plus a 100 Hz trace with TCP poses, joint
 positions, IK sequence and per-sample limit flags. It is intended for temporary
 experiment storage such as `/tmp/right-follow.json`; do not commit large run
 files to Git.
+
+Additive schema-v1 fields record:
+
+- `result.startup_alignment`: completion flag and elapsed completion time.
+- `result.ik.events`: request, solve-start, complete and accepted elapsed
+  timestamps, outcomes and latencies for every sequence.
+- `result.position_error_signed_projection_m`: each position layer projected
+  onto the final live-marker error direction. The four downstream projections
+  sum to `live_marker_to_measured`; negative values cancel error.
+- `result.ik_target_jumps`: per-joint worst single-step target delta and
+  threshold-crossing events. These events never change control.
+- `settings.diagnostic_profile` and each trace sample's
+  `diagnostic_profile`: the reproducible profile and active phase.
 
 ### Stopping, and what the arm does then
 

@@ -1519,6 +1519,13 @@ def test_pose_follow_writes_layered_json_diagnostics(
     assert result["termination"] == "completed"
     assert result["samples"] == len(trace)
     assert trace
+    # This short legacy test ends before the default two-second startup gate.
+    assert not result["startup_alignment"]["completed"]
+    assert result["startup_alignment"]["completed_elapsed_sec"] is None
+    assert result["ik"]["events"]
+    assert result["ik"]["events"][0]["sequence"] == 1
+    assert result["ik"]["events"][0]["requested_elapsed_sec"] >= 0.0
+    assert "request_to_accepted_sec" in result["ik"]["events"][0]
     assert (
         result[
             "within_accepted_marker_position_tolerance_samples"
@@ -1537,6 +1544,14 @@ def test_pose_follow_writes_layered_json_diagnostics(
         "ik_target_to_command",
         "command_to_measured",
     }
+    assert set(result["position_error_signed_projection_m"]) == {
+        "live_marker_to_measured",
+        "marker_update_staleness",
+        "accepted_marker_to_ik_target",
+        "ik_target_to_command",
+        "command_to_measured",
+    }
+    assert result["ik_target_jumps"]["threshold_rad"] == pytest.approx(0.1)
 
     for sample in trace:
         positions = sample["tcp_positions_m"]
@@ -1547,6 +1562,19 @@ def test_pose_follow_writes_layered_json_diagnostics(
         assert sample["position_error_m"][
             "live_marker_to_measured"
         ] == pytest.approx(expected)
+        projections = sample["position_error_signed_projection_m"]
+        assert projections["live_marker_to_measured"] == pytest.approx(
+            expected
+        )
+        assert sum(
+            projections[name]
+            for name in (
+                "marker_update_staleness",
+                "accepted_marker_to_ik_target",
+                "ik_target_to_command",
+                "command_to_measured",
+            )
+        ) == pytest.approx(expected, abs=1e-12)
 
     # The perfect-tracking fake applies each command before the next state
     # sample, so the active command and measurement must have no hardware lag.
@@ -1633,6 +1661,163 @@ def test_pose_follow_output_requires_execute_and_preserves_existing_file(
         == 2
     )
     assert output.read_text() == "previous complete run\n"
+
+
+def test_pose_follow_diagnostic_profile_is_dry_run_by_default(
+    draggable,
+    capsys,
+):
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--diagnostic-profile",
+                "translation",
+            ]
+        )
+        == 0
+    )
+
+    assert draggable.streamed == []
+    output = capsys.readouterr().out
+    assert "diagnostic profile translation" in output
+    assert "DRY RUN: nothing is published" in output
+
+
+def test_pose_follow_runs_a_deterministic_profile_on_fake_hardware(
+    draggable,
+    tmp_path,
+):
+    output = tmp_path / "diagnostic.json"
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--diagnostic-profile",
+                "translation",
+                "--diagnostic-distance",
+                "0.004",
+                "--diagnostic-linear-speed",
+                "0.02",
+                "--diagnostic-hold-sec",
+                "0.02",
+                "--startup-settle-sec",
+                "0",
+                "--seconds",
+                "1",
+                "--output",
+                str(output),
+                "--execute",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["result"]["termination"] == (
+        "diagnostic_profile_completed"
+    )
+    assert payload["result"]["startup_alignment"]["completed"]
+    assert payload["result"]["startup_alignment"]["completed_elapsed_sec"] >= 0.0
+    assert payload["settings"]["diagnostic_profile"]["kind"] == (
+        "translation"
+    )
+    phases = {
+        sample["diagnostic_profile"]["phase"]
+        for sample in payload["trace"]
+        if sample["diagnostic_profile"] is not None
+    }
+    assert "translation_ramp_out" in phases
+    assert "translation_hold" in phases
+    assert "translation_ramp_back" in phases
+    assert "origin_hold" in phases
+    assert draggable.streamed
+
+
+def test_pose_follow_records_joint_target_jump_without_blocking_it(
+    monkeypatch,
+    tmp_path,
+):
+    from robot_control import ros_adapter
+
+    chain = _servo_chain()
+    start = _reachable_target(chain, np.zeros(7))
+    jumped_joints = np.zeros(7)
+    jumped_joints[3] = 0.2
+    jumped = _reachable_target(chain, jumped_joints)
+
+    class DelayedJumpArm(DraggableArm):
+        def pump(self, timeout_sec=0.0):
+            self.pumped += 1
+            if self.pumped == 15:
+                self._target = jumped
+
+    arm = DelayedJumpArm(target=start)
+    monkeypatch.setattr(
+        ros_adapter, "RosAdapter", lambda *args, **kwargs: arm
+    )
+    monkeypatch.setattr(
+        "robot_control.cli._gravity_chain", lambda *args: chain
+    )
+    output = tmp_path / "jump.json"
+
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--startup-settle-sec",
+                "0",
+                "--seconds",
+                "0.5",
+                "--ik-jump-threshold",
+                "0.05",
+                "--output",
+                str(output),
+                "--execute",
+            ]
+        )
+        == 0
+    )
+
+    result = json.loads(output.read_text())["result"]
+    events = result["ik_target_jumps"]["events"]
+    assert events
+    assert any("r_aj_4" in event["triggered_joints"] for event in events)
+    assert result["ik_target_jumps"]["per_joint"][3][
+        "events_over_threshold"
+    ] >= 1
+    # Detection is observational: the command still passed through the normal
+    # follower and the fake arm moved in the requested joint.
+    assert arm.joints[3] > 0.0
+
+
+def test_pose_follow_refuses_diagnostic_motion_above_the_hard_cap(
+    no_ros,
+    capsys,
+):
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--diagnostic-profile",
+                "translation",
+                "--diagnostic-distance",
+                "0.031",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert "diagnostic distance" in output
+    assert "0.03" in output
 
 
 def test_pose_gravity_accepts_one_scale_per_joint(stiff, capsys):

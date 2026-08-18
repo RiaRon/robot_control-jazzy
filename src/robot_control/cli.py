@@ -30,6 +30,17 @@ from .calibration import (
     load_bundle,
     write_bundle,
 )
+from .diagnostic_profile import (
+    AXES as DIAGNOSTIC_AXES,
+    DEFAULT_ANGLE_RAD as DEFAULT_DIAGNOSTIC_ANGLE_RAD,
+    DEFAULT_ANGULAR_SPEED_RAD_S as DEFAULT_DIAGNOSTIC_ANGULAR_SPEED_RAD_S,
+    DEFAULT_DISTANCE_M as DEFAULT_DIAGNOSTIC_DISTANCE_M,
+    DEFAULT_HOLD_SEC as DEFAULT_DIAGNOSTIC_HOLD_SEC,
+    DEFAULT_LINEAR_SPEED_M_S as DEFAULT_DIAGNOSTIC_LINEAR_SPEED_M_S,
+    DEFAULT_REPETITIONS as DEFAULT_DIAGNOSTIC_REPETITIONS,
+    PROFILE_KINDS as DIAGNOSTIC_PROFILE_KINDS,
+    DiagnosticProfile,
+)
 from .identification import (
     DEFAULT_NOISE_RAD,
     MAX_CONDITION,
@@ -153,6 +164,10 @@ DEFAULT_MAX_START_DISTANCE_M = 0.10
 # 시작할 때 실제 TCP와 RViz 마커 사이에 허용할 최대 방향 차이이다.
 # 0.35 rad는 약 20도이다.
 DEFAULT_MAX_START_ANGLE_RAD = 0.35
+
+# Diagnostics only: this threshold records an event and never changes a target.
+DEFAULT_IK_TARGET_JUMP_THRESHOLD_RAD = 0.10
+
 # How long a streamed command may be ahead of the arm, expressed as travel time
 # at the joint's velocity limit. It has to exceed the standing droop or the arm
 # cannot advance at all, and stay small enough that a blocked joint does not wind
@@ -665,6 +680,72 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help=(
             "write a JSON trace that separates marker, IK, command, and "
             "measured tracking lag"
+        ),
+    )
+
+    follow.add_argument(
+        "--diagnostic-profile",
+        choices=DIAGNOSTIC_PROFILE_KINDS,
+        help=(
+            "replace live marker updates after startup with a deterministic "
+            "round-trip translation, rotation, or combined diagnostic target"
+        ),
+    )
+    follow.add_argument(
+        "--diagnostic-distance",
+        type=float,
+        default=DEFAULT_DIAGNOSTIC_DISTANCE_M,
+        help="translation profile distance in metres (hard maximum 0.03)",
+    )
+    follow.add_argument(
+        "--diagnostic-angle",
+        type=float,
+        default=DEFAULT_DIAGNOSTIC_ANGLE_RAD,
+        help="rotation profile angle in radians (hard maximum 10 degrees)",
+    )
+    follow.add_argument(
+        "--diagnostic-linear-speed",
+        type=float,
+        default=DEFAULT_DIAGNOSTIC_LINEAR_SPEED_M_S,
+        help="translation target speed in m/s (hard maximum 0.02)",
+    )
+    follow.add_argument(
+        "--diagnostic-angular-speed",
+        type=float,
+        default=DEFAULT_DIAGNOSTIC_ANGULAR_SPEED_RAD_S,
+        help="rotation target speed in rad/s (hard maximum 0.10)",
+    )
+    follow.add_argument(
+        "--diagnostic-hold-sec",
+        type=float,
+        default=DEFAULT_DIAGNOSTIC_HOLD_SEC,
+        help="hold time at the displaced target and origin",
+    )
+    follow.add_argument(
+        "--diagnostic-repetitions",
+        type=int,
+        default=DEFAULT_DIAGNOSTIC_REPETITIONS,
+        help="number of round trips (hard maximum 3)",
+    )
+    follow.add_argument(
+        "--diagnostic-translation-axis",
+        choices=DIAGNOSTIC_AXES,
+        default="x",
+        help="world-frame axis for the translation profile",
+    )
+    follow.add_argument(
+        "--diagnostic-rotation-axis",
+        choices=DIAGNOSTIC_AXES,
+        default="z",
+        help="startup-TCP local axis for the rotation profile",
+    )
+    follow.add_argument(
+        "--ik-jump-threshold",
+        type=float,
+        default=DEFAULT_IK_TARGET_JUMP_THRESHOLD_RAD,
+        help=(
+            "record, but do not block, an IK target transition when any "
+            "joint changes by at least this many radians"
         ),
     )
 
@@ -1664,6 +1745,40 @@ def _pose_follow(args, profile) -> int:
             "--max-start-angle must be finite, no greater than pi, "
             "and at least --orientation-tolerance"
         )
+    if (
+        not np.isfinite(args.ik_jump_threshold)
+        or args.ik_jump_threshold <= 0.0
+        or args.ik_jump_threshold > np.pi
+    ):
+        raise ValueError(
+            "--ik-jump-threshold must be finite, positive, and no greater "
+            "than pi"
+        )
+    diagnostic_profile = None
+    if args.diagnostic_profile is not None:
+        diagnostic_profile = DiagnosticProfile(
+            kind=args.diagnostic_profile,
+            distance_m=args.diagnostic_distance,
+            angle_rad=args.diagnostic_angle,
+            linear_speed_m_s=args.diagnostic_linear_speed,
+            angular_speed_rad_s=args.diagnostic_angular_speed,
+            hold_sec=args.diagnostic_hold_sec,
+            repetitions=args.diagnostic_repetitions,
+            translation_axis=args.diagnostic_translation_axis,
+            rotation_axis=args.diagnostic_rotation_axis,
+        )
+        if diagnostic_profile.linear_speed_m_s > args.max_tcp_speed:
+            raise ValueError(
+                "--diagnostic-linear-speed must not exceed --max-tcp-speed"
+            )
+        if (
+            diagnostic_profile.angular_speed_rad_s
+            > args.max_tcp_angular_speed
+        ):
+            raise ValueError(
+                "--diagnostic-angular-speed must not exceed "
+                "--max-tcp-angular-speed"
+            )
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group, args.urdf)
@@ -1690,6 +1805,17 @@ def _pose_follow(args, profile) -> int:
             "startup alignment: do not drag until the actual TCP "
             "reaches the RViz marker"
         )
+        if diagnostic_profile is not None:
+            spec = diagnostic_profile.as_dict()
+            print(
+                f"diagnostic profile {spec['kind']}: "
+                f"{spec['repetitions']} round trip(s), "
+                f"{spec['duration_sec']:.1f} s after startup alignment"
+            )
+            print(
+                "  deterministic target only; live marker updates are "
+                "ignored after alignment"
+            )
         if not args.execute:
             print("DRY RUN: nothing is published; pass --execute to follow")
             return 0
@@ -1713,6 +1839,7 @@ def _pose_follow(args, profile) -> int:
                     args,
                     worker,
                     startup_marker_target,
+                    diagnostic_profile,
                 )
             finally:
                 worker.close()
@@ -1740,6 +1867,7 @@ def _follow_loop(
     args,
     ik_worker,
     startup_marker_target,
+    diagnostic_profile=None,
 ) -> dict:
     from .ros_adapter import Pose
 
@@ -1752,6 +1880,10 @@ def _follow_loop(
     # 시작 정렬이 완료되었는지 판단하기 위한 위치 기준점이다.
     marker_origin = None
     tcp_origin = None
+    startup_alignment_completed_elapsed_sec = None
+    diagnostic_started_at = None
+    diagnostic_sample = None
+    diagnostic_origin_orientation = None
 
     # 마지막으로 IK에 제출한 위치와 방향을 각각 저장한다.
     # 마커 변화가 충분히 클 때만 새 IK를 요청하기 위해 사용한다.
@@ -1801,6 +1933,20 @@ def _follow_loop(
         name: {"total": 0.0, "worst": 0.0, "last": 0.0}
         for name in component_names
     }
+    projection_names = (
+        "live_marker_to_measured",
+        "marker_update_staleness",
+        "accepted_marker_to_ik_target",
+        "ik_target_to_command",
+        "command_to_measured",
+    )
+    signed_position_components = {
+        name: {
+            "total": 0.0, "minimum": float("inf"),
+            "maximum": float("-inf"), "last": 0.0,
+        }
+        for name in projection_names
+    }
     orientation_components = {
         name: {"total": 0.0, "worst": 0.0, "last": 0.0}
         for name in component_names
@@ -1834,6 +1980,14 @@ def _follow_loop(
     joint_command_to_measured_worst = np.zeros(joint_count, dtype=float)
     joint_command_to_measured_last = np.zeros(joint_count, dtype=float)
 
+    # Observe target transitions without changing or rejecting them.
+    last_accepted_ik_target = None
+    last_accepted_ik_sequence = None
+    ik_target_transition_count = 0
+    ik_target_jump_worst = np.zeros(joint_count, dtype=float)
+    ik_target_jump_counts = np.zeros(joint_count, dtype=int)
+    ik_target_jump_events: list[dict] = []
+
     # r_aj_4와 같은 관절 이름을 배열 번호로 바꾸기 위한 표를 만든다.
     # 예: {"r_aj_1": 0, "r_aj_4": 3}
     joint_index_by_name = {
@@ -1865,10 +2019,27 @@ def _follow_loop(
             last_cycle = cycle
             adapter.pump(timeout_sec=0.0)
             # 드래그 중 새로운 마커 위치가 들어오면 최신 목표로 교체한다.
-            # 새 피드백이 없으면 시작할 때 읽은 마커 위치를 계속 사용한다.
-            latest_target = adapter.latest_marker_target()
-            if latest_target is not None:
-                target = latest_target
+            # Diagnostic mode instead generates a bounded target from the
+            # startup anchor and deliberately ignores live marker updates.
+            diagnostic_sample = None
+            if (
+                diagnostic_profile is not None
+                and diagnostic_started_at is not None
+            ):
+                diagnostic_sample = diagnostic_profile.sample(
+                    cycle - diagnostic_started_at,
+                    marker_origin,
+                    diagnostic_origin_orientation,
+                )
+                target = Pose(
+                    diagnostic_sample.position,
+                    diagnostic_sample.orientation,
+                    "world",
+                )
+            else:
+                latest_target = adapter.latest_marker_target()
+                if latest_target is not None:
+                    target = latest_target
             wait_started = time.monotonic()
             state = adapter.read_state(timeout_sec=1.0)
             state_wait_total += time.monotonic() - wait_started
@@ -1949,6 +2120,10 @@ def _follow_loop(
                         # 따라서 이후 최종 목표도 파란 마커의 절대 위치와 같다.
                         marker_origin = marker_position.copy()
                         tcp_origin = marker_position.copy()
+                        startup_alignment_completed_elapsed_sec = (
+                            startup_settle_elapsed
+                        )
+                        diagnostic_origin_orientation = marker_orientation
 
                         # 정렬 완료 지점에서 IK 목표를 한 번 새로 계산한다.
                         last_submitted_position = None
@@ -1957,6 +2132,12 @@ def _follow_loop(
                             "startup alignment complete; "
                             "drag the marker in RViz"
                         )
+                        if diagnostic_profile is not None:
+                            diagnostic_started_at = cycle
+                            print(
+                                "diagnostic profile started; do not drag "
+                                "the RViz marker"
+                            )
 
                 else:
                     # 정렬 완료 후에는 기존 상대 이동 계산을 사용한다.
@@ -2032,6 +2213,55 @@ def _follow_loop(
             status = ik_worker.snapshot()
             if status.target is not None and status.target_sequence is not None:
                 target_joints = status.target
+                if status.target_sequence != last_accepted_ik_sequence:
+                    if last_accepted_ik_target is not None:
+                        jump = target_joints - last_accepted_ik_target
+                        jump_abs = np.abs(jump)
+                        ik_target_transition_count += 1
+                        ik_target_jump_worst = np.maximum(
+                            ik_target_jump_worst, jump_abs
+                        )
+                        triggered = np.flatnonzero(
+                            jump_abs >= args.ik_jump_threshold
+                        )
+                        ik_target_jump_counts[triggered] += 1
+                        if triggered.size:
+                            accepted_at = next(
+                                (
+                                    timing.accepted_at_sec
+                                    for timing in status.timings
+                                    if timing.sequence
+                                    == status.target_sequence
+                                ),
+                                None,
+                            )
+                            ik_target_jump_events.append(
+                                {
+                                    "observed_elapsed_sec": float(
+                                        cycle - started
+                                    ),
+                                    "accepted_elapsed_sec": (
+                                        None
+                                        if accepted_at is None
+                                        else float(accepted_at - started)
+                                    ),
+                                    "from_sequence": int(
+                                        last_accepted_ik_sequence
+                                    ),
+                                    "to_sequence": int(
+                                        status.target_sequence
+                                    ),
+                                    "joint_delta_rad": [
+                                        float(value) for value in jump
+                                    ],
+                                    "triggered_joints": [
+                                        group.joints[index]
+                                        for index in triggered
+                                    ],
+                                }
+                            )
+                    last_accepted_ik_target = target_joints.copy()
+                    last_accepted_ik_sequence = status.target_sequence
                 accepted_position = requested_positions[
                     status.target_sequence - 1
                 ]
@@ -2250,6 +2480,38 @@ def _follow_loop(
                         )
                     ),
                 }
+                live_error_vector = desired_position - here[:3, 3]
+                live_error_norm = float(np.linalg.norm(live_error_vector))
+                live_error_direction = (
+                    np.zeros(3)
+                    if live_error_norm <= 1e-12
+                    else live_error_vector / live_error_norm
+                )
+                layer_vectors = {
+                    "live_marker_to_measured": live_error_vector,
+                    "marker_update_staleness": (
+                        desired_position - accepted_position
+                    ),
+                    "accepted_marker_to_ik_target": (
+                        accepted_position - ik_target_pose[:3, 3]
+                    ),
+                    "ik_target_to_command": (
+                        ik_target_pose[:3, 3] - command_pose[:3, 3]
+                    ),
+                    "command_to_measured": (
+                        command_pose[:3, 3] - here[:3, 3]
+                    ),
+                }
+                signed_position_projections = {
+                    name: float(np.dot(vector, live_error_direction))
+                    for name, vector in layer_vectors.items()
+                }
+                for name, value in signed_position_projections.items():
+                    component = signed_position_components[name]
+                    component["total"] += value
+                    component["minimum"] = min(component["minimum"], value)
+                    component["maximum"] = max(component["maximum"], value)
+                    component["last"] = value
                 for name, value in position_errors.items():
                     component = position_components[name]
                     component["total"] += value
@@ -2331,7 +2593,21 @@ def _follow_loop(
                             ],
                         },
                         "position_error_m": position_errors,
+                        "position_error_signed_projection_m": (
+                            signed_position_projections
+                        ),
                         "orientation_error_rad": orientation_errors,
+                        "diagnostic_profile": (
+                            None
+                            if diagnostic_sample is None
+                            else {
+                                "phase": diagnostic_sample.phase,
+                                "repetition": diagnostic_sample.repetition,
+                                "elapsed_sec": float(
+                                    cycle - diagnostic_started_at
+                                ),
+                            }
+                        ),
                         "joint_positions_rad": {
                             "ik_target": [
                                 float(value) for value in target_joints
@@ -2378,6 +2654,12 @@ def _follow_loop(
                 adapter.stream_positions(command)
 
                 samples += 1
+            if (
+                diagnostic_sample is not None
+                and diagnostic_sample.complete
+            ):
+                termination = "diagnostic_profile_completed"
+                break
             time.sleep(max(0.0, period - (time.monotonic() - cycle)))
     except KeyboardInterrupt:
         termination = "interrupted"
@@ -2431,6 +2713,17 @@ def _follow_loop(
                 print(
                     f"    {name}: "
                     f"{position_components[name]['total'] / samples * 1000:.1f} mm"
+                )
+            print("  mean signed projection on live-error direction:")
+            for name in (
+                "marker_update_staleness",
+                "accepted_marker_to_ik_target",
+                "ik_target_to_command",
+                "command_to_measured",
+            ):
+                print(
+                    f"    {name}: "
+                    f"{signed_position_components[name]['total'] / samples * 1000:+.1f} mm"
                 )
             # 사람이 이해하기 쉽도록 rad 단위 방향 오차를 deg로 바꿔 출력한다.
             print(
@@ -2510,6 +2803,56 @@ def _follow_loop(
         }
         for name, component in position_components.items()
     }
+    signed_position_summary = {
+        name: {
+            "mean": float(component["total"] / sample_divisor),
+            "minimum": (
+                float(component["minimum"]) if samples else 0.0
+            ),
+            "maximum": (
+                float(component["maximum"]) if samples else 0.0
+            ),
+            "last": float(component["last"]),
+        }
+        for name, component in signed_position_components.items()
+    }
+    ik_timing_events = []
+    for timing in status.timings:
+        relative = lambda value: (
+            None if value is None else float(value - started)
+        )
+        ik_timing_events.append(
+            {
+                "sequence": int(timing.sequence),
+                "outcome": timing.outcome,
+                "requested_elapsed_sec": relative(
+                    timing.requested_at_sec
+                ),
+                "started_elapsed_sec": relative(timing.started_at_sec),
+                "completed_elapsed_sec": relative(
+                    timing.completed_at_sec
+                ),
+                "accepted_elapsed_sec": relative(
+                    timing.accepted_at_sec
+                ),
+                "request_to_complete_sec": (
+                    None
+                    if timing.completed_at_sec is None
+                    else float(
+                        timing.completed_at_sec
+                        - timing.requested_at_sec
+                    )
+                ),
+                "request_to_accepted_sec": (
+                    None
+                    if timing.accepted_at_sec is None
+                    else float(
+                        timing.accepted_at_sec
+                        - timing.requested_at_sec
+                    )
+                ),
+            }
+        )
     orientation_summary = {
         name: {
             "mean": float(component["total"] / sample_divisor),
@@ -2594,6 +2937,14 @@ def _follow_loop(
             ),
             "max_joint_lead_sec": LEAD_SEC,
             "command_rate_hz": float(1.0 / period),
+            "ik_target_jump_threshold_rad": float(
+                args.ik_jump_threshold
+            ),
+            "diagnostic_profile": (
+                None
+                if diagnostic_profile is None
+                else diagnostic_profile.as_dict()
+            ),
         },
         "result": {
             "termination": termination,
@@ -2609,9 +2960,44 @@ def _follow_loop(
                 "succeeded": int(status.succeeded),
                 "failed": int(status.failed),
                 "superseded": int(status.superseded),
+                "events": ik_timing_events,
+            },
+            "startup_alignment": {
+                "completed": (
+                    startup_alignment_completed_elapsed_sec is not None
+                ),
+                "completed_elapsed_sec": (
+                    None
+                    if startup_alignment_completed_elapsed_sec is None
+                    else float(
+                        startup_alignment_completed_elapsed_sec
+                    )
+                ),
             },
             "position_error_m": position_summary,
+            "position_error_signed_projection_m": (
+                signed_position_summary
+            ),
             "orientation_error_rad": orientation_summary,
+            "ik_target_jumps": {
+                "threshold_rad": float(args.ik_jump_threshold),
+                "transitions": int(ik_target_transition_count),
+                "events": ik_target_jump_events,
+                "per_joint": [
+                    {
+                        "name": joint_name,
+                        "worst_abs_delta_rad": float(
+                            ik_target_jump_worst[joint_index]
+                        ),
+                        "events_over_threshold": int(
+                            ik_target_jump_counts[joint_index]
+                        ),
+                    }
+                    for joint_index, joint_name in enumerate(
+                        group.joints
+                    )
+                ],
+            },
             "within_accepted_marker_position_tolerance_samples": int(
                 within_tolerance
             ),
