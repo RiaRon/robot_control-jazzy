@@ -39,6 +39,13 @@
 - `mock_components/GenericSystem`에서 오른팔 JSON을 `/tmp`에 실제 생성했고,
   관절 7개와 TCP XYZ·Quaternion·RPY를 확인했다. CAN과 실물 모터는 사용하지
   않았다.
+- OpenArm 컴퓨터 `user@user-NUC14SRK-B`의 `/home/user/robot_control-jazzy`에서도
+  가짜 하드웨어 JSON 저장을 확인했다. 이 컴퓨터의 HDGP asset은
+  `/home/user/rl_ws/hdgp`에 있으므로 각 터미널에서
+  `HDGP_ROOT=/home/user/rl_ws/hdgp`를 export해야 한다.
+- OpenArm 컴퓨터의 가짜 오른팔 결과는 관절 7개가 모두 `0.0`이고 TCP XYZ가
+  `[0.0, -0.1534977369405261, 0.08189955003653106] m`였으며 JSON 구조와
+  Quaternion·RPY를 `python3 -m json.tool`로 확인했다.
 
 ## 2026-08-14 완료 내용
 
@@ -73,9 +80,10 @@
   완료했다.
 - 이 상태 문서 갱신 직전 개발 PC의 로컬·원격 `jazzy`는 `93a4c1f`로
   동기화됐다.
-- 실물 OpenArm에서는 아직 빌드하거나 JSON 자세를 읽지 않았다.
-- 과거 문서의 5070ti 접속 후보는 2026-08-18 SSH 연결이 시간 초과됐다. 현재
-  OpenArm 컴퓨터의 호스트나 주소를 확인하기 전에는 다른 대상을 추측하지 않는다.
+- OpenArm 컴퓨터에서 가짜 하드웨어 JSON 읽기는 성공했지만 실물 OpenArm의
+  JSON 자세는 아직 읽지 않았다.
+- OpenArm 컴퓨터의 로컬 호스트명과 저장소 경로는 확인됐지만 원격 SSH 주소는
+  아직 확인되지 않았다. 과거 5070ti 후보 주소는 연결이 시간 초과됐다.
 - 실물 OpenArm을 움직이는 시험은 수행하지 않았고 현재 승인도 없다.
 
 ## 다음 재개 절차
@@ -89,27 +97,25 @@
    git log -1 --oneline --decorate
    ```
 
-2. 현재 OpenArm 컴퓨터의 호스트 또는 주소, clone 경로와 GitHub 접근 여부를
-   확인한다.
-3. OpenArm 컴퓨터에서 병합된 `jazzy`를
-   fetch·checkout한 뒤 그 컴퓨터에서 다시 빌드한다.
-4. 먼저 움직임 없는 자세 읽기만 실행한다.
-
-   ```bash
-   robotctl pose show --group openarm_right_arm --output right-pose.json
-   ```
-
-5. 화면 결과와 JSON의 프로필, 그룹, 7개 관절, TCP XYZ·Quaternion·RPY를
+2. OpenArm 컴퓨터의 저장소는 `/home/user/robot_control-jazzy`, HDGP 경로는
+   `/home/user/rl_ws/hdgp`로 확인됐다. 실제 Git 상태와 최종 빌드 결과는 그
+   컴퓨터에서 다시 기록한다.
+3. 실물 브링업 전 `ip -br link show type can`과 각 인터페이스의
+   `ip -details link show` 결과로 CAN FD의 `state UP`, `fd on`을 확인한다.
+4. 케이블을 따라 오른팔·왼팔의 실제 CAN 인터페이스 매핑을 확인한다. 두 팔은
+   같은 모터 ID를 사용하므로 소프트웨어 출력만 보고 매핑을 추측하지 않는다.
+5. 정확한 매핑과 비상정지 준비가 확인된 뒤에만 실물 브링업을 검토한다. 그 뒤
+   `pose show`에는 `--execute`를 붙이지 않고 JSON을 저장한다.
+6. 화면 결과와 JSON의 프로필, 그룹, 7개 관절, TCP XYZ·Quaternion·RPY를
    대조하고 작은 JSON을 개발 PC로 가져온다.
-6. 위 읽기 작업에는 `--execute`, CAN 매핑, 실물 움직임 승인이 필요 없다.
-7. 이후 움직임 시험이 필요해지면 먼저 `README.md`와
-   `docs/openarm-test-workflow.md`를 전부 읽고 좌우 CAN FD 매핑, 비상정지,
-   현재 브랜치·커밋을 확인한다. 사용자가 그 작업에서 명시적으로 승인한 경우에만
-   저속 실물 명령을 실행한다.
+7. `pose show` 자체는 읽기 전용이지만 실물 브링업은 컨트롤러를 활성화하므로
+   정확한 CAN 매핑과 장비 안전 준비 없이 실행하지 않는다.
+8. 이후 움직임 시험이 필요해지면 먼저 `README.md`와
+   `docs/openarm-test-workflow.md`를 전부 읽고 사용자의 명시적 승인을 받는다.
 
 ## 재개할 때 사용자에게 확인할 내용
 
-- OpenArm 컴퓨터에서 이 저장소를 이미 clone했는지와 실제 경로
-- OpenArm 컴퓨터의 네트워크 또는 GitHub 접근 가능 여부
+- OpenArm 컴퓨터의 SSH 주소 또는 같은 네트워크에서 접근 가능한 방법
+- OpenArm 컴퓨터의 실제 Git 상태와 최종 빌드 결과
 - 움직임 시험까지 진행할 경우에만 실제 오른팔·왼팔 CAN 인터페이스 매핑
 - 움직임 시험까지 진행할 경우에만 당일 실물 움직임에 대한 명시적 승인
