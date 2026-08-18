@@ -155,7 +155,7 @@ Work가 Codex로 돌려보낼 것은 다음과 같다.
 ## 최신 인계 — deterministic 진단 배치
 
 이 절차는 위의 수동 기준선 수집 절차를 대체한다. 배포 대상은 이 기능이 병합된
-최신 `jazzy`이다. 최종 병합 커밋은 Codex 완료 보고와
+최신 `jazzy@2b2ba14`이다. 이후 문서 커밋이 있으면 기능 기준은 `2b2ba14`이고
 `docs/CURRENT_STATUS.md`에서 확인한다.
 
 2026-08-18의 slow, fast, rotation 실물 JSON을 비교한 결과:

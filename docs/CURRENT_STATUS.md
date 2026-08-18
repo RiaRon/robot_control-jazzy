@@ -10,10 +10,12 @@
 - 저장소: `RiaRon/robot_control-jazzy`
 - 개발 PC: `/home/cbj4/robot_control-jazzy`
 - 안정 브랜치: `jazzy`
-- PR #9 병합 기준 `jazzy`: `6b4b51c`
-- 병합된 기능 커밋: `4e39f3d`
-- 병합된 상태 커밋: `6b4b51c`
+- PR #12 기능 병합 기준 `jazzy`: `2b2ba14`
+- 이전 PR #9 기능 병합 기준: `6b4b51c`
+- 최신 병합 기능 커밋: `2b2ba14`
+- 이전 상태 커밋: `6b4b51c`
 - Pull Request:
+  [#12](https://github.com/RiaRon/robot_control-jazzy/pull/12) (merged),
   [#9](https://github.com/RiaRon/robot_control-jazzy/pull/9) (merged)
 - OpenArm 컴퓨터: `user-NUC14SRK-B`
 - OpenArm 저장소: `/home/user/robot_control-jazzy`
@@ -126,3 +128,36 @@ robotctl pose follow \
 상세 판단 기준과 OpenArm 환경은
 [`docs/chatgpt-work-openarm-handoff.md`](chatgpt-work-openarm-handoff.md)를
 따른다.
+
+## 최신 완료 — deterministic follow diagnostics
+
+- PR [#12](https://github.com/RiaRon/robot_control-jazzy/pull/12)가 `jazzy`에
+  rebase 병합됐다.
+- 기능 기준 커밋: `2b2ba14`
+- 기존 pose-follow 제어, gain, safety gate와 schema v1 필드는 유지했다.
+- startup alignment 완료 여부·시각, IK request/complete/accepted 시각·latency,
+  live-error 방향 signed projection, 관절별 IK target jump 이벤트를 추가했다.
+- jump 이벤트는 관측 전용이며 target을 거부·클램프하지 않는다.
+- deterministic `translation`, `rotation`, `translation-rotation` 왕복
+  profile을 추가했다. 기본은 dry run이고 `--execute` 없이는 발행하지 않는다.
+- profile hard cap은 거리 30 mm, 회전 10도, 20 mm/s, 0.10 rad/s, 3회이다.
+
+검증:
+
+- 전체 Python: `632 passed, 4 skipped`
+- 관련 회귀: `46 passed, 46 deselected`
+- ROS 2 Jazzy 빌드: 11개 패키지 성공
+- 실제 ROS mock stack: `mock_components/GenericSystem`, 167 samples,
+  97.4 Hz, IK 3/3 성공, 실패·superseded 0, JSON 저장 성공
+- 실제 OpenArm/CAN/모터는 이 개발 배치에서 사용하지 않았다.
+
+다음 실물 단계는 파라미터 tuning이 아니라 clean deterministic 기준선 2개다.
+
+1. 오른팔 10 mm world-x translation 왕복, 5 mm/s, 양 끝 3초 hold
+2. 오른팔 local-z 5도 rotation 왕복, 0.05 rad/s, 양 끝 3초 hold
+
+정확한 배포·dry-run·실물 명령과 중단 조건은
+[`docs/chatgpt-work-openarm-handoff.md`](chatgpt-work-openarm-handoff.md)의
+'최신 인계 — deterministic 진단 배치'를 따른다. 두 clean JSON을 확보하기
+전에는 kp나 속도 한계를 바꾸지 않는다. IK continuity 보호는 다음 별도 개발
+배치이며 이번 커밋에는 포함되지 않았다.
