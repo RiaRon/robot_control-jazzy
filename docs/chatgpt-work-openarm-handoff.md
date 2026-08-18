@@ -152,3 +152,98 @@ Work가 Codex로 돌려보낼 것은 다음과 같다.
 현재 결론은 정적 도달 실패가 아니다. 오른팔은 마커 정지 후 1.4 mm까지
 수렴했다. 다음 목표는 기존 안전 제한을 유지하면서 이동 중 지연의 원인을
 분리한 뒤 가장 큰 한 계층만 조정하는 것이다.
+## 최신 인계 — deterministic 진단 배치
+
+이 절차는 위의 수동 기준선 수집 절차를 대체한다. 배포 대상은 이 기능이 병합된
+최신 `jazzy`이다. 최종 병합 커밋은 Codex 완료 보고와
+`docs/CURRENT_STATUS.md`에서 확인한다.
+
+2026-08-18의 slow, fast, rotation 실물 JSON을 비교한 결과:
+
+- 평균 live-marker 오차는 slow 6.6 mm, fast 13.6 mm, rotation 12.3 mm였다.
+- fast의 live worst 154.9 mm는 이전 IK marker snapshot 기준 58.4 mm와 달리,
+  최신 marker가 118.2 mm 앞선 순간까지 포함한 값이다.
+- signed projection상 평균의 주 양의 기여는 `command_to_measured`였고,
+  `ik_target_to_command`는 상당 부분 반대 방향으로 상쇄됐다.
+- J4 peak는 모터 추종만의 문제가 아니라 J1/J4/J7이 함께 바뀌는 IK target
+  posture 불연속 정황이 강했다.
+- rotation 로그에는 alignment 완료 문장이 있으나 첫 trace가 10.4초부터이고,
+  79 요청 중 49개가 superseded됐으며 위치도 약 206 mm 움직였다. 정상
+  rotation 기준선으로 사용하지 않는다.
+
+새 JSON은 기존 schema v1과 필드를 유지하면서 startup 완료 시각, IK sequence별
+request/complete/accepted 시각과 latency, signed projection, 관절 target jump
+이벤트, deterministic profile phase를 추가한다. Jump는 진단만 하며 제어를
+바꾸지 않는다.
+
+### OpenArm 배포와 무동작 확인
+
+```bash
+cd /home/user/robot_control-jazzy
+git status --short --branch
+git fetch origin
+git switch jazzy
+git pull --ff-only origin jazzy
+git log -1 --oneline
+
+source /opt/ros/jazzy/setup.bash
+./ros_ws/build.sh
+source ros_ws/install/setup.bash
+export PYTHONPATH="src:.:${PYTHONPATH:-}"
+export HDGP_ROOT=/home/user/rl_ws/hdgp
+```
+
+실물 브링업 후 RViz planning group을 `right_arm`으로 선택하고 marker를
+Current로 맞춘다. 다음 두 명령은 `--execute`가 없으므로 profile을 출력할
+뿐 위치 명령을 보내지 않는다.
+
+```bash
+robotctl pose follow --group openarm_right_arm \
+  --diagnostic-profile translation \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10
+
+robotctl pose follow --group openarm_right_arm \
+  --diagnostic-profile rotation \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10
+```
+
+### 최소 실물 배치
+
+아래 명령은 실물을 움직인다. 당일 사용자의 명시 승인, E-stop, 빈 작업공간,
+오른팔 `can0` 확인 후에만 실행한다. 각 실행에서 alignment 완료 문장을 본
+뒤에는 marker를 만지지 않는다.
+
+1. 10 mm world-x translation 왕복, 5 mm/s, 양 끝 3초 hold:
+
+```bash
+# --execute publishes commands and moves the real right arm.
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile translation \
+  --diagnostic-distance 0.01 \
+  --diagnostic-linear-speed 0.005 \
+  --diagnostic-hold-sec 3 \
+  --output /tmp/right-follow-diagnostic-translation.json \
+  --execute
+```
+
+2. startup TCP local-z 기준 5도 회전 왕복, 0.05 rad/s, 양 끝 3초 hold:
+
+```bash
+# --execute publishes commands and moves the real right arm.
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile rotation \
+  --diagnostic-angle 0.0872665 \
+  --diagnostic-angular-speed 0.05 \
+  --diagnostic-hold-sec 3 \
+  --output /tmp/right-follow-diagnostic-rotation.json \
+  --execute
+```
+
+비정상 소음·진동·충돌, 30 mm 초과 live 위치 오차, 10도 초과 live 방향 오차,
+0.30 rad 초과 단일 관절 target jump가 보이면 즉시 중단하고 두 JSON과 전체
+터미널 로그를 Codex로 전달한다. 이 두 clean 기준선을 확보하기 전에는 kp나
+속도 한계를 비교하지 않는다.
