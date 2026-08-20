@@ -12,9 +12,10 @@
 - 안정 브랜치: `jazzy`
 - PR #12 기능 병합 기준 `jazzy`: `2b2ba14`
 - 이전 PR #9 기능 병합 기준: `6b4b51c`
-- 최신 병합 기능 커밋: `2b2ba14`
+- 최신 병합 기능 커밋: `295adbe`
 - 이전 상태 커밋: `6b4b51c`
 - Pull Request:
+  [#17](https://github.com/RiaRon/robot_control-jazzy/pull/17) (merged),
   [#12](https://github.com/RiaRon/robot_control-jazzy/pull/12) (merged),
   [#9](https://github.com/RiaRon/robot_control-jazzy/pull/9) (merged)
 - OpenArm 컴퓨터: `user-NUC14SRK-B`
@@ -253,12 +254,12 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 - 관련 문서/Python 계약: `9 passed`
 - 전체 Python: `636 passed, 4 skipped`
 
-## 최신 개발 배치 — sequence-6 IK continuity 및 partial refusal JSON
+## 최신 완료 — sequence-6 IK continuity 및 partial refusal JSON
 
-- 기준: `jazzy@0673903`; 작업 브랜치: `feature/pose-follow-ik-continuity`
-- 기능 커밋: `6ae96b0`
+- 개발 기준: `jazzy@0673903`; 병합 후 기능 기준: `jazzy@295adbe`
+- rebase된 기능 커밋: `0b07d79`, 실제 pose replay 커밋: `295adbe`
 - Pull Request: [#17](https://github.com/RiaRon/robot_control-jazzy/pull/17)
-  (`jazzy` 대상, open)
+  (`jazzy`에 rebase 병합 완료)
 - 2026-08-20 오른팔 translation 실물 1회는 351 samples, 99.0 Hz, 안전 구간
   IK 6/6, failed/superseded 0, live 위치 mean/worst `2.5/8.3 mm`, 방향
   `0.2/0.2 deg`, Cartesian limit와 joint clamp 0이었다.
