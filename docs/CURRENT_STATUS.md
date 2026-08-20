@@ -334,6 +334,7 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 ## 최신 완료 — A′ v2 표준 ready와 controller-rate 중력보상
 
 - 개발 기준: `origin/jazzy@df06a9d`; 브랜치: `feature/ready-gravity-hold`.
+- Pull Request: [#19](https://github.com/RiaRon/robot_control-jazzy/pull/19).
 - 운영자 결정으로 표준은 `openarm_right_ready_v2 = [0,0.2,0,0.6,0,0,0] rad`
   (A′)이며 D는 명시 선택 가능한 legacy `openarm_right_ready_v1`이다.
 - `pose ready --execute`는 첫 position publish 전에 trajectory+effort controller가

@@ -461,6 +461,7 @@ robotctl pose ready --group openarm_right_arm \
 ```
 
 ## 최신 인계 — A′ v2 ready 중력보상
+\nPull Request: [#19](https://github.com/RiaRon/robot_control-jazzy/pull/19)
 
 기본 ready는 A′인 `openarm_right_ready_v2 = [0,0.2,0,0.6,0,0,0] rad`다. D는
 `--posture openarm_right_ready_v1`로만 선택하는 legacy 비교 자세다. deterministic
