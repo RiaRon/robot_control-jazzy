@@ -10,6 +10,21 @@ from robot_control.cli import main
 RIGHT_ARM = ["--group", "openarm_right_arm"]
 
 
+# Read from /home/cbj4/Downloads/right-pose-before.json on 2026-08-20.
+# The raw incident JSON is intentionally not a repository fixture.
+INCIDENT_INITIAL_JOINTS_RAD = np.array(
+    [
+        -0.002861066605630569,
+        0.005149919890135024,
+        0.008964675364309116,
+        -0.005531395437552433,
+        -0.02613107499809253,
+        -0.02155336842908362,
+        -0.0005722133211261138,
+    ]
+)
+
+
 class CartesianReplayChain:
     """Small FK model that makes replayed joint changes observable as a pose."""
 
@@ -191,17 +206,20 @@ def test_output_permission_failure_is_refused_before_adapter_creation(
 def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
     monkeypatch, capsys
 ):
-    # Replaced with the incident pose snapshot values once the transferred
-    # right-pose-before.json is available in openarm_follow_data.
-    initial_joints = np.zeros(7)
+    # The terminal summary retained magnitudes only. These representative
+    # signs make the replay deterministic; fake MoveIt independently produced
+    # an approximately -0.75/+0.75 rad J3/J5 branch on this exact initial pose.
     branch_offset = np.zeros(7)
     branch_offset[2] = 0.7646
     branch_offset[4] = -0.7480
-    arm = ReplayArm(initial_joints, branch_offset)
+    arm = ReplayArm(INCIDENT_INITIAL_JOINTS_RAD, branch_offset)
     install_replay(monkeypatch, arm)
 
     assert main(diagnostic_args("--execute")) == 3
     assert arm.ik_requests
+    np.testing.assert_array_equal(
+        arm.ik_requests[0][1], INCIDENT_INITIAL_JOINTS_RAD
+    )
     assert arm.streamed == []
     output = capsys.readouterr().out
     assert "IK target jump refused before publish" in output
@@ -212,17 +230,22 @@ def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
 def test_deterministic_position_clamp_is_refused_before_publish(
     monkeypatch, capsys
 ):
-    ik_offset = np.zeros(7)
-    ik_offset[3] = -0.10  # J4 profile lower bound is exactly 0 rad.
-    arm = ReplayArm(np.zeros(7), ik_offset)
+    # J4 is already 0.005531 rad below the URDF and profile lower limit.
+    # No artificial IK offset is needed to reproduce the incident clamp.
+    arm = ReplayArm(INCIDENT_INITIAL_JOINTS_RAD)
+    assert INCIDENT_INITIAL_JOINTS_RAD[3] < 0.0
     install_replay(monkeypatch, arm)
 
     assert main(diagnostic_args("--execute")) == 3
     assert arm.ik_requests
     assert arm.streamed == []
+    np.testing.assert_array_equal(
+        arm.ik_requests[0][1], INCIDENT_INITIAL_JOINTS_RAD
+    )
     output = capsys.readouterr().out
     assert "deterministic profile position clamp refused before publish" in output
-    assert "r_aj_4" in output
+    assert "lower: r_aj_4" in output
+    assert "upper:" not in output
 
 
 def test_ik_target_jump_at_exact_hard_boundary_is_refused(monkeypatch, capsys):

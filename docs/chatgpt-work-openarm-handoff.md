@@ -267,8 +267,17 @@ superseded 3이 출력됐으나 follow JSON과 전체 명령줄은 저장되지 
 - accepted IK target의 단일 관절 변화가 `0.30 rad` 이상이면 그 target을
   publish하기 전에 자동 거부한다.
 - deterministic profile에서 position clamp가 발생하면 clamp된 command를
-  publish하기 전에 자동 거부한다.
+  publish하기 전에 lower/upper 방향과 관절을 출력하고 자동 거부한다.
 - 수동 marker follow의 기존 clamp 정책은 바뀌지 않았다.
+- 회수한 초기 pose의 J4는 `-0.0055313954 rad`로 URDF/profile lower `0 rad`보다
+  `5.53 mrad` 낮았다. exact-pose replay는 인위적 IK offset 없이 startup lower
+  clamp를 재현했다.
+- fake MoveIt에서 같은 seed의 world-x 2 mm 목표를 50회 계산하자 39회가
+  `0.30 rad` 이상 branch jump였고, 그중 terminal 크기에 가까운 해는 J3
+  `-0.753756 rad`, J5 `+0.753498 rad`였다.
+- 이 snapshot은 encoder/ROS state와 모델 한계의 불일치를 증명하지만 motor zero
+  calibration 오차와 제어 settling을 구분하지는 못한다. 이 자료만으로 motor
+  zero를 다시 쓰거나 URDF lower를 완화하지 않는다.
 
 ### 재시험 전 파일 경로 준비
 
@@ -297,10 +306,27 @@ FOLLOW_LOG="$RUN_DIR/$RUN_STEM.log"
 # 읽기 전용 초기 자세 기록. 실물 command를 보내지 않는다.
 robotctl pose show --group openarm_right_arm --output "$POSE_JSON"
 python3 -m json.tool "$POSE_JSON" >/dev/null
+python3 - "$POSE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+group = next(
+    item for item in payload["groups"]
+    if item["name"] == "openarm_right_arm"
+)
+q4 = group["joint_positions_rad"][3]
+print(f"pre-run J4: {q4:+.9f} rad (required: >= 0 rad)")
+if q4 < 0.0:
+    raise SystemExit("STOP: J4 is below the URDF/profile lower limit")
+PY
 ```
 
 원시 pose/follow JSON과 terminal log는 실험 데이터 저장소에 두고 Git에 추가하지
-않는다.
+않는다. J4 검사에서 `STOP`이면 follow `--execute`로 넘어가지 않는다. 이 상태에서
+영점 calibration이나 URDF limit 변경도 자동으로 수행하지 않고 별도 기구·엔코더
+점검으로 넘긴다.
 
 ### 무동작 확인
 
@@ -338,7 +364,9 @@ robotctl pose follow --group openarm_right_arm \
 - 비정상 소음·진동·발열·충돌 또는 예상 밖 방향의 움직임
 - CAN error counter 증가, controller 비활성 또는 joint-state 중단
 - `refused: IK target jump refused before publish` (단일 관절 `>= 0.30 rad`)
+- 실행 전 pose의 J4가 `0 rad`보다 작음
 - `refused: deterministic profile position clamp refused before publish`
+  (`lower:` 또는 `upper:` 방향 포함)
 - IK failed, superseded 또는 J3/J5의 새 target 불연속
 - live TCP 위치 `> 30 mm` 또는 방향 `> 10 deg`
 - JSON/로그 파일이 없거나 JSON 문법 검사가 실패함

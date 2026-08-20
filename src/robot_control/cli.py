@@ -2499,12 +2499,20 @@ def _follow_loop(
                         if diagnostic_sample is None
                         else diagnostic_sample.phase
                     )
-                    joints = ", ".join(
-                        gate.last_follow_limits["position"]
-                    )
+                    directions = []
+                    for key, label in (
+                        ("position_lower", "lower"),
+                        ("position_upper", "upper"),
+                    ):
+                        if key in gate.last_follow_limits:
+                            directions.append(
+                                f"{label}: "
+                                + ", ".join(gate.last_follow_limits[key])
+                            )
                     raise SafetyError(
                         "deterministic profile position clamp refused before "
-                        f"publish during {phase}: {joints}"
+                        f"publish during {phase}: "
+                        + "; ".join(directions)
                     )
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1

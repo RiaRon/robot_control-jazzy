@@ -32,10 +32,24 @@ IK: 7 accepted, 3 superseded
 rotation profile: not run
 ```
 
-`right-pose-before.json`과 원시 follow JSON은 현재 개발 PC에 없다.
-`/home/cbj4/openarm_follow_data/openarm-diagnostic-aborted-2026-08-20.tar.gz`도
-0바이트다. 따라서 정확한 초기 관절값, J3/J5 jump 부호, J4 lower/upper clamp
-방향은 아직 원시 자료로 확정할 수 없다.
+이후 `right-pose-before.json`을 Downloads에서 확인했다. 원본은 읽기만 했고
+Git에는 포함하지 않았다. SHA-256은
+`2c6b96b0518c71619f4b80b01a71860c9db98f60a30982688474863f2788a164`다.
+fixture에는 다음 canonical 관절값만 복사했다.
+
+```text
+r_aj_1 -0.002861066605630569
+r_aj_2 +0.005149919890135024
+r_aj_3 +0.008964675364309116
+r_aj_4 -0.005531395437552433
+r_aj_5 -0.026131074998092530
+r_aj_6 -0.021553368429083620
+r_aj_7 -0.000572213321126114
+```
+
+J4 실측값은 모델 lower `0 rad`보다 `0.0055313954 rad` 낮다. 원시 follow
+trace는 여전히 없으므로 516개 clamp 각각의 방향과 당시 J3/J5 jump 부호는
+복구할 수 없지만, startup 상태의 J4 lower 위반은 snapshot으로 확정됐다.
 
 ## J4 clamp 계산 경로
 
@@ -49,10 +63,20 @@ velocity `2 rad/s`다. 한 follow 주기의 후보 명령은 다음 순서를 �
 5. 최종 command를 관절 위치 범위로 clamp한다.
 6. 기존 코드는 clamp된 command를 controller에 발행하고 횟수를 기록했다.
 
-따라서 J4 516회는 516개 샘플에서 5단계 직전의 J4 command가 `[0,
-2.44346]` 밖이었다는 뜻이다. 초기 pose와 trace가 없으므로 lower 또는 upper 중
-어느 방향인지는 터미널 합계만으로 결정할 수 없다. 작은 deterministic 왕복에서
-position clamp는 예상 동작이 아니므로 수정본은 첫 발생을 발행 전에 거부한다.
+정확한 pose를 쓰고 IK offset을 전혀 추가하지 않은 replay는 첫 accepted target이
+measured state와 같아도 J4를 즉시 `lower: r_aj_4`로 재현했다. 따라서 startup
+clamp 방향은 lower다. 원시 trace가 없어 516회 전부가 lower였다고 단정할 수는
+없지만, upper 방향 증거는 없고 초기 lower 위반만으로 기존 clamp 경로가 시작될
+조건은 충분하다.
+
+URDF 생성 원본과 robot-control profile은 J4 lower를 모두 정확히 `0 rad`로
+정의하며 MoveIt 설정은 위치 한계를 override하지 않는다. 실물 hardware
+interface는 motor `get_position()`을 offset 없이 ROS state로 내보내고, 활성화 때
+`0 rad`를 명령하지만 1 ms 뒤 한 번만 상태를 받는다. 따라서 snapshot은
+엔코더/ROS 관절 좌표와 모델 한계가 `5.53 mrad` 어긋나 있음을 증명한다. 다만 이
+한 장의 snapshot만으로 motor에 저장된 영점 calibration 오차와 impedance
+settling·제어 오버슈트를 구분할 수는 없다. 실물 mechanical-stop calibration
+없이는 URDF lower를 완화하거나 motor zero를 다시 쓰지 않는다.
 
 ## 반영한 안전 경계
 
@@ -83,9 +107,18 @@ position clamp는 예상 동작이 아니므로 수정본은 첫 발생을 발�
 - fake 오른팔 command topic 감시 중 dry-run 실행: 8초간 message 0건
 - 같은 감시 중 쓰기 불가 `/proc/...` output과 `--execute`: ROS 연결 전 exit 2,
   8초간 message 0건
-- fake replay의 J3/J5 `+0.7646/-0.7480 rad` branch jump: 첫 publish 전 exit 3,
-  stream 0건
-- fake replay의 J4 lower position clamp: 첫 publish 전 exit 3, stream 0건
+- 정확한 7관절 fixture + terminal magnitude replay의 J3/J5
+  `+0.7646/-0.7480 rad` branch jump: 첫 publish 전 exit 3, stream 0건
+- 정확한 7관절 fixture, IK offset 0의 J4 clamp: `lower: r_aj_4`, 첫 publish 전
+  exit 3, stream 0건
+- fake MoveIt에서 snapshot TCP를 snapshot seed로 풀면 delta는 전 관절 정확히
+  `0 rad`였다. 즉 현재 TCP 자체는 branch jump를 만들지 않았다.
+- 같은 seed의 world-x `2 mm` 목표를 50회 풀면 50회 accepted, 39회가 한 관절
+  `0.30 rad` 이상이었다. J3 절댓값 범위는 `0.00157–1.57976 rad`, J5는
+  `0.00128–1.59693 rad`였고, terminal 크기에 가장 가까운 해는
+  J3 `-0.753756 rad`, J5 `+0.753498 rad`였다.
 
-정확한 초기 pose replay는 `right-pose-before.json`이 다시 전달된 뒤 그 7개
-관절값으로 fixture를 교체하고 전체 검증을 재실행해야 한다.
+따라서 약 `0.75 rad` 현상은 정확한 초기 pose에서 작은 translation 목표가
+들어올 때 KDL이 여유자유도의 다른 branch를 선택하는 것으로 재현된다. 선택은
+호출마다 달라 exact terminal 값이 결정적이지 않지만, 새 `0.30 rad` 경계는
+그러한 해를 controller로 처음 보내기 전에 차단한다.
