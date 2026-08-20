@@ -166,6 +166,8 @@ robotctl pose follow \
 
 - 기준: `jazzy` `8a700c0`, 작업 브랜치
   `feature/matlab-pose-follow-analysis`
+- Pull Request: [#14](https://github.com/RiaRon/robot_control-jazzy/pull/14)
+  (`jazzy` 대상, open)
 - `matlab/pose_follow/`에 읽기 전용 분석기를 추가했다. 로봇 제어 코드와 ROS
   package는 변경하지 않았다.
 - 2026-08-18 legacy real schema v1과 deterministic diagnostics가 확장된
