@@ -173,6 +173,11 @@ DEFAULT_IK_TARGET_JUMP_THRESHOLD_RAD = 0.10
 # reporting knob; crossing it refuses the target before its first publication.
 MAX_SAFE_IK_TARGET_JUMP_RAD = 0.30
 
+# A discontinuous MoveIt solution is never published. Repeating the same
+# solve from the previously accepted joint solution gives KDL a bounded chance
+# to return the nearby branch before the deterministic run is stopped.
+IK_CONTINUITY_MAX_ATTEMPTS = 4
+
 # How long a streamed command may be ahead of the arm, expressed as travel time
 # at the joint's velocity limit. It has to exceed the standing droop or the arm
 # cannot advance at all, and stay small enough that a blocked joint does not wind
@@ -1884,7 +1889,11 @@ def _pose_follow(args, profile) -> int:
             execute=False,
             node_name="robot_control_pose_follow_ik",
         ) as ik_adapter:
-            worker = LatestIkWorker(ik_adapter.solve_ik)
+            worker = LatestIkWorker(
+                ik_adapter.solve_ik,
+                max_target_jump_rad=MAX_SAFE_IK_TARGET_JUMP_RAD,
+                max_continuity_attempts=IK_CONTINUITY_MAX_ATTEMPTS,
+            )
             try:
                 diagnostics = _follow_loop(
                     adapter,
@@ -1900,6 +1909,7 @@ def _pose_follow(args, profile) -> int:
                 )
             finally:
                 worker.close()
+    refusal = diagnostics["result"].get("refusal")
     if args.output is not None:
         _write_json_atomic(
             args.output,
@@ -1910,7 +1920,10 @@ def _pose_follow(args, profile) -> int:
                 **diagnostics,
             },
         )
-        print(f"wrote pose follow diagnostics: {args.output}")
+        qualifier = "partial " if refusal is not None else ""
+        print(f"wrote {qualifier}pose follow diagnostics: {args.output}")
+    if refusal is not None:
+        raise SafetyError(refusal["message"])
     return 0
 
 
@@ -1950,6 +1963,7 @@ def _follow_loop(
     # 각 IK 결과가 어떤 최종 마커 목표를 기준으로 계산됐는지 저장한다.
     requested_positions: list[np.ndarray] = []
     requested_orientations: list[tuple[float, float, float, float]] = []
+    requested_profile_phases: list[str] = []
 
     # 처음에는 RViz 서비스에서 읽은 파란 마커를 사용한다.
     # 이후 사용자가 드래그하면 최신 피드백으로 교체한다.
@@ -2069,6 +2083,7 @@ def _follow_loop(
     last_cycle = started
     deadline = started + args.seconds
     termination = "completed"
+    refusal = None
     try:
         while time.monotonic() < deadline:
             cycle = time.monotonic()
@@ -2269,7 +2284,68 @@ def _follow_loop(
                     # IK 결과와 최종 마커 목표의 오차를 연결하기 위해 저장한다.
                     requested_positions.append(desired_position.copy())
                     requested_orientations.append(desired_orientation)
+                    if diagnostic_profile is None:
+                        request_phase = (
+                            "startup_alignment"
+                            if marker_origin is None
+                            else "manual_follow"
+                        )
+                    elif diagnostic_sample is not None:
+                        request_phase = diagnostic_sample.phase
+                    elif diagnostic_started_at is None:
+                        request_phase = "startup_alignment"
+                    else:
+                        request_phase = "profile_start"
+                    requested_profile_phases.append(request_phase)
             status = ik_worker.snapshot()
+            if status.continuity_refusal is not None:
+                rejected = status.continuity_refusal
+                safety_jump = rejected.joint_delta_rad
+                unsafe_jump = np.flatnonzero(
+                    np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD
+                )
+                phase = (
+                    requested_profile_phases[rejected.sequence - 1]
+                    if 0 < rejected.sequence <= len(requested_profile_phases)
+                    else "unknown"
+                )
+                offenders = ", ".join(
+                    f"{group.joints[index]}="
+                    f"{safety_jump[index]:+.4f} rad"
+                    for index in unsafe_jump
+                )
+                reference = (
+                    "measured startup state"
+                    if last_accepted_ik_target is None
+                    else f"accepted IK sequence {last_accepted_ik_sequence}"
+                )
+                message = (
+                    "IK target jump refused before publish after "
+                    f"{rejected.attempt} continuity attempts: sequence "
+                    f"{rejected.sequence} differs from {reference} by at "
+                    f"least {MAX_SAFE_IK_TARGET_JUMP_RAD:.2f} rad: "
+                    f"{offenders}"
+                )
+                refusal = {
+                    "reason": "ik_continuity_exhausted",
+                    "message": message,
+                    "refused_sequence": int(rejected.sequence),
+                    "profile_phase": phase,
+                    "attempts": int(rejected.attempt),
+                    "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                    "reference_sequence": (
+                        None
+                        if last_accepted_ik_sequence is None
+                        else int(last_accepted_ik_sequence)
+                    ),
+                    "joint_delta_rad": [
+                        float(value) for value in safety_jump
+                    ],
+                    "triggered_joints": [
+                        group.joints[index] for index in unsafe_jump
+                    ],
+                }
+                raise SafetyError(message)
             if status.target is not None and status.target_sequence is not None:
                 target_joints = status.target
                 if status.target_sequence != last_accepted_ik_sequence:
@@ -2296,13 +2372,42 @@ def _follow_loop(
                             f"{safety_jump[index]:+.4f} rad"
                             for index in unsafe_jump
                         )
-                        raise SafetyError(
+                        message = (
                             "IK target jump refused before publish: "
                             f"sequence {status.target_sequence} differs from "
                             f"{reference} by at least "
                             f"{MAX_SAFE_IK_TARGET_JUMP_RAD:.2f} rad: "
                             f"{offenders}"
                         )
+                        refusal = {
+                            "reason": "ik_target_jump_hard_boundary",
+                            "message": message,
+                            "refused_sequence": int(
+                                status.target_sequence
+                            ),
+                            "profile_phase": (
+                                requested_profile_phases[
+                                    status.target_sequence - 1
+                                ]
+                                if 0 < status.target_sequence
+                                <= len(requested_profile_phases)
+                                else "unknown"
+                            ),
+                            "attempts": 1,
+                            "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                            "reference_sequence": (
+                                None
+                                if last_accepted_ik_sequence is None
+                                else int(last_accepted_ik_sequence)
+                            ),
+                            "joint_delta_rad": [
+                                float(value) for value in safety_jump
+                            ],
+                            "triggered_joints": [
+                                group.joints[index] for index in unsafe_jump
+                            ],
+                        }
+                        raise SafetyError(message)
                     if last_accepted_ik_target is not None:
                         jump = target_joints - last_accepted_ik_target
                         jump_abs = np.abs(jump)
@@ -2509,11 +2614,33 @@ def _follow_loop(
                                 f"{label}: "
                                 + ", ".join(gate.last_follow_limits[key])
                             )
-                    raise SafetyError(
+                    message = (
                         "deterministic profile position clamp refused before "
                         f"publish during {phase}: "
                         + "; ".join(directions)
                     )
+                    refusal = {
+                        "reason": "deterministic_position_clamp",
+                        "message": message,
+                        "refused_sequence": (
+                            None
+                            if status.target_sequence is None
+                            else int(status.target_sequence)
+                        ),
+                        "profile_phase": phase,
+                        "attempts": 0,
+                        "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                        "reference_sequence": (
+                            None
+                            if last_accepted_ik_sequence is None
+                            else int(last_accepted_ik_sequence)
+                        ),
+                        "joint_delta_rad": None,
+                        "triggered_joints": list(
+                            gate.last_follow_limits["position"]
+                        ),
+                    }
+                    raise SafetyError(message)
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
                 for limit_kind, limited_joint_names in (
@@ -2774,6 +2901,28 @@ def _follow_loop(
                 termination = "diagnostic_profile_completed"
                 break
             time.sleep(max(0.0, period - (time.monotonic() - cycle)))
+    except SafetyError as error:
+        termination = "safety_refused"
+        if refusal is None:
+            refusal = {
+                "reason": "safety_refusal",
+                "message": str(error),
+                "refused_sequence": None,
+                "profile_phase": (
+                    "startup_alignment"
+                    if diagnostic_sample is None
+                    else diagnostic_sample.phase
+                ),
+                "attempts": 0,
+                "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                "reference_sequence": (
+                    None
+                    if last_accepted_ik_sequence is None
+                    else int(last_accepted_ik_sequence)
+                ),
+                "joint_delta_rad": None,
+                "triggered_joints": [],
+            }
     except KeyboardInterrupt:
         termination = "interrupted"
         print("\ninterrupted")
@@ -2793,6 +2942,12 @@ def _follow_loop(
         print(
             f"  IK requests {status.submitted}: {status.succeeded} succeeded, "
             f"{status.failed} failed, {status.superseded} superseded"
+        )
+        print(
+            "  IK continuity: "
+            f"{status.continuity_rejected} rejected solution(s), "
+            f"{status.continuity_retries} retry attempt(s), "
+            f"{status.continuity_exhausted} exhausted request(s)"
         )
         if samples:
             print(
@@ -2966,6 +3121,34 @@ def _follow_loop(
                 ),
             }
         )
+    ik_continuity_events = []
+    for event in status.continuity_rejections:
+        triggered = np.flatnonzero(
+            np.abs(event.joint_delta_rad)
+            >= MAX_SAFE_IK_TARGET_JUMP_RAD
+        )
+        phase = (
+            requested_profile_phases[event.sequence - 1]
+            if 0 < event.sequence <= len(requested_profile_phases)
+            else "unknown"
+        )
+        ik_continuity_events.append(
+            {
+                "sequence": int(event.sequence),
+                "attempt": int(event.attempt),
+                "rejected_elapsed_sec": float(
+                    event.rejected_at_sec - started
+                ),
+                "profile_phase": phase,
+                "joint_delta_rad": [
+                    float(value) for value in event.joint_delta_rad
+                ],
+                "triggered_joints": [
+                    group.joints[index] for index in triggered
+                ],
+                "exhausted": bool(event.exhausted),
+            }
+        )
     orientation_summary = {
         name: {
             "mean": float(component["total"] / sample_divisor),
@@ -3056,6 +3239,9 @@ def _follow_loop(
             "max_safe_ik_target_jump_rad": float(
                 MAX_SAFE_IK_TARGET_JUMP_RAD
             ),
+            "ik_continuity_max_attempts": int(
+                IK_CONTINUITY_MAX_ATTEMPTS
+            ),
             "diagnostic_profile": (
                 None
                 if diagnostic_profile is None
@@ -3064,6 +3250,8 @@ def _follow_loop(
         },
         "result": {
             "termination": termination,
+            "is_partial": refusal is not None,
+            "refusal": refusal,
             "duration_sec": float(elapsed_total),
             "cycles": int(cycles),
             "samples": int(samples),
@@ -3076,6 +3264,17 @@ def _follow_loop(
                 "succeeded": int(status.succeeded),
                 "failed": int(status.failed),
                 "superseded": int(status.superseded),
+                "solve_attempts": int(status.solve_attempts),
+                "continuity_rejected": int(
+                    status.continuity_rejected
+                ),
+                "continuity_retries": int(
+                    status.continuity_retries
+                ),
+                "continuity_exhausted": int(
+                    status.continuity_exhausted
+                ),
+                "continuity_events": ik_continuity_events,
                 "events": ik_timing_events,
             },
             "startup_alignment": {

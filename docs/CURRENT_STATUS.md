@@ -252,3 +252,30 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 - PDF: 표지와 그림 6개, 7 pages
 - 관련 문서/Python 계약: `9 passed`
 - 전체 Python: `636 passed, 4 skipped`
+
+## 진행 중 — sequence-6 IK continuity 및 partial refusal JSON
+
+- 기준: `jazzy@0673903`; 작업 브랜치: `feature/pose-follow-ik-continuity`
+- 2026-08-20 오른팔 translation 실물 1회는 351 samples, 99.0 Hz, 안전 구간
+  IK 6/6, failed/superseded 0, live 위치 mean/worst `2.5/8.3 mm`, 방향
+  `0.2/0.2 deg`, Cartesian limit와 joint clamp 0이었다.
+- sequence 6의 J1/J2 약 pi, J3/J5 약 pi/2 branch jump는 기존 `>= 0.30 rad`
+  경계가 첫 publish 전에 차단했다. rotation은 실행하지 않았다.
+- 전달 폴더의 9개 파일은 모두 0바이트라 원시 trace 재계산은 불가능하다. 수치는
+  terminal 기록을 근거로 하며 데이터와 생성물은 Git에 넣지 않는다.
+- 불연속 IK 해는 publish·target 승격 없이 이전 accepted target을 유지한다.
+  동일한 이전 관절해 seed로 최대 4회 bounded retry하고, 연속 해가 없으면 종료한다.
+  기존 `0.30 rad` hard boundary는 유지하며 CLI로 완화할 수 없다.
+- safety refusal도 지금까지의 trace, refusal reason/sequence/phase/7개 delta와
+  continuity event를 partial JSON으로 원자 저장한 뒤 exit 3을 반환한다.
+- MATLAB 분석기는 legacy/full/partial-refused JSON을 함께 분석한다.
+- 합성 sequence-6 replay는 4개 bad branch를 모두 publish 전에 차단했고, 실제
+  ROS mock translation은 408 samples, 99.0 Hz, IK 9/9, continuity refusal/clamp
+  0으로 왕복 완료했다.
+- MATLAB R2026a에서 legacy real + full fake + partial fake bundle의 CSV/JSON/MAT,
+  PNG 6개와 7-page PDF 생성을 확인했다.
+- 상세:
+  [`docs/pose-follow-ik-continuity-incident-2026-08-20.md`](pose-follow-ik-continuity-incident-2026-08-20.md)
+- 집중 회귀: `19 passed`; pose/pose-follow CLI: `67 passed, 8 deselected`
+- 전체 Python: `647 passed, 4 skipped`; ROS 2 Jazzy: 11개 패키지 빌드 성공
+- 이 배치에서 실물 재시험이나 rotation 실행을 요청하지 않는다.
