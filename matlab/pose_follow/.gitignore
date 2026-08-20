@@ -1,0 +1,9 @@
+# Raw pose-follow inputs and generated analysis bundles stay out of Git.
+*.json
+*.csv
+*.mat
+*.png
+*.pdf
+output/
+outputs/
+analysis_bundle*/

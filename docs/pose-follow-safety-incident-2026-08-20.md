@@ -77,7 +77,7 @@ position clamp는 예상 동작이 아니므로 수정본은 첫 발생을 발�
 실물과 CAN은 사용하지 않았다.
 
 - 안전 회귀 + 기존 pose-follow: `36 passed, 46 deselected`
-- 전체 Python: `639 passed, 4 skipped`
+- 전체 Python (최신 `jazzy` 병합 후): `643 passed, 4 skipped`
 - ROS 2 Jazzy 빌드: 11개 패키지 성공
 - OpenArm fake smoke: 오른팔 TCP z `+30.0 mm`, residual `0.0 mm`
 - fake 오른팔 command topic 감시 중 dry-run 실행: 8초간 message 0건

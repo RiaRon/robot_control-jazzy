@@ -197,7 +197,7 @@ live TCP worst `18.9 mm/3.9 deg`, IK accepted 7, superseded 3이었다.
 개발 PC 검증(실물/CAN 사용 안 함):
 
 - 안전 회귀 + 기존 pose-follow: `36 passed, 46 deselected`
-- 전체 Python: `639 passed, 4 skipped`
+- 전체 Python (최신 `jazzy` 병합 후): `643 passed, 4 skipped`
 - ROS 2 Jazzy 빌드: 11개 패키지 성공
 - OpenArm fake smoke: 오른팔 TCP z `+30.0 mm`, residual `0.0 mm`, 성공
 - fake 오른팔 command topic 감시: dry-run 8초간 0건(exit 124 timeout)
@@ -217,3 +217,31 @@ terminal jump 수치를 사용하지만 정확한 초기 7개 관절값은 임�
 [`docs/chatgpt-work-openarm-handoff.md`](chatgpt-work-openarm-handoff.md)의
 '2026-08-20 안전 중단 이후 최신 인계'를 따른다. clean translation 검토 전에는
 rotation, kp 또는 속도 한계를 변경하지 않는다.
+
+## 최신 완료 — MATLAB pose-follow 분석 번들
+
+- 기준 기능 커밋: `2f0feb3`; `jazzy` 병합 커밋: `c1d850a`
+- Pull Request: [#14](https://github.com/RiaRon/robot_control-jazzy/pull/14)
+  (`jazzy`에 병합 완료)
+- `matlab/pose_follow/`에 읽기 전용 분석기를 추가했다. 로봇 제어 코드와 ROS
+  package는 변경하지 않았다.
+- 2026-08-18 legacy real schema v1과 deterministic diagnostics가 확장된
+  schema v1을 필드 기반으로 정규화한다.
+- `ramp`, `hold`, `return`, `origin-hold`별 TCP 위치·자세 mean/RMS/max/p95,
+  layer 거리/signed projection, IK latency·accepted/failed/superseded,
+  J1/J4/J7 target-command-measured와 IK target jump를 분석한다.
+- 고정 분석 번들은 CSV, JSON, MAT, PNG 6개와 7-page PDF다. MATLAB은 연구일지를
+  직접 쓰지 않고 Work가 사용할 구조화 근거만 생성한다.
+- 사용법, MATLAB R2021b+와 base MATLAB-only 요구사항, raw JSON·output의 Git
+  제외 지침은 `docs/matlab-pose-follow-analysis.md`에 있다.
+
+검증:
+
+- MATLAB R2026a parser: 2026-08-18 real
+  `right-follow-kp2-slow.json` 2,964 samples 성공
+- 현재 fake deterministic JSON: 네 canonical phase와 전체 bundle 성공
+- jump fake JSON: J4 jump event parsing과 detail PNG 생성 성공
+- PNG 6개: 약 2,500 px 폭, 비어 있지 않은 raster 확인
+- PDF: 표지와 그림 6개, 7 pages
+- 관련 문서/Python 계약: `9 passed`
+- 전체 Python: `636 passed, 4 skipped`
