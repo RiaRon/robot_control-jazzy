@@ -47,6 +47,7 @@ layerNames = [ ...
 
 timeSec = nan(sampleCount, 1);
 ikSequence = nan(sampleCount, 1);
+continuityCost = nan(sampleCount, 1);
 rawPhase = strings(sampleCount, 1);
 positionErrorM = nan(sampleCount, numel(layerNames));
 signedProjectionM = nan(sampleCount, numel(layerNames));
@@ -59,6 +60,7 @@ for sampleIndex = 1:sampleCount
     sample = trace(sampleIndex);
     timeSec(sampleIndex) = scalarField(sample, 'elapsed_sec');
     ikSequence(sampleIndex) = scalarField(sample, 'ik_sequence');
+    continuityCost(sampleIndex) = scalarField(sample, 'ik_continuity_cost');
 
     if isfield(sample, 'diagnostic_profile') && ...
             isstruct(sample.diagnostic_profile) && ...
@@ -130,6 +132,7 @@ run.time_sec = timeSec;
 run.raw_phase = rawPhase;
 run.phase = phase;
 run.ik_sequence = ikSequence;
+run.continuity_cost = continuityCost;
 run.position_error_m = positionErrorM;
 run.position_error_signed_projection_m = signedProjectionM;
 run.orientation_error_rad = orientationErrorRad;
@@ -143,6 +146,7 @@ run.termination = string(fieldOr(raw.result, 'termination', "unknown"));
 run.is_partial = logicalField(raw.result, 'is_partial', false);
 run.refusal = refusal;
 run.settings = fieldOr(raw, 'settings', struct());
+run.ready_posture = normalizeReady(raw, jointCount);
 run.result_metadata = rmfieldIfPresent(raw.result, { ...
     'position_error_m', 'position_error_signed_projection_m', ...
     'orientation_error_rad', 'per_joint', 'ik', 'ik_target_jumps'});
@@ -278,9 +282,31 @@ ik.accepted = scalarField(ikRaw, 'succeeded');
 ik.failed = scalarField(ikRaw, 'failed');
 ik.superseded = scalarField(ikRaw, 'superseded');
 ik.solve_attempts = scalarField(ikRaw, 'solve_attempts');
+ik.candidate_count = scalarField(ikRaw, 'candidate_count');
+ik.rejected_candidate_count = scalarField(ikRaw, 'rejected_candidate_count');
 ik.continuity_rejected = scalarField(ikRaw, 'continuity_rejected');
 ik.continuity_retries = scalarField(ikRaw, 'continuity_retries');
 ik.continuity_exhausted = scalarField(ikRaw, 'continuity_exhausted');
+ik.selection_events = struct( ...
+    'sequence', {}, 'phase', {}, 'candidate_count', {}, ...
+    'rejected_candidate_count', {}, 'selected_candidate', {}, ...
+    'selected_cost', {}, 'solve_latency_sec', {}, 'batch_latency_sec', {});
+if isfield(ikRaw, 'selection_events') && isstruct(ikRaw.selection_events)
+    rawSelections = ikRaw.selection_events(:);
+    selections = repmat(ik.selection_events, numel(rawSelections), 1);
+    for selectionIndex = 1:numel(rawSelections)
+        selection = rawSelections(selectionIndex);
+        selections(selectionIndex).sequence = scalarField(selection, 'sequence');
+        selections(selectionIndex).phase = string(fieldOr(selection, 'profile_phase', "unknown"));
+        selections(selectionIndex).candidate_count = scalarField(selection, 'candidate_count');
+        selections(selectionIndex).rejected_candidate_count = scalarField(selection, 'rejected_candidate_count');
+        selections(selectionIndex).selected_candidate = scalarField(selection, 'selected_candidate');
+        selections(selectionIndex).selected_cost = scalarField(selection, 'selected_cost');
+        selections(selectionIndex).solve_latency_sec = scalarField(selection, 'solve_latency_sec');
+        selections(selectionIndex).batch_latency_sec = scalarField(selection, 'batch_latency_sec');
+    end
+    ik.selection_events = selections;
+end
 ik.events = struct( ...
     'sequence', {}, 'outcome', {}, 'requested_sec', {}, ...
     'started_sec', {}, 'completed_sec', {}, 'accepted_sec', {}, ...
@@ -289,6 +315,7 @@ ik.events = struct( ...
 
 if ~isfield(ikRaw, 'events') || ~isstruct(ikRaw.events)
     ik.event_timing_available = false;
+    ik.joint_names = jointNames;
     return;
 end
 eventsRaw = ikRaw.events(:);
@@ -310,6 +337,44 @@ end
 ik.events = events;
 ik.event_timing_available = true;
 ik.joint_names = jointNames;
+end
+
+
+function ready = normalizeReady(raw, jointCount)
+ready = struct('name', "", 'target_rad', nan(1, jointCount), ...
+    'actual_start_rad', nan(1, jointCount), ...
+    'start_error_rad', nan(1, jointCount), 'passed', false, ...
+    'available', false);
+settings = fieldOr(raw, 'settings', struct());
+settingReady = fieldOr(settings, 'ready_posture', struct());
+result = fieldOr(raw, 'result', struct());
+resultReady = fieldOr(result, 'ready_posture', struct());
+if isstruct(settingReady) && isfield(settingReady, 'name')
+    ready.name = string(settingReady.name);
+    ready.target_rad = vectorField(settingReady, 'target_rad', jointCount);
+    ready.available = true;
+end
+if isstruct(resultReady)
+    if isfield(resultReady, 'name')
+        ready.name = string(resultReady.name);
+        ready.available = true;
+    end
+    ready.actual_start_rad = vectorField(resultReady, 'actual_start_rad', jointCount);
+    ready.start_error_rad = vectorField(resultReady, 'start_error_rad', jointCount);
+    ready.passed = logicalField(resultReady, 'passed', false);
+end
+end
+
+
+function vector = vectorField(parent, name, width)
+vector = nan(1, width);
+if isstruct(parent) && isfield(parent, name) && isnumeric(parent.(name))
+    candidate = double(parent.(name));
+    candidate = candidate(:).';
+    if numel(candidate) == width
+        vector = candidate;
+    end
+end
 end
 
 

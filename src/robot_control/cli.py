@@ -189,6 +189,8 @@ MAX_SAFE_IK_TARGET_JUMP_RAD = 0.30
 # solve from the previously accepted joint solution gives KDL a bounded chance
 # to return the nearby branch before the deterministic run is stopped.
 IK_CONTINUITY_MAX_ATTEMPTS = 4
+IK_CANDIDATE_SOLVE_TIMEOUT_SEC = 0.05
+IK_CANDIDATE_BATCH_LATENCY_SEC = 0.25
 
 # How long a streamed command may be ahead of the arm, expressed as travel time
 # at the joint's velocity limit. It has to exceed the standing droop or the arm
@@ -2043,7 +2045,7 @@ def _pose_follow(args, profile) -> int:
                 "joint_names": list(group.joints),
                 "settings": {
                     "diagnostic_profile": diagnostic_spec,
-                    "ready_posture": ready_metadata(),
+                    "ready_posture": ready_metadata(ready_check),
                 },
                 "result": {
                     "termination": "safety_refused",
@@ -2058,10 +2060,13 @@ def _pose_follow(args, profile) -> int:
                         "failed": 0,
                         "superseded": 0,
                         "solve_attempts": 0,
+                        "candidate_count": 0,
+                        "rejected_candidate_count": 0,
                         "continuity_rejected": 0,
                         "continuity_retries": 0,
                         "continuity_exhausted": 0,
                         "continuity_events": [],
+                        "selection_events": [],
                         "events": [],
                     },
                 },
@@ -2118,10 +2123,20 @@ def _pose_follow(args, profile) -> int:
             execute=False,
             node_name="robot_control_pose_follow_ik",
         ) as ik_adapter:
+            joint_ranges = np.array(
+                [joint.upper - joint.lower for joint in _joint_limits(profile, group)]
+            )
+            median_range = float(np.median(joint_ranges))
+            joint_weights = (median_range / joint_ranges) ** 2
             worker = LatestIkWorker(
-                ik_adapter.solve_ik,
+                lambda pose, seed: ik_adapter.solve_ik(
+                    pose, seed, timeout_sec=IK_CANDIDATE_SOLVE_TIMEOUT_SEC
+                ),
                 max_target_jump_rad=MAX_SAFE_IK_TARGET_JUMP_RAD,
                 max_continuity_attempts=IK_CONTINUITY_MAX_ATTEMPTS,
+                max_batch_latency_sec=IK_CANDIDATE_BATCH_LATENCY_SEC,
+                joint_weights=joint_weights,
+                continuous_joints=np.zeros(len(group.joints), dtype=bool),
             )
             try:
                 diagnostics = _follow_loop(
@@ -2136,6 +2151,7 @@ def _pose_follow(args, profile) -> int:
                     startup_marker_target,
                     diagnostic_profile,
                     ready_check,
+                    joint_weights,
                 )
             finally:
                 worker.close()
@@ -2169,6 +2185,7 @@ def _follow_loop(
     startup_marker_target,
     diagnostic_profile=None,
     ready_check=None,
+    ik_joint_weights=None,
 ) -> dict:
     from .ros_adapter import Pose
 
@@ -3023,6 +3040,14 @@ def _follow_loop(
                     {
                         "elapsed_sec": float(cycle - started),
                         "ik_sequence": int(status.target_sequence),
+                        "ik_continuity_cost": next(
+                            (
+                                selection.selected_cost
+                                for selection in status.selections
+                                if selection.sequence == status.target_sequence
+                            ),
+                            None,
+                        ),
                         "tcp_positions_m": {
                             "live_marker": [
                                 float(value) for value in desired_position
@@ -3178,7 +3203,9 @@ def _follow_loop(
             "  IK continuity: "
             f"{status.continuity_rejected} rejected solution(s), "
             f"{status.continuity_retries} retry attempt(s), "
-            f"{status.continuity_exhausted} exhausted request(s)"
+            f"{status.continuity_exhausted} exhausted request(s); "
+            f"{status.candidate_count} candidate(s), "
+            f"{status.rejected_candidate_count} rejected"
         )
         if samples:
             print(
@@ -3380,6 +3407,42 @@ def _follow_loop(
                 "exhausted": bool(event.exhausted),
             }
         )
+    ik_selection_events = []
+    for selection in status.selections:
+        phase = (
+            requested_profile_phases[selection.sequence - 1]
+            if 0 < selection.sequence <= len(requested_profile_phases)
+            else "unknown"
+        )
+        ik_selection_events.append(
+            {
+                "sequence": int(selection.sequence),
+                "profile_phase": phase,
+                "candidate_count": len(selection.candidates),
+                "rejected_candidate_count": sum(
+                    candidate.outcome == "continuity_rejected"
+                    for candidate in selection.candidates
+                ),
+                "selected_candidate": selection.selected_candidate,
+                "selected_cost": selection.selected_cost,
+                "solve_latency_sec": float(selection.solve_latency_sec),
+                "batch_latency_sec": float(selection.batch_latency_sec),
+                "candidates": [
+                    {
+                        "candidate": int(candidate.candidate),
+                        "outcome": candidate.outcome,
+                        "continuity_cost": candidate.continuity_cost,
+                        "latency_sec": float(candidate.latency_sec),
+                        "joint_delta_rad": (
+                            None
+                            if candidate.joint_delta_rad is None
+                            else [float(value) for value in candidate.joint_delta_rad]
+                        ),
+                    }
+                    for candidate in selection.candidates
+                ],
+            }
+        )
 
     orientation_summary = {
         name: {
@@ -3474,13 +3537,21 @@ def _follow_loop(
             "ik_continuity_max_attempts": int(
                 IK_CONTINUITY_MAX_ATTEMPTS
             ),
+            "ik_candidate_count_limit": int(IK_CONTINUITY_MAX_ATTEMPTS),
+            "ik_candidate_solve_timeout_sec": IK_CANDIDATE_SOLVE_TIMEOUT_SEC,
+            "ik_candidate_batch_latency_limit_sec": IK_CANDIDATE_BATCH_LATENCY_SEC,
+            "ik_joint_weights": [
+                float(value) for value in ik_joint_weights
+            ],
             "diagnostic_profile": (
                 None
                 if diagnostic_profile is None
                 else diagnostic_profile.as_dict()
             ),
             "ready_posture": (
-                None if diagnostic_profile is None else ready_metadata()
+                None
+                if diagnostic_profile is None
+                else ready_metadata(ready_check)
             ),
         },
         "result": {
@@ -3505,6 +3576,8 @@ def _follow_loop(
                 "failed": int(status.failed),
                 "superseded": int(status.superseded),
                 "solve_attempts": int(status.solve_attempts),
+                "candidate_count": int(status.candidate_count),
+                "rejected_candidate_count": int(status.rejected_candidate_count),
                 "continuity_rejected": int(
                     status.continuity_rejected
                 ),
@@ -3515,6 +3588,7 @@ def _follow_loop(
                     status.continuity_exhausted
                 ),
                 "continuity_events": ik_continuity_events,
+                "selection_events": ik_selection_events,
                 "events": ik_timing_events,
             },
             "startup_alignment": {

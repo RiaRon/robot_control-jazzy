@@ -162,8 +162,8 @@ quaternion 경로로 추종하며 `--max-tcp-angular-speed` 제한을 적용합�
 선택한 그룹의 TCP 마커만 게시합니다.
 
 RViz 고스트는 목표 운동학 결과이고 실제 모터값은 `/joint_states`입니다.
-`pose follow`는 현재 실측 관절을 seed로 MoveIt IK를 계산하고, 성공한 목표
-관절을 실제 모터가 수렴할 때까지 피드백 추종합니다.
+`pose follow`는 첫 IK에 현재 실측 관절을, 이후 IK에 직전 accepted 관절을
+seed로 사용하고, 성공한 목표 관절을 실제 모터가 수렴할 때까지 피드백 추종합니다.
 
 ## 4. 60초 시험 운전
 
@@ -201,13 +201,21 @@ drag the marker in RViz; the arm tracks it until the time runs out
 `--seconds`를 생략해도 기본값은 60초입니다. 생략한다고 무기한 실행되지는
 않습니다.
 
-첫 IK target은 startup 실측 관절, 이후 target은 직전 accepted target을 seed와
-연속성 기준으로 사용합니다. 어느 한 관절이라도 변화량 절댓값이 `0.30 rad`
-이상이면 그 해는 worker target으로 승격하거나 publish하지 않습니다. 같은
-Cartesian 목표를 직전 연속 관절해 seed로 최대 4회(최초 solve + retry 3회)
-계산하며, 그동안 controller는 이전 accepted target만 유지합니다. 제한 횟수
-안에 모든 관절이 `0.30 rad` 미만인 해가 나오면 그 해만 수락하고, 끝까지
-찾지 못하면 `refused: IK target jump refused before publish`로 안전 종료합니다.
+첫 IK target은 startup 실측 관절, 이후 target은 직전 accepted target을 모든
+후보의 seed와 연속성 기준으로 사용합니다. 비동기 worker가 같은 Cartesian
+목표에서 최대 4개 후보를 0.25초 batch 상한(후보 solve당 0.05초) 안에 생성합니다.
+각 후보에 먼저 단일 관절 `>=0.30 rad` 경계를 적용하고, 통과 후보 중 weighted
+joint distance가 최소인 해를 선택합니다. 유한 revolute는 직접 차이, continuous는
+wrap된 최소 각도 차이를 사용하며, 동일 비용은 관절 벡터 사전순 후 후보 번호로
+결정합니다. 모든 후보가 불연속이면 이전 target을 유지하고 partial JSON 저장 후
+안전 종료합니다.
+
+비용은 `sqrt(sum(w_i * delta_i^2))`, `w_i=(median joint range / joint range_i)^2`입니다.
+범위가 좁은 관절의 같은 rad 이동을 더 크게 보아 normalized range 사용량을
+균형 있게 비교합니다. joint-limit margin이나 ready 복귀 비용을 섞으면 직전
+accepted 해에 가장 가까운 해라는 1차 목적이 바뀌므로 보조 지표로만 검토하고
+현재 비용에는 넣지 않았습니다. 현재 오른팔에는 continuous joint가 없지만 worker
+계산은 continuous mask를 지원합니다.
 
 `0.30 rad` 비교는 `>=`인 하드 경계이며 분석용 `--ik-jump-threshold`와
 별개입니다. CLI로 완화하거나 제거할 수 없습니다. deterministic profile에서는
@@ -230,10 +238,19 @@ schema v1과 `kind: pose_follow_diagnostics`를 유지하며 다음 구조화 �
 - `result.refusal.reason`, `refused_sequence`, `profile_phase`
 - `result.refusal.joint_delta_rad`, `triggered_joints`, retry 횟수
 - `result.ik.continuity_rejected/retries/exhausted`와 각 rejected solve event
+- 후보 수·거부 수, 후보별 cost, 선택 후보/cost, solve/batch latency
 
 거부된 sequence는 `trace[].ik_sequence`에 나타나지 않습니다. 즉 partial
 trace에는 offending target이 아니라 그 직전까지 실제로 승인된 target, command,
 measurement만 들어갑니다.
+
+## deterministic 시작 자세
+
+`--diagnostic-profile` 실행은 `openarm_right_ready_v1`에서만 허용됩니다. 먼저
+`robotctl pose ready --group openarm_right_arm`을 검토하고, 별도 승인된
+`--execute` ready 명령을 완료한 뒤 새 명령으로 follow를 시작합니다. 자동 ready
+후 즉시 follow하는 경로는 없습니다. 수동 marker follow에는 이 검사를 적용하지
+않습니다.
 
 ## 5. 무기한 운전
 

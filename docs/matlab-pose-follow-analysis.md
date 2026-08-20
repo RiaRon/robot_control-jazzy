@@ -90,14 +90,14 @@ matlab -batch "addpath('matlab/pose_follow'); analyze_pose_follow( ...
 
 | 파일 | 내용 |
 | --- | --- |
-| `summary.csv` | 실험×phase 비교표. TCP 위치/자세 통계, IK 결과·latency·jump, partial/refusal·continuity 수 |
+| `summary.csv` | 실험×phase 비교표. TCP 위치/자세, ready 이름·통과·시작 오차, IK candidate/rejection/selection cost·latency, partial/refusal 통계 |
 | `analysis_summary.json` | Work가 읽기 쉬운 metadata, layer 통계, summary row와 색상 규칙 |
 | `analysis.mat` | 정규화 time series, summary table과 구조화 분석 전체 |
 | `tcp_error_timeseries.png` | TCP 위치(mm)·자세(deg) 오차와 phase band |
 | `error_layers.png` | 레이어별 거리와 live-error 방향 signed projection(mm) |
 | `joint_tracking.png` | J1-J7 중 최대 target-command와 command-measured 오차(rad) |
 | `j1_j4_j7_detail.png` | J1/J4/J7 target-command-measured 및 IK target jump 시각 |
-| `ik_events.png` | request latency(ms)와 accepted/failed/superseded/refused 수 |
+| `ik_events.png` | request latency(ms), weighted continuity cost 시계열, accepted/failed/superseded/refused 수 |
 | `phase_comparison.png` | canonical phase별 TCP RMS/p95 실험 비교 |
 | `research_report.pdf` | 요약 표지와 위 6개 그림을 묶은 7-page 연구 보고서 |
 
@@ -140,3 +140,13 @@ extended phase 네 종류, partial refusal sequence/reason/phase, 통합 parsing
   로컬 `.gitignore`가 JSON/CSV/MAT/PNG/PDF와 일반 output 폴더를 제외한다.
 - `git status --short`로 원시 데이터와 생성물이 staging되지 않았는지 확인한다.
 - 원본 JSON을 보존하고 실험명·원본 경로·생성 시각은 bundle metadata로 추적한다.
+
+
+## ready 기준 비교
+
+새 schema v1 확장 파일은 `run.ready_posture`에 이름, target 7관절, actual start,
+관절별 start error와 pass를 정규화한다. `analysis_summary.json`의
+`comparison_metadata.ready_posture_name`으로 같은 ready 자세에서 수행한 실험만
+묶어 비교한다. `run.ik.selection_events`와 `run.continuity_cost`는 후보 수,
+거부 수, 선택 candidate/cost, solve/batch latency와 cost 시계열을 보존한다.
+legacy 파일에는 해당 값이 `NaN`/빈 값으로 남는다.

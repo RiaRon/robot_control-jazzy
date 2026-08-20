@@ -136,7 +136,7 @@ class SequenceSixBranchReplayArm(ReplayArm):
         seed = np.asarray(seed, dtype=float).copy()
         self.ik_requests.append((pose, seed.copy()))
         self.solve_calls += 1
-        if self.solve_calls <= 5:
+        if self.solve_calls <= 20:
             return seed
         return seed + RETEST_BRANCH_JUMP_RAD
 

@@ -290,3 +290,43 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 - 집중 회귀: `19 passed`; pose/pose-follow CLI: `67 passed, 8 deselected`
 - 전체 Python: `647 passed, 4 skipped`; ROS 2 Jazzy: 11개 패키지 빌드 성공
 - 이 배치에서 실물 재시험이나 rotation 실행을 요청하지 않는다.
+
+## 최신 완료 — 오른팔 ready posture와 closest-IK 후보 선택
+
+- 개발 기준: `origin/jazzy@8c2df95`; 기능 브랜치: `feature/ready-closest-ik`
+- Pull Request: [#18](https://github.com/RiaRon/robot_control-jazzy/pull/18)
+- 표준 자세는 `openarm_right_ready_v1 = [0.15, 0.55, 0.15, 0.8, -0.1,
+  0.15, 0.1] rad`다. 후보 A/B와 주변 후보 C/D를 URDF, SRDF,
+  GenericSystem, fake MoveIt에서 비교해 D를 선택했다. D는 충돌 없음, Jacobian
+  rank 6, 최소 특잇값 `0.06517`, condition number `28.54`, 최소 joint margin
+  `0.6354 rad`, 6축 반복 IK `60/60` 성공이었다.
+- `pose ready`는 오른팔 전용, 기본 offline dry-run이며 `--execute`에서만 IK 없는
+  minimum-jerk joint trajectory를 보낸다. 속도/가속도 상한은 각각 `0.10 rad/s`,
+  `0.10 rad/s^2`; before/after JSON과 최대 도달 오차/정착시간을 기록한다.
+- deterministic diagnostic은 7관절이 ready target에서 각각 `0.020 rad` 이내인지
+  publish/IK 전에 검사한다. 기존 실물 최종 worst `0.0063 rad`의 3배 이상을
+  허용하지만 `0.30 rad` 안전 경계보다 충분히 작다. 자동 ready-follow 결합은 없다.
+- 비동기 IK worker는 직전 accepted target을 모든 후보 seed/기준으로 삼고 최대 4개
+  후보를 생성한다. 기존 단일 관절 `>=0.30 rad` 경계를 먼저 적용한 뒤
+  `sqrt(sum(w_i*dq_i^2))`, `w_i=(median range/range_i)^2` 최소 해를 선택한다.
+  동률은 관절 벡터 사전순과 후보 번호로 결정한다. all-bad는 이전 target 유지,
+  partial JSON 원자 저장, 안전 종료다.
+- JSON과 MATLAB에 ready name/target/start/error/pass, candidate/rejection/selection,
+  continuity cost와 latency, same-ready comparison metadata를 추가했다.
+
+개발 PC 검증(실물 OpenArm/CAN 사용 안 함):
+
+- 전체 Python: `652 passed, 4 skipped`; 핵심 ready/closest 회귀: `108 passed`
+- ROS 2 Jazzy: 11개 패키지 빌드 성공
+- GenericSystem: ready 도달 worst `0.0000 rad`, settle `0.52 s`; 기존 pose smoke
+  TCP world-z `+30.0 mm`, residual `0.0 mm`
+- fake MoveIt: 후보 4개 모두 collision-free; 선택 자세에서 world x/y/z 10 mm와
+  local x/y/z 5도 왕복을 축별 10회 반복해 `60/60`, 각 궤적 1종으로 재현
+- closest-IK: bad-good, nearest-good, all-bad 유지/partial JSON, 실제 pre-retest ready
+  거부, sequence-6 pi/pi/2 branch, 50회 동일 선택 검증 성공
+- MATLAB R2026a: legacy real + current full fake + partial refusal 입력에서 CSV/JSON/
+  MAT, PNG 6개, PDF bundle 생성 성공
+
+실물 재시험은 이 배치에서 요청하지 않는다. 배포 후 첫 단계도 follow가 아니라
+`robotctl pose ready --group openarm_right_arm` dry-run이며, 실물 이동은 별도 승인된
+동일 명령의 `--execute` 실행으로 분리한다.

@@ -2,6 +2,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from robot_control.ros_adapter import Pose
 
@@ -161,14 +162,14 @@ def test_latest_ik_worker_retries_a_branch_jump_from_the_same_seed():
 
         np.testing.assert_allclose(status.target, continuous)
         assert status.target_sequence == 1
-        assert status.solve_attempts == 2
+        assert status.solve_attempts == 4
         assert status.continuity_rejected == 1
-        assert status.continuity_retries == 1
+        assert status.continuity_retries == 3
         assert status.continuity_exhausted == 0
         assert status.continuity_refusal is None
         assert len(status.continuity_rejections) == 1
         assert not status.continuity_rejections[0].exhausted
-        assert len(seen_seeds) == 2
+        assert len(seen_seeds) == 4
         for seed in seen_seeds:
             np.testing.assert_array_equal(seed, np.zeros(7))
     finally:
@@ -213,7 +214,7 @@ def test_latest_ik_worker_exhausts_retries_and_keeps_previous_target():
         assert status.target_sequence == 1
         assert status.succeeded == 1
         assert status.failed == 0
-        assert status.solve_attempts == 5
+        assert status.solve_attempts == 8
         assert status.continuity_rejected == 4
         assert status.continuity_retries == 3
         assert status.continuity_refusal.sequence == 2
@@ -261,5 +262,119 @@ def test_continuity_retry_solver_errors_still_end_in_safe_exhaustion():
         np.testing.assert_allclose(
             status.continuity_refusal.joint_delta_rad, jump
         )
+    finally:
+        worker.close()
+
+
+
+def test_closest_candidate_wins_among_multiple_continuous_solutions():
+    from robot_control.ik_follow import LatestIkWorker
+
+    returned = iter(
+        [
+            np.array([0.12, 0.0]),
+            np.array([0.02, 0.01]),
+            np.array([-0.05, 0.0]),
+            np.array([0.08, 0.0]),
+        ]
+    )
+    worker = LatestIkWorker(
+        lambda _pose, _seed: next(returned),
+        max_target_jump_rad=0.30,
+        max_continuity_attempts=4,
+        joint_weights=[1.0, 4.0],
+    )
+    try:
+        worker.submit(_pose(0.0), np.zeros(2))
+        status = _wait_until(lambda: worker.snapshot().succeeded == 1 and worker.snapshot())
+        np.testing.assert_allclose(status.target, [0.02, 0.01])
+        selection = status.selections[0]
+        assert selection.selected_candidate == 2
+        assert selection.selected_cost == pytest.approx(np.sqrt(0.0008))
+        assert len(selection.candidates) == 4
+    finally:
+        worker.close()
+
+
+def test_equal_cost_uses_lexicographic_deterministic_tie_break():
+    from robot_control.ik_follow import LatestIkWorker
+
+    returned = iter(
+        [np.array([0.1]), np.array([-0.1]), np.array([0.2]), np.array([-0.2])]
+    )
+    worker = LatestIkWorker(
+        lambda _pose, _seed: next(returned),
+        max_target_jump_rad=0.30,
+        max_continuity_attempts=4,
+    )
+    try:
+        worker.submit(_pose(0.0), np.zeros(1))
+        status = _wait_until(lambda: worker.snapshot().succeeded == 1 and worker.snapshot())
+        np.testing.assert_allclose(status.target, [-0.1])
+        assert status.selections[0].selected_candidate == 2
+    finally:
+        worker.close()
+
+
+def test_continuous_joint_uses_wrapped_shortest_delta():
+    from robot_control.ik_follow import joint_delta
+
+    delta = joint_delta(
+        np.array([-np.pi + 0.01, 0.2]),
+        np.array([np.pi - 0.01, 0.1]),
+        [True, False],
+    )
+    np.testing.assert_allclose(delta, [0.02, 0.1], atol=1e-12)
+
+
+def test_closest_selection_is_reproducible_for_50_independent_runs():
+    from robot_control.ik_follow import LatestIkWorker
+
+    selected = []
+    for _ in range(50):
+        returned = iter(
+            [np.array([0.08]), np.array([-0.03]), np.array([0.01]), np.array([0.04])]
+        )
+        worker = LatestIkWorker(
+            lambda _pose, _seed: next(returned),
+            max_target_jump_rad=0.30,
+            max_continuity_attempts=4,
+        )
+        try:
+            worker.submit(_pose(0.0), np.zeros(1))
+            status = _wait_until(lambda: worker.snapshot().succeeded == 1 and worker.snapshot())
+            selected.append(float(status.target[0]))
+        finally:
+            worker.close()
+    np.testing.assert_array_equal(selected, np.full(50, 0.01))
+
+
+def test_candidate_batch_stops_at_latency_cap_between_solves():
+    from robot_control.ik_follow import LatestIkWorker
+
+    now = [0.0]
+
+    def clock():
+        return now[0]
+
+    def solve(_pose, seed):
+        now[0] += 0.06
+        return np.asarray(seed, dtype=float) + 0.01
+
+    worker = LatestIkWorker(
+        solve,
+        clock=clock,
+        max_target_jump_rad=0.30,
+        max_continuity_attempts=4,
+        max_batch_latency_sec=0.05,
+    )
+    try:
+        worker.submit(_pose(0.0), np.zeros(2))
+        status = _wait_until(
+            lambda: worker.snapshot().succeeded == 1 and worker.snapshot()
+        )
+        assert status.solve_attempts == 1
+        assert status.candidate_count == 1
+        assert status.selections[0].batch_latency_sec == pytest.approx(0.06)
     finally:
         worker.close()
