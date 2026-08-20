@@ -190,6 +190,7 @@ error and settling time. Left-arm ready remains disabled. `rest` retains the
 legacy table-safe shutdown sequence.
 
 ```bash
+# --execute publishes joint trajectories and moves the real right arm:
 robotctl pose ready --group openarm_right_arm
 robotctl pose ready --group openarm_right_arm --execute
 robotctl pose ready --group openarm_right_arm \
@@ -719,10 +720,12 @@ bounded IK and command path used during following. Move the marker to
 **Current** before starting instead of relying on an old RViz goal.
 
 When the marker target changes, a background worker calls MoveIt
-`/compute_ik`, seeded from the newest measured joints. It keeps only the newest
-pending request and atomically latches the newest successful solution. The
-control loop therefore keeps streaming the previous valid target while MoveIt
-is busy, rather than blocking on a service round trip.
+`/compute_ik`. The first request uses the measured joints; later requests use
+the previous accepted target as every candidate's seed and continuity reference.
+It keeps only the newest pending request, selects the nearest bounded candidate,
+and atomically latches that solution. The control loop therefore keeps streaming
+the previous valid target while MoveIt is busy, rather than blocking on a
+service round trip.
 
 The fast loop compares that latched target with `/joint_states`. While measured
 joints trail it, the outer feedback advances the position command through the

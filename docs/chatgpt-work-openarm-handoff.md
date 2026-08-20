@@ -431,3 +431,31 @@ full deterministic, partial/refused JSON을 한 bundle에서 함께 비교한다
 
 현재 인계는 코드 커밋과 PR 및 fake 검증 결과까지다. 새 실물 명령을 실행하거나
 재시험을 요청하지 말고, 별도 명시 승인과 다음 작업 지시를 기다린다.
+
+
+## 최신 인계 — 표준 ready와 closest-IK 배치
+
+오른팔 표준 자세는 `openarm_right_ready_v1 =
+[0.15,0.55,0.15,0.8,-0.1,0.15,0.1] rad`, 관절별 허용 오차는 0.020 rad다.
+`pose ready`는 오른팔만 지원하고 joint-space minimum-jerk trajectory를 사용한다.
+ready 이동과 deterministic follow는 반드시 별도 명령으로 유지하며 자동 연결하지
+않는다. closest-IK는 직전 accepted target seed에서 최대 4개 후보를 만든 뒤 기존
+`>=0.30 rad` 경계를 먼저 적용하고 weighted joint distance 최소 해를 선택한다.
+
+이 배치에서는 실물/CAN을 사용하지 않았고 실물 재시험을 요청하지 않는다. 다음
+현장 단계가 별도로 승인되면 먼저 아래 dry-run만 검토한다.
+
+```bash
+robotctl pose ready --group openarm_right_arm
+```
+
+실물 이동 승인을 별도로 받은 경우에만 before/after 경로의 쓰기 가능성,
+controller active, joint-state freshness와 E-stop을 확인하고 다음 ready 명령만
+실행한다. 완료 뒤 즉시 follow를 시작하지 않고 after JSON과 도달 오차를 검토한다.
+
+```bash
+robotctl pose ready --group openarm_right_arm \
+  --before-output /tmp/right-before-ready.json \
+  --after-output /tmp/right-after-ready.json \
+  --execute
+```
