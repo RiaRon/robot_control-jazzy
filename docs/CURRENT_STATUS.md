@@ -177,9 +177,10 @@ live TCP worst `18.9 mm/3.9 deg`, IK accepted 7, superseded 3이었다.
   `--execute`가 포함됐는지는 확정하지 못했다.
 - output 쓰기는 제어 종료 후에만 시도하므로 쓰기 불가 경로가 움직임을 막지
   못한 것이 확인된 결함이다.
-- J4 제한은 `[0, 2.44346] rad`, `2 rad/s`다. 기존 경로는 velocity, `0.2 rad`
-  lead, position 순으로 clamp하고 clamp된 command를 publish했다. 초기 pose와
-  trace가 없어 516회가 lower인지 upper인지는 확정하지 못했다.
+- J4 제한은 `[0, 2.44346] rad`, `2 rad/s`다. 회수한 초기 pose의 J4는
+  `-0.0055313954 rad`로 lower보다 `5.53 mrad` 낮았다. 기존 경로는 velocity,
+  `0.2 rad` lead, position 순으로 clamp하고 clamp된 command를 publish했다.
+  exact-pose replay는 인위적 IK offset 없이 startup `lower` clamp를 재현했다.
 
 `feature/pose-follow-safety-abort` 변경:
 
@@ -203,14 +204,20 @@ live TCP worst `18.9 mm/3.9 deg`, IK accepted 7, superseded 3이었다.
 - fake 오른팔 command topic 감시: dry-run 8초간 0건(exit 124 timeout)
 - fake 오른팔 command topic 감시: 쓰기 불가 `/proc/...` output도 8초간 0건,
   CLI는 ROS 연결 전 exit 2
-- fake/replay: 첫 IK에서 J3 `+0.7646 rad`, J5 `-0.7480 rad`를 재현하고
-  publish 0건으로 exit 3; J4 lower clamp도 publish 0건으로 exit 3
+- exact-pose fake/replay: 첫 IK에서 terminal magnitude의 J3 `+0.7646 rad`, J5
+  `-0.7480 rad`를 재현하고 publish 0건으로 exit 3; IK offset 없는 J4 lower
+  clamp도 publish 0건으로 exit 3
+- fake MoveIt: 같은 exact seed에서 world-x `2 mm` 목표를 50회 풀어 39회가
+  `0.30 rad` 이상 branch jump였다. terminal 크기에 가까운 해는 J3
+  `-0.753756 rad`, J5 `+0.753498 rad`였다.
 
-남은 자료 문제: 사용자가 지정한
-`openarm_follow_data/2024-08-20/right-pose-before.json`은 개발 PC에 없고,
-전송된 `openarm-diagnostic-aborted-2026-08-20.tar.gz`는 0바이트다. 현재 replay는
-terminal jump 수치를 사용하지만 정확한 초기 7개 관절값은 임시 0 자세다. 파일이
-다시 전달되면 fixture를 실제 값으로 교체하고 전체 검증을 다시 실행한다.
+`/home/cbj4/Downloads/right-pose-before.json`은 읽기만 했고 Git에는 포함하지
+않았다. SHA-256은
+`2c6b96b0518c71619f4b80b01a71860c9db98f60a30982688474863f2788a164`다.
+fixture에는 정확한 7개 관절값만 복사했다. 이 snapshot은 J4 encoder/ROS state와
+URDF/profile lower의 불일치를 증명하지만 motor zero calibration 오차와 제어
+settling을 구분하지는 못하므로, 실물 calibration이나 URDF limit 변경은 하지
+않았다.
 
 실물 재시험은 아직 실행하지 않았다. 최신 경로 준비, dry-run, 승인 후 translation
 한 번과 중단 조건은
