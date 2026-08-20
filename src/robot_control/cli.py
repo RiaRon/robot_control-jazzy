@@ -75,7 +75,9 @@ from .ik_follow import LatestIkWorker
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .ready import (
     READY_ACCELERATION_RAD_S2,
+    READY_D_LEGACY_NAME,
     READY_POSTURE_NAME,
+    READY_POSTURES,
     READY_SETTLE_TIMEOUT_SEC,
     READY_SETTLE_WINDOW_SEC,
     READY_SPEED_RAD_S,
@@ -84,6 +86,7 @@ from .ready import (
     RIGHT_ARM_GROUP,
     check_ready,
     ready_metadata,
+    ready_target,
 )
 from .safety import CommandGate, SafetyError
 from .servo import CartesianPI
@@ -471,6 +474,12 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     )
     ready.add_argument("--profile", default="openarm_tesollo")
     ready.add_argument("--group", required=True)
+    ready.add_argument(
+        "--posture",
+        choices=tuple(READY_POSTURES),
+        default=READY_POSTURE_NAME,
+        help="standard A-prime v2 posture or the legacy D v1 comparison posture",
+    )
     ready.add_argument("--before-output", type=Path)
     ready.add_argument("--after-output", type=Path)
     ready.add_argument("--execute", action="store_true")
@@ -1126,7 +1135,27 @@ def _minimum_jerk_trajectory(start, target, rate_hz):
     return points, duration
 
 
-def _ready_snapshot(profile, group, state, pose, *, result=None):
+def _ready_snapshot(
+    profile,
+    group,
+    state,
+    pose,
+    *,
+    posture_name=READY_POSTURE_NAME,
+    target=READY_TARGET_RAD,
+    result=None,
+):
+    check = check_ready(state, target=target)
+    tcp = {"available": False}
+    if pose is not None:
+        tcp = {
+            "available": True,
+            "frame_id": pose.frame_id,
+            "tip_link": group.tip_link,
+            "xyz_m": list(pose.position),
+            "quaternion_xyzw": list(pose.orientation),
+            "rpy_rad": list(pose.rpy),
+        }
     payload = {
         "schema_version": 1,
         "kind": "pose_snapshot",
@@ -1136,46 +1165,88 @@ def _ready_snapshot(profile, group, state, pose, *, result=None):
                 "name": group.name,
                 "joint_names": list(group.joints),
                 "joint_positions_rad": np.asarray(state, dtype=float).tolist(),
-                "tcp": {
-                    "frame_id": pose.frame_id,
-                    "tip_link": group.tip_link,
-                    "xyz_m": list(pose.position),
-                    "quaternion_xyzw": list(pose.orientation),
-                    "rpy_rad": list(pose.rpy),
-                },
+                "tcp": tcp,
             }
         ],
-        "ready_posture": ready_metadata(check_ready(state)),
+        "ready_posture": ready_metadata(
+            check, name=posture_name, target=target
+        ),
     }
     if result is not None:
         payload["ready_result"] = result
     return payload
 
 
-def _wait_for_ready_settle(adapter):
+def _ready_sleep(seconds):
+    if seconds > 0.0:
+        time.sleep(seconds)
+
+
+def _ready_control_cycle(adapter, chain, gate, reference, period_sec):
+    cycle_started = time.monotonic()
+    feedback = adapter.read_state(timeout_sec=max(0.25, period_sec * 5.0))
+    torque = gate.authorize_effort(chain.gravity_torque(feedback))
+    adapter.send_effort(torque)
+    adapter.stream_positions(reference)
+    _ready_sleep(period_sec - (time.monotonic() - cycle_started))
+    return np.asarray(feedback, dtype=float), np.asarray(torque, dtype=float)
+
+
+def _ready_stream_points(adapter, chain, gate, points, period_sec, telemetry):
+    for point in points:
+        feedback, torque = _ready_control_cycle(
+            adapter, chain, gate, point, period_sec
+        )
+        telemetry["feedback"] = feedback
+        telemetry["reference"] = np.asarray(point, dtype=float).copy()
+        telemetry["torque"] = torque
+        telemetry["torque_worst"] = np.maximum(
+            telemetry["torque_worst"], np.abs(torque)
+        )
+        telemetry["gravity_samples"] += 1
+        telemetry["position_samples"] += 1
+
+
+def _wait_for_ready_settle(
+    adapter, chain, gate, target, period_sec, telemetry
+):
     started = time.monotonic()
     stable_since = None
-    last = None
+    last = check_ready(telemetry["feedback"], target=target)
     while time.monotonic() - started <= READY_SETTLE_TIMEOUT_SEC:
-        last = check_ready(adapter.read_state(timeout_sec=1.0))
+        feedback, torque = _ready_control_cycle(
+            adapter, chain, gate, target, period_sec
+        )
+        telemetry["feedback"] = feedback
+        telemetry["reference"] = np.asarray(target, dtype=float).copy()
+        telemetry["torque"] = torque
+        telemetry["torque_worst"] = np.maximum(
+            telemetry["torque_worst"], np.abs(torque)
+        )
+        telemetry["gravity_samples"] += 1
+        telemetry["position_samples"] += 1
+        last = check_ready(feedback, target=target)
         now = time.monotonic()
         if last.passed:
             stable_since = now if stable_since is None else stable_since
             if now - stable_since >= READY_SETTLE_WINDOW_SEC:
-                return last, now - started
+                return last, now - started, True
         else:
             stable_since = None
-        time.sleep(0.02)
-    worst = float(np.max(np.abs(last.error))) if last is not None else float("nan")
-    raise SafetyError(
-        f"{READY_POSTURE_NAME} did not settle within "
-        f"{READY_SETTLE_TIMEOUT_SEC:g} s; worst joint error {worst:.4f} rad"
-    )
+    return last, time.monotonic() - started, False
+
+
+def _ready_safe_hold(adapter, profile, group, measured):
+    hold = _start_pose(profile, group, measured)
+    gate = _gate(profile, group, seed=None)
+    authorized = gate.authorize(hold, now_sec=0.0)
+    adapter.stream_positions(authorized)
+    return np.asarray(authorized, dtype=float)
 
 
 def _pose_ready(args, profile) -> int:
-    """Move only the right arm to the selected deterministic start posture."""
-    from .ros_adapter import RosAdapter
+    """Move only the right arm with dynamic gravity compensation."""
+    from .ros_adapter import AdapterUnavailable, RosAdapter
 
     group = _group(profile, args.group)
     if group.name != RIGHT_ARM_GROUP:
@@ -1185,71 +1256,210 @@ def _pose_ready(args, profile) -> int:
         )
     if (args.before_output is not None or args.after_output is not None) and not args.execute:
         raise ValueError("ready pose snapshots require --execute")
+    posture_name = args.posture
+    target = ready_target(posture_name)
     _gate(profile, group, seed=None).authorize_trajectory(
-        [READY_TARGET_RAD], start_time_sec=0.0, period_sec=1.0
+        [target], start_time_sec=0.0, period_sec=1.0
     )
     interface = CanonicalInterface(profile)
     if not args.execute:
-        print(
-            f"DRY RUN: {READY_POSTURE_NAME}; right arm only; "
-            f"speed <= {READY_SPEED_RAD_S:g} rad/s, acceleration <= "
-            f"{READY_ACCELERATION_RAD_S2:g} rad/s^2"
+        qualifier = (
+            "legacy D comparison posture"
+            if posture_name == READY_D_LEGACY_NAME
+            else "standard deterministic A-prime posture"
         )
-        _describe(group, interface, READY_TARGET_RAD)
+        print(
+            f"DRY RUN: {posture_name}; {qualifier}; right arm only; "
+            f"gravity scale 1.0; speed <= {READY_SPEED_RAD_S:g} rad/s, "
+            f"acceleration <= {READY_ACCELERATION_RAD_S2:g} rad/s^2"
+        )
+        _describe(group, interface, target)
         print("DRY RUN: no ROS connection was opened; pass --execute to send")
         return 0
 
     for output_path in (args.before_output, args.after_output):
         if output_path is not None:
             _preflight_output(output_path)
+
+    failure = None
+    result = None
+    after_state = None
+    after_pose = None
     with RosAdapter(profile, group.name, execute=True) as adapter:
         before = adapter.read_state(timeout_sec=1.0)
         before_pose = adapter.read_pose(timeout_sec=1.0)
         if args.before_output is not None:
             _write_json_atomic(
                 args.before_output,
-                _ready_snapshot(profile, group, before, before_pose),
-            )
-        here = _start_pose(profile, group, before)
-        lifted = here.copy()
-        lifted[ELBOW_INDEX] = READY_TARGET_RAD[ELBOW_INDEX]
-        rate = profile.endpoint().command_rate_hz
-        motion_started = time.monotonic()
-        planned_duration = 0.0
-        for target in (lifted, READY_TARGET_RAD):
-            points, duration = _minimum_jerk_trajectory(here, target, rate)
-            if not points:
-                continue
-            points = _gate(profile, group, seed=here).authorize_trajectory(
-                points, start_time_sec=0.0, period_sec=1.0 / rate
-            )
-            adapter.send_trajectory(points, period_sec=1.0 / rate)
-            here = np.asarray(target, dtype=float).copy()
-            planned_duration += duration
-        settled, settling_sec = _wait_for_ready_settle(adapter)
-        after_pose = adapter.read_pose(timeout_sec=1.0)
-        result = {
-            "planned_motion_sec": planned_duration,
-            "elapsed_motion_sec": time.monotonic() - motion_started,
-            "settling_sec": settling_sec,
-            "joint_error_rad": settled.error.tolist(),
-            "max_abs_joint_error_rad": float(np.max(np.abs(settled.error))),
-            "passed": settled.passed,
-        }
-        if args.after_output is not None:
-            _write_json_atomic(
-                args.after_output,
                 _ready_snapshot(
-                    profile, group, settled.actual, after_pose, result=result
+                    profile,
+                    group,
+                    before,
+                    before_pose,
+                    posture_name=posture_name,
+                    target=target,
                 ),
             )
-        print(
-            f"EXECUTED: {READY_POSTURE_NAME}; max error "
-            f"{result['max_abs_joint_error_rad']:.4f} rad; settled in "
-            f"{settling_sec:.2f} s"
-        )
+        period = 1.0 / profile.endpoint().command_rate_hz
+        telemetry = {
+            "feedback": np.asarray(before, dtype=float).copy(),
+            "reference": np.asarray(before, dtype=float).copy(),
+            "torque": np.zeros(len(group.joints)),
+            "torque_worst": np.zeros(len(group.joints)),
+            "gravity_samples": 0,
+            "position_samples": 0,
+        }
+        planned_duration = 0.0
+        motion_started = time.monotonic()
+        settling_sec = 0.0
+        passed = False
+        safe_hold = {"attempted": False, "applied": False, "reference_rad": None}
+        cleanup = {"attempted": False, "zero_published": False, "error": None}
+        controller_metadata = None
+        error_message = None
+        termination = "exception"
+        try:
+            position_info, effort_info = (
+                adapter.require_position_effort_controllers_active(timeout_sec=2.0)
+            )
+            controller_metadata = {
+                "position": position_info.name,
+                "effort": effort_info.name,
+                "state": "active",
+                "simultaneous_interfaces_checked": True,
+            }
+            chain = _gravity_chain(adapter, profile, group)
+            here = _start_pose(profile, group, before)
+            gate = _gate(profile, group, seed=here)
+            lifted = here.copy()
+            lifted[ELBOW_INDEX] = target[ELBOW_INDEX]
+            for phase_target in (lifted, target):
+                points, duration = _minimum_jerk_trajectory(
+                    here, phase_target, 1.0 / period
+                )
+                if not points:
+                    continue
+                points = _gate(profile, group, seed=here).authorize_trajectory(
+                    points, start_time_sec=0.0, period_sec=period
+                )
+                _ready_stream_points(
+                    adapter, chain, gate, points, period, telemetry
+                )
+                here = np.asarray(phase_target, dtype=float).copy()
+                planned_duration += duration
+            settled, settling_sec, passed = _wait_for_ready_settle(
+                adapter, chain, gate, target, period, telemetry
+            )
+            telemetry["feedback"] = settled.actual.copy()
+            try:
+                tracking = adapter.read_controller_tracking(timeout_sec=1.0)
+                telemetry["reference"] = tracking.reference.copy()
+                telemetry["feedback"] = tracking.feedback.copy()
+            except AdapterUnavailable:
+                # Missing controller state is itself a controller failure; retain
+                # the last measured values so the partial JSON remains useful.
+                raise
+            if passed:
+                termination = "completed"
+            else:
+                termination = "settle_timeout"
+                error_message = (
+                    f"{posture_name} did not settle within "
+                    f"{READY_SETTLE_TIMEOUT_SEC:g} s; worst joint error "
+                    f"{np.max(np.abs(telemetry['feedback'] - target)):.4f} rad"
+                )
+                safe_hold["attempted"] = True
+                hold = _ready_safe_hold(
+                    adapter, profile, group, telemetry["feedback"]
+                )
+                safe_hold.update(
+                    {"applied": True, "reference_rad": hold.tolist()}
+                )
+                failure = SafetyError(error_message)
+        except Exception as error:
+            failure = error
+            error_message = str(error)
+            termination = "exception"
+            if telemetry["position_samples"] > 0:
+                safe_hold["attempted"] = True
+                try:
+                    hold = _ready_safe_hold(
+                        adapter, profile, group, telemetry["feedback"]
+                    )
+                    safe_hold.update(
+                        {"applied": True, "reference_rad": hold.tolist()}
+                    )
+                except Exception as hold_error:
+                    safe_hold["error"] = str(hold_error)
+        finally:
+            cleanup["attempted"] = True
+            try:
+                zero = np.zeros(len(group.joints))
+                for _ in range(3):
+                    adapter.send_effort(zero)
+                    _ready_sleep(period)
+                cleanup["zero_published"] = True
+            except Exception as cleanup_error:
+                cleanup["error"] = str(cleanup_error)
+                if failure is None:
+                    failure = cleanup_error
+                    error_message = str(cleanup_error)
+                    termination = "exception"
+            after_state = telemetry["feedback"].copy()
+            try:
+                after_state = adapter.read_state(timeout_sec=1.0)
+            except Exception:
+                pass
+            try:
+                after_pose = adapter.read_pose(timeout_sec=1.0)
+            except Exception:
+                after_pose = None
+            joint_error = np.asarray(after_state, dtype=float) - target
+            result = {
+                "termination": termination,
+                "termination_reason": error_message,
+                "is_partial": termination != "completed",
+                "posture_name": posture_name,
+                "target_rad": target.tolist(),
+                "reference_rad": telemetry["reference"].tolist(),
+                "feedback_rad": np.asarray(after_state, dtype=float).tolist(),
+                "joint_error_rad": joint_error.tolist(),
+                "max_abs_joint_error_rad": float(np.max(np.abs(joint_error))),
+                "passed": bool(termination == "completed" and passed),
+                "planned_motion_sec": planned_duration,
+                "elapsed_motion_sec": time.monotonic() - motion_started,
+                "settling_sec": settling_sec,
+                "settle_timeout_sec": READY_SETTLE_TIMEOUT_SEC,
+                "gravity_enabled": True,
+                "gravity_scale": 1.0,
+                "gravity_torque_nm": telemetry["torque"].tolist(),
+                "gravity_torque_worst_abs_nm": telemetry["torque_worst"].tolist(),
+                "gravity_samples": int(telemetry["gravity_samples"]),
+                "gravity_cleanup": cleanup,
+                "controllers": controller_metadata,
+                "safe_hold": safe_hold,
+            }
+            if args.after_output is not None:
+                _write_json_atomic(
+                    args.after_output,
+                    _ready_snapshot(
+                        profile,
+                        group,
+                        after_state,
+                        after_pose,
+                        posture_name=posture_name,
+                        target=target,
+                        result=result,
+                    ),
+                )
+    if failure is not None:
+        raise failure
+    print(
+        f"EXECUTED: {posture_name}; max error "
+        f"{result['max_abs_joint_error_rad']:.4f} rad; settled in "
+        f"{result['settling_sec']:.2f} s; gravity scale 1.0"
+    )
     return 0
-
 
 def _wrist_lift_sign(name: str) -> float:
     """The lift that clears a mounted tool from the table, per arm.
