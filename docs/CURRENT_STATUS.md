@@ -162,12 +162,67 @@ robotctl pose follow \
 전에는 kp나 속도 한계를 바꾸지 않는다. IK continuity 보호는 다음 별도 개발
 배치이며 이번 커밋에는 포함되지 않았다.
 
+## 최신 안전 수정 — 2026-08-20 중단 사건
+
+오른팔 deterministic translation 최소 배치는 startup alignment로 보이는 소폭
+움직임 직후 중단됐다. rotation은 실행하지 않았다. 당시 terminal 요약은 1133
+samples, J3/J5 worst `0.7646/0.7480 rad`, J4 position clamp `516/1133`,
+live TCP worst `18.9 mm/3.9 deg`, IK accepted 7, superseded 3이었다.
+
+조사 결론:
+
+- 기준 `jazzy@8a700c0`에서 `--execute` 없는 경로는 `_follow_loop`에 들어가지
+  않아 startup alignment command를 publish할 수 없다. 1133-sample 요약은
+  `--execute` 경로에서만 생성된다. 실제 argv나 shell history가 없어 어떻게
+  `--execute`가 포함됐는지는 확정하지 못했다.
+- output 쓰기는 제어 종료 후에만 시도하므로 쓰기 불가 경로가 움직임을 막지
+  못한 것이 확인된 결함이다.
+- J4 제한은 `[0, 2.44346] rad`, `2 rad/s`다. 기존 경로는 velocity, `0.2 rad`
+  lead, position 순으로 clamp하고 clamp된 command를 publish했다. 초기 pose와
+  trace가 없어 516회가 lower인지 upper인지는 확정하지 못했다.
+
+`feature/pose-follow-safety-abort` 변경:
+
+- dry-run은 ROS adapter 생성 전 반환하며 startup alignment를 포함한 publish,
+  marker/joint-state/URDF 읽기를 모두 생략한다.
+- `--execute --output`은 ROS 연결 전에 부모 디렉터리와 실제 sibling temporary
+  file write/flush/fsync로 저장 가능성을 검사한다.
+- 첫 accepted IK target은 startup measured state와 비교한다. 이후 target은
+  직전 accepted target과 비교하며 단일 관절 변화 `>= 0.30 rad`를 해당 target의
+  첫 publish 전에 거부한다. 이 하드 경계는 CLI로 완화할 수 없다.
+- deterministic profile의 position clamp는 첫 publish 전에 거부한다. 수동
+  marker follow의 기존 clamp 정책은 유지한다.
+- deterministic startup 안내에서 일반 `drag the marker` 문장을 제거했다.
+
+개발 PC 검증(실물/CAN 사용 안 함):
+
+- 안전 회귀 + 기존 pose-follow: `36 passed, 46 deselected`
+- 전체 Python (최신 `jazzy` 병합 후): `643 passed, 4 skipped`
+- ROS 2 Jazzy 빌드: 11개 패키지 성공
+- OpenArm fake smoke: 오른팔 TCP z `+30.0 mm`, residual `0.0 mm`, 성공
+- fake 오른팔 command topic 감시: dry-run 8초간 0건(exit 124 timeout)
+- fake 오른팔 command topic 감시: 쓰기 불가 `/proc/...` output도 8초간 0건,
+  CLI는 ROS 연결 전 exit 2
+- fake/replay: 첫 IK에서 J3 `+0.7646 rad`, J5 `-0.7480 rad`를 재현하고
+  publish 0건으로 exit 3; J4 lower clamp도 publish 0건으로 exit 3
+
+남은 자료 문제: 사용자가 지정한
+`openarm_follow_data/2024-08-20/right-pose-before.json`은 개발 PC에 없고,
+전송된 `openarm-diagnostic-aborted-2026-08-20.tar.gz`는 0바이트다. 현재 replay는
+terminal jump 수치를 사용하지만 정확한 초기 7개 관절값은 임시 0 자세다. 파일이
+다시 전달되면 fixture를 실제 값으로 교체하고 전체 검증을 다시 실행한다.
+
+실물 재시험은 아직 실행하지 않았다. 최신 경로 준비, dry-run, 승인 후 translation
+한 번과 중단 조건은
+[`docs/chatgpt-work-openarm-handoff.md`](chatgpt-work-openarm-handoff.md)의
+'2026-08-20 안전 중단 이후 최신 인계'를 따른다. clean translation 검토 전에는
+rotation, kp 또는 속도 한계를 변경하지 않는다.
+
 ## 최신 완료 — MATLAB pose-follow 분석 번들
 
-- 기준: `jazzy` `8a700c0`, 작업 브랜치
-  `feature/matlab-pose-follow-analysis`
+- 기준 기능 커밋: `2f0feb3`; `jazzy` 병합 커밋: `c1d850a`
 - Pull Request: [#14](https://github.com/RiaRon/robot_control-jazzy/pull/14)
-  (`jazzy` 대상, open)
+  (`jazzy`에 병합 완료)
 - `matlab/pose_follow/`에 읽기 전용 분석기를 추가했다. 로봇 제어 코드와 ROS
   package는 변경하지 않았다.
 - 2026-08-18 legacy real schema v1과 deterministic diagnostics가 확장된

@@ -173,8 +173,9 @@ Work가 Codex로 돌려보낼 것은 다음과 같다.
 
 새 JSON은 기존 schema v1과 필드를 유지하면서 startup 완료 시각, IK sequence별
 request/complete/accepted 시각과 latency, signed projection, 관절 target jump
-이벤트, deterministic profile phase를 추가한다. Jump는 진단만 하며 제어를
-바꾸지 않는다.
+이벤트, deterministic profile phase를 추가한다. 이 문단의 `8a700c0`에서는
+jump가 진단 전용이었지만, 아래 2026-08-20 최신 인계의 `0.30 rad` 하드 차단이
+이를 대체한다.
 
 ### OpenArm 배포와 무동작 확인
 
@@ -247,3 +248,101 @@ robotctl pose follow --group openarm_right_arm \
 0.30 rad 초과 단일 관절 target jump가 보이면 즉시 중단하고 두 JSON과 전체
 터미널 로그를 Codex로 전달한다. 이 두 clean 기준선을 확보하기 전에는 kp나
 속도 한계를 비교하지 않는다.
+
+## 2026-08-20 안전 중단 이후 최신 인계
+
+이 절은 위의 최소 실물 배치를 대체한다. 2026-08-20 translation 최소 배치는
+startup alignment로 보이는 소폭 움직임 직후 중단됐다. rotation은 실행하지
+않았다. 당시 터미널에는 1133 samples, J3/J5 worst 약 `0.7646/0.7480 rad`,
+J4 position clamp `516/1133`, live TCP worst `18.9 mm/3.9 deg`, IK accepted 7,
+superseded 3이 출력됐으나 follow JSON과 전체 명령줄은 저장되지 않았다.
+
+코드 조사와 제한 계산은
+[안전 중단 조사](pose-follow-safety-incident-2026-08-20.md)에 기록했다. 핵심은
+다음과 같다.
+
+- `--execute` 없는 dry-run은 이제 ROS 연결 자체를 열지 않으며 startup
+  alignment를 포함해 어떤 command도 publish할 수 없다.
+- `--execute --output`은 output 저장 가능성을 ROS 연결 전에 검사한다.
+- accepted IK target의 단일 관절 변화가 `0.30 rad` 이상이면 그 target을
+  publish하기 전에 자동 거부한다.
+- deterministic profile에서 position clamp가 발생하면 clamp된 command를
+  publish하기 전에 자동 거부한다.
+- 수동 marker follow의 기존 clamp 정책은 바뀌지 않았다.
+
+### 재시험 전 파일 경로 준비
+
+아래 실물 절차는 이 변경의 Python 테스트, ROS 빌드, fake stack과 dry-run
+무발행 검증이 모두 통과한 커밋을 배포한 뒤, 사용자가 그 작업에서 실물 이동을
+명시 승인한 경우에만 수행한다. 먼저 빈 환경변수와 `tee` 실패를 제어 시작 전에
+차단한다.
+
+```bash
+set -euo pipefail
+
+export RUN_DIR=/home/user/openarm_follow_data/2026-08-20
+: "${RUN_DIR:?RUN_DIR must be an explicit non-empty directory}"
+mkdir -p -- "$RUN_DIR"
+test -d "$RUN_DIR"
+test -w "$RUN_DIR"
+
+RUN_STEM=right-follow-diagnostic-translation
+POSE_JSON="$RUN_DIR/right-pose-before.json"
+FOLLOW_JSON="$RUN_DIR/$RUN_STEM.json"
+FOLLOW_LOG="$RUN_DIR/$RUN_STEM.log"
+
+# tee가 로봇 프로세스와 동시에 실패하지 않도록 로그 파일도 먼저 연다.
+: >"$FOLLOW_LOG"
+
+# 읽기 전용 초기 자세 기록. 실물 command를 보내지 않는다.
+robotctl pose show --group openarm_right_arm --output "$POSE_JSON"
+python3 -m json.tool "$POSE_JSON" >/dev/null
+```
+
+원시 pose/follow JSON과 terminal log는 실험 데이터 저장소에 두고 Git에 추가하지
+않는다.
+
+### 무동작 확인
+
+다음 명령에는 `--execute`와 `--output`이 없다. 출력 마지막 줄이 정확히
+`no ROS connection is opened`인지 확인하고, 팔이 움직이면 즉시 E-stop 후 실제
+실행 argv, shell history와 실행 중인 `robot_control.cli` process를 보존한다.
+
+```bash
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile translation \
+  --diagnostic-distance 0.01 \
+  --diagnostic-linear-speed 0.005 \
+  --diagnostic-hold-sec 3
+```
+
+### 승인 후 translation 한 번만 재시험
+
+```bash
+# 아래 명령만 --execute가 있으며 실물 오른팔을 움직인다.
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile translation \
+  --diagnostic-distance 0.01 \
+  --diagnostic-linear-speed 0.005 \
+  --diagnostic-hold-sec 3 \
+  --output "$FOLLOW_JSON" \
+  --execute 2>&1 | tee -a "$FOLLOW_LOG"
+```
+
+다음 중 하나면 즉시 `Ctrl+C`, 필요하면 E-stop하고 rotation으로 넘어가지 않는다.
+
+- 비정상 소음·진동·발열·충돌 또는 예상 밖 방향의 움직임
+- CAN error counter 증가, controller 비활성 또는 joint-state 중단
+- `refused: IK target jump refused before publish` (단일 관절 `>= 0.30 rad`)
+- `refused: deterministic profile position clamp refused before publish`
+- IK failed, superseded 또는 J3/J5의 새 target 불연속
+- live TCP 위치 `> 30 mm` 또는 방향 `> 10 deg`
+- JSON/로그 파일이 없거나 JSON 문법 검사가 실패함
+
+정상 종료 뒤 `python3 -m json.tool "$FOLLOW_JSON" >/dev/null`을 실행하고 초기
+pose JSON, follow JSON, 전체 log와 Git 커밋을 함께 전달한다. clean translation
+한 번을 검토하기 전에는 rotation, kp 또는 속도 한계 변경을 실행하지 않는다.
