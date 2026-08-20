@@ -1,4 +1,4 @@
-function validate_pose_follow_parser(legacyJson, currentJson, outputDir)
+function validate_pose_follow_parser(legacyJson, currentJson, outputDir, partialJson)
 %VALIDATE_POSE_FOLLOW_PARSER Exercise both supported pose-follow variants.
 %   The files are supplied by the caller and are never copied or modified.
 if nargin < 3
@@ -18,10 +18,23 @@ for phase = ["ramp", "hold", "return", "origin-hold"]
         'Current fake JSON is missing canonical phase %s.', phase);
 end
 
+files = [string(legacyJson); string(currentJson)];
+names = ["legacy-real"; "current-fake"];
+if nargin >= 4 && strlength(string(partialJson)) > 0
+    partial = read_pose_follow_json(partialJson, 'partial-refused');
+    assert(partial.is_partial);
+    assert(partial.termination == "safety_refused");
+    assert(partial.refusal.available);
+    assert(partial.refusal.reason == "ik_continuity_exhausted");
+    assert(partial.refusal.refused_sequence == 6);
+    assert(partial.refusal.profile_phase == "translation_ramp_out");
+    files(end + 1, 1) = string(partialJson);
+    names(end + 1, 1) = "partial-refused";
+end
+
 analysis = analyze_pose_follow( ...
-    [string(legacyJson); string(currentJson)], outputDir, ...
-    'ExperimentNames', ["legacy-real"; "current-fake"]);
-assert(numel(analysis.experiments) == 2);
+    files, outputDir, 'ExperimentNames', names);
+assert(numel(analysis.experiments) == numel(files));
 
 required = [ ...
     "summary.csv"; "analysis_summary.json"; "analysis.mat"; ...
@@ -32,5 +45,5 @@ for index = 1:numel(required)
     assert(isfile(fullfile(outputDir, required(index))), ...
         'Missing bundle file %s.', required(index));
 end
-fprintf('Validated legacy and extended pose-follow JSON: %s\n', outputDir);
+fprintf('Validated legacy, extended, and optional partial JSON: %s\n', outputDir);
 end

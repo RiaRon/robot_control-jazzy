@@ -34,9 +34,6 @@ end
 
 trace = raw.trace(:);
 sampleCount = numel(trace);
-if sampleCount == 0
-    error('posefollow:EmptyTrace', 'The trace is empty in %s.', filePath);
-end
 
 jointNames = string(raw.joint_names(:));
 jointCount = numel(jointNames);
@@ -104,9 +101,9 @@ for sampleIndex = 1:sampleCount
 end
 
 schemaVersion = scalarField(raw, 'schema_version');
-hasExtendedTrace = isfield(trace(1), ...
-    'position_error_signed_projection_m') || ...
-    isfield(trace(1), 'diagnostic_profile');
+hasExtendedTrace = sampleCount > 0 && ( ...
+    isfield(trace(1), 'position_error_signed_projection_m') || ...
+    isfield(trace(1), 'diagnostic_profile'));
 hasEventTiming = isfield(raw.result, 'ik') && ...
     isfield(raw.result.ik, 'events');
 hasJumpEvents = isfield(raw.result, 'ik_target_jumps');
@@ -118,6 +115,7 @@ end
 
 ik = normalizeIk(raw.result, jointNames);
 jumps = normalizeJumps(raw.result, jointNames);
+refusal = normalizeRefusal(raw.result, jointCount);
 
 run = struct();
 run.experiment = string(experimentName);
@@ -141,10 +139,25 @@ run.joint_positions_rad = struct( ...
     'measured', measuredRad);
 run.ik = ik;
 run.ik_target_jumps = jumps;
+run.termination = string(fieldOr(raw.result, 'termination', "unknown"));
+run.is_partial = logicalField(raw.result, 'is_partial', false);
+run.refusal = refusal;
 run.settings = fieldOr(raw, 'settings', struct());
 run.result_metadata = rmfieldIfPresent(raw.result, { ...
     'position_error_m', 'position_error_signed_projection_m', ...
     'orientation_error_rad', 'per_joint', 'ik', 'ik_target_jumps'});
+end
+
+
+function value = logicalField(parent, name, fallback)
+value = fallback;
+if isstruct(parent) && isfield(parent, name)
+    candidate = parent.(name);
+    if (islogical(candidate) || isnumeric(candidate)) && ...
+            isscalar(candidate) && ~isempty(candidate)
+        value = logical(candidate);
+    end
+end
 end
 
 
@@ -264,6 +277,10 @@ ik.submitted = scalarField(ikRaw, 'submitted');
 ik.accepted = scalarField(ikRaw, 'succeeded');
 ik.failed = scalarField(ikRaw, 'failed');
 ik.superseded = scalarField(ikRaw, 'superseded');
+ik.solve_attempts = scalarField(ikRaw, 'solve_attempts');
+ik.continuity_rejected = scalarField(ikRaw, 'continuity_rejected');
+ik.continuity_retries = scalarField(ikRaw, 'continuity_retries');
+ik.continuity_exhausted = scalarField(ikRaw, 'continuity_exhausted');
 ik.events = struct( ...
     'sequence', {}, 'outcome', {}, 'requested_sec', {}, ...
     'started_sec', {}, 'completed_sec', {}, 'accepted_sec', {}, ...
@@ -293,6 +310,39 @@ end
 ik.events = events;
 ik.event_timing_available = true;
 ik.joint_names = jointNames;
+end
+
+
+function refusal = normalizeRefusal(result, jointCount)
+refusal = struct( ...
+    'available', false, 'reason', "", 'message', "", ...
+    'refused_sequence', nan, 'profile_phase', "", ...
+    'attempts', nan, 'max_attempts', nan, ...
+    'reference_sequence', nan, ...
+    'joint_delta_rad', nan(1, jointCount), ...
+    'triggered_joints', {{}});
+if ~isstruct(result) || ~isfield(result, 'refusal') || ...
+        ~isstruct(result.refusal) || isempty(result.refusal)
+    return;
+end
+raw = result.refusal;
+refusal.available = true;
+refusal.reason = string(fieldOr(raw, 'reason', "unknown"));
+refusal.message = string(fieldOr(raw, 'message', ""));
+refusal.refused_sequence = scalarField(raw, 'refused_sequence');
+refusal.profile_phase = string(fieldOr(raw, 'profile_phase', "unknown"));
+refusal.attempts = scalarField(raw, 'attempts');
+refusal.max_attempts = scalarField(raw, 'max_attempts');
+refusal.reference_sequence = scalarField(raw, 'reference_sequence');
+if isfield(raw, 'joint_delta_rad') && isnumeric(raw.joint_delta_rad)
+    delta = double(raw.joint_delta_rad(:)).';
+    if numel(delta) == jointCount
+        refusal.joint_delta_rad = delta;
+    end
+end
+if isfield(raw, 'triggered_joints')
+    refusal.triggered_joints = cellstr(string(raw.triggered_joints(:)));
+end
 end
 
 

@@ -9,11 +9,19 @@
 
 - 2026-08-18 real batch의 legacy schema v1 trace
 - Jazzy `8a700c0`의 deterministic diagnostics가 추가된 extended schema v1 trace
+- safety refusal까지 승인된 trace와 종료 원인을 담은 partial/refused schema v1
 - 같은 필드를 유지하는 이후 JSON
 
 두 형식이 모두 `schema_version: 1`이므로 parser는 버전 숫자만 추측하지 않는다.
 `diagnostic_profile`, signed projection, IK timing, IK target jump 필드의 존재 여부로
 기능을 판별한다.
+
+partial/refused 파일은 정상 파일과 같은 trace 배열을 사용하므로 refusal 전까지의
+phase 통계와 그림을 그대로 생성한다. `summary.csv`,
+`analysis_summary.json`, `analysis.mat`에는 `termination`, `is_partial`,
+refusal reason/sequence/phase와 IK continuity rejected/retry/exhausted 수를
+추가한다. `ik_events.png`에도 refused outcome을 별도 색으로 표시한다. 거부가
+첫 sample 전에 발생해 trace가 비어 있어도 refusal metadata는 읽는다.
 
 legacy JSON에는 profile phase, IK event별 latency와 jump event가 없다. 이 경우:
 
@@ -82,14 +90,14 @@ matlab -batch "addpath('matlab/pose_follow'); analyze_pose_follow( ...
 
 | 파일 | 내용 |
 | --- | --- |
-| `summary.csv` | 실험×phase 비교표. TCP 위치/자세 mean, RMS, max, p95와 IK 결과·latency·jump 수 |
+| `summary.csv` | 실험×phase 비교표. TCP 위치/자세 통계, IK 결과·latency·jump, partial/refusal·continuity 수 |
 | `analysis_summary.json` | Work가 읽기 쉬운 metadata, layer 통계, summary row와 색상 규칙 |
 | `analysis.mat` | 정규화 time series, summary table과 구조화 분석 전체 |
 | `tcp_error_timeseries.png` | TCP 위치(mm)·자세(deg) 오차와 phase band |
 | `error_layers.png` | 레이어별 거리와 live-error 방향 signed projection(mm) |
 | `joint_tracking.png` | J1-J7 중 최대 target-command와 command-measured 오차(rad) |
 | `j1_j4_j7_detail.png` | J1/J4/J7 target-command-measured 및 IK target jump 시각 |
-| `ik_events.png` | request latency(ms)와 accepted/failed/superseded 수 |
+| `ik_events.png` | request latency(ms)와 accepted/failed/superseded/refused 수 |
 | `phase_comparison.png` | canonical phase별 TCP RMS/p95 실험 비교 |
 | `research_report.pdf` | 요약 표지와 위 6개 그림을 묶은 7-page 연구 보고서 |
 
@@ -117,11 +125,13 @@ addpath('matlab/pose_follow/tests');
 validate_pose_follow_parser( ...
     '/data/2026-08-18/right-follow-kp2-slow.json', ...
     '/data/current/fake-diagnostic.json', ...
-    '/tmp/openarm-follow-analysis/parser-validation');
+    '/tmp/openarm-follow-analysis/parser-validation', ...
+    '/data/current/partial-refused.json');
 ```
 
-이 검증은 legacy signed projection 재구성, extended phase 네 종류, 두 실험의
-통합 parsing과 전체 bundle 파일을 확인한다.
+네 번째 인자는 선택사항이다. 이 검증은 legacy signed projection 재구성,
+extended phase 네 종류, partial refusal sequence/reason/phase, 통합 parsing과
+전체 bundle 파일을 확인한다.
 
 ## Git 및 데이터 보존
 

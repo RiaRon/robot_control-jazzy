@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from robot_control.cli import main
@@ -22,6 +24,11 @@ INCIDENT_INITIAL_JOINTS_RAD = np.array(
         -0.02155336842908362,
         -0.0005722133211261138,
     ]
+)
+
+# Exact accepted-target delta printed by the 0673903 real translation refusal.
+RETEST_BRANCH_JUMP_RAD = np.array(
+    [3.1559, 3.1269, 1.5527, 0.0, 1.5889, 0.0, 0.0]
 )
 
 
@@ -101,6 +108,24 @@ class ReplayArm:
         command = np.asarray(positions, dtype=float).copy()
         self.streamed.append(command)
         self.joints = command
+
+
+class SequenceSixBranchReplayArm(ReplayArm):
+    """Return five continuous targets, then only the reported bad branch."""
+
+    def __init__(self):
+        initial = np.zeros(7)
+        initial[3] = 0.021553368
+        super().__init__(initial)
+        self.solve_calls = 0
+
+    def solve_ik(self, pose, seed):
+        seed = np.asarray(seed, dtype=float).copy()
+        self.ik_requests.append((pose, seed.copy()))
+        self.solve_calls += 1
+        if self.solve_calls <= 5:
+            return seed
+        return seed + RETEST_BRANCH_JUMP_RAD
 
 
 def install_replay(monkeypatch, arm):
@@ -273,3 +298,64 @@ def test_deterministic_alignment_message_never_invites_marker_drag(
     assert "deterministic profile started" in output
     assert "keep the RViz marker at Current" in output
     assert "drag the marker" not in output
+
+
+def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
+    monkeypatch, tmp_path, capsys
+):
+    arm = SequenceSixBranchReplayArm()
+    install_replay(monkeypatch, arm)
+    output_path = tmp_path / "partial-refusal.json"
+
+    code = main(
+        diagnostic_args(
+            "--diagnostic-distance",
+            "0.01",
+            "--diagnostic-linear-speed",
+            "0.005",
+            "--tolerance",
+            "0.0001",
+            "--seconds",
+            "1.0",
+            "--output",
+            str(output_path),
+            "--execute",
+        )
+    )
+
+    assert code == 3
+    assert output_path.is_file()
+    payload = json.loads(output_path.read_text())
+    result = payload["result"]
+    refusal = result["refusal"]
+
+    assert result["termination"] == "safety_refused"
+    assert result["is_partial"]
+    assert result["samples"] == len(payload["trace"])
+    assert result["samples"] > 0
+    assert result["ik"]["submitted"] == 6
+    assert result["ik"]["succeeded"] == 5
+    assert result["ik"]["continuity_rejected"] == 4
+    assert result["ik"]["continuity_retries"] == 3
+    assert result["ik"]["continuity_exhausted"] == 1
+    assert refusal["reason"] == "ik_continuity_exhausted"
+    assert refusal["refused_sequence"] == 6
+    assert refusal["profile_phase"] == "translation_ramp_out"
+    assert refusal["attempts"] == 4
+    assert refusal["triggered_joints"] == [
+        "r_aj_1",
+        "r_aj_2",
+        "r_aj_3",
+        "r_aj_5",
+    ]
+    np.testing.assert_allclose(
+        refusal["joint_delta_rad"], RETEST_BRANCH_JUMP_RAD
+    )
+    assert all(sample["ik_sequence"] != 6 for sample in payload["trace"])
+    assert arm.streamed
+    for command in arm.streamed:
+        np.testing.assert_allclose(command, arm.streamed[0])
+
+    terminal = capsys.readouterr().out
+    assert "wrote partial pose follow diagnostics" in terminal
+    assert "IK target jump refused before publish after 4" in terminal

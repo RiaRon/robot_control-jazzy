@@ -16,6 +16,9 @@ def test_parser_uses_matlab_jsondecode_fileread_and_supports_both_variants():
     assert '"extended"' in parser
     assert "reconstructProjections" in parser
     assert "canonicalPhase" in parser
+    assert "normalizeRefusal" in parser
+    assert "is_partial" in parser
+    assert "continuity_exhausted" in parser
 
 
 def test_analyzer_declares_the_complete_bundle_without_robot_dependencies():
@@ -34,6 +37,9 @@ def test_analyzer_declares_the_complete_bundle_without_robot_dependencies():
     }
 
     assert all(name in analyzer for name in required)
+    assert "refusal_reason" in analyzer
+    assert "refused_sequence" in analyzer
+    assert "continuity_rejected" in analyzer
     assert "import robot_control" not in analyzer.lower()
     assert "system('ros2" not in analyzer.lower()
 
@@ -51,6 +57,8 @@ def test_documentation_names_versions_phases_and_git_data_policy():
         "원시 pose-follow JSON",
         "output 폴더",
         "ChatGPT Work",
+        "partial/refused",
+        "refusal",
     ):
         assert evidence in document
 

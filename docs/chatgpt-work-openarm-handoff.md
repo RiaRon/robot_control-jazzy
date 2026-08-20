@@ -374,3 +374,51 @@ robotctl pose follow --group openarm_right_arm \
 정상 종료 뒤 `python3 -m json.tool "$FOLLOW_JSON" >/dev/null`을 실행하고 초기
 pose JSON, follow JSON, 전체 log와 Git 커밋을 함께 전달한다. clean translation
 한 번을 검토하기 전에는 rotation, kp 또는 속도 한계 변경을 실행하지 않는다.
+
+## 2026-08-20 sequence-6 IK refusal 이후 개발 인계
+
+이 절은 위 재시험 절차보다 최신이며, 이 개발 배치에서는 추가 실물 재시험이나
+rotation 실행을 요구하지 않는다. `jazzy@0673903`에서 수행한 오른팔 translation
+1회는 startup alignment 후 351 samples, 99.0 Hz를 기록했다. 안전 구간은 IK
+6/6, failed/superseded 0, live TCP 위치 mean/worst `2.5/8.3 mm`, 방향
+mean/worst `0.2/0.2 deg`, Cartesian limit와 joint clamp 0이었다.
+
+sequence 6에서 직전 accepted target 대비 J1 `+3.1559`, J2 `+3.1269`, J3
+`+1.5527`, J5 `+1.5889 rad`인 다른 IK branch가 나왔다. 기존 `>= 0.30 rad`
+경계가 첫 publish 전에 차단했다. 실행 전후 J4는 `+0.021553368/+0.0216 rad`,
+CAN FD는 ERROR-ACTIVE이고 tx/rx error counter는 0이었으며 이상 소음·진동은
+없었다.
+
+전달된 `openarm_follow_data/2026-08-20/openarm-ik-refusal-2026-08-20/`의
+9개 파일은 모두 0바이트라 351-sample trace를 재계산할 수 없다. 위 수치는
+terminal 기록을 근거로 하며, 원시 JSON·log와 생성 분석물은 Git에 넣지 않는다.
+상세 근거는
+[sequence-6 IK continuity 사건 문서](pose-follow-ik-continuity-incident-2026-08-20.md)에
+있다.
+
+새 정책은 기존 hard boundary를 완화하지 않는다. 첫 request는 startup measured
+state, 이후 request는 직전 연속 accepted target을 seed이자 비교 기준으로 삼는다.
+불연속 해는 target으로 승격하거나 publish하지 않고, 이전 accepted target을
+유지하면서 동일 Cartesian 목표를 동일 seed로 최대 4회 푼다. 모든 관절 delta가
+`0.30 rad` 미만인 해만 수락하며, 연속 해를 찾지 못하면 안전 종료한다.
+
+`--output`이 지정된 safety refusal은 exit 3을 반환하기 전에 partial JSON을
+원자 저장한다. `result.termination`, `is_partial`, `refusal`에 종료 원인·sequence·
+phase·7개 delta를, `result.ik.continuity_*`와 `continuity_events`에 retry 이력을
+남긴다. 거부된 sequence는 trace에 들어가지 않는다. MATLAB 분석기는 legacy,
+full deterministic, partial/refused JSON을 한 bundle에서 함께 비교한다.
+
+개발 PC에서 실물/CAN 없이 확인한 결과:
+
+- 합성 replay의 sequence 6에서 위 J1/J2/J3/J5 delta를 4회 모두 차단하고,
+  이전 target을 유지한 채 partial JSON 저장 및 exit 3
+- 실제 ROS MoveIt + `mock_components/GenericSystem`의 비특이 seed에서 10 mm,
+  5 mm/s translation 왕복 완료: 408 samples, 99.0 Hz, IK 9/9,
+  failed/superseded/continuity refusal/clamp 모두 0
+- MATLAB R2026a에서 2026-08-18 legacy real, full deterministic fake,
+  partial/refused fake를 함께 분석해 CSV/JSON/MAT, PNG 6개와 7-page PDF 생성
+- 집중 회귀 `19 passed`, pose/pose-follow CLI `67 passed, 8 deselected`, 전체
+  Python `647 passed, 4 skipped`, ROS 2 Jazzy 11개 패키지 빌드 성공
+
+현재 인계는 코드 커밋과 PR 및 fake 검증 결과까지다. 새 실물 명령을 실행하거나
+재시험을 요청하지 말고, 별도 명시 승인과 다음 작업 지시를 기다린다.

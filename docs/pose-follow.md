@@ -201,19 +201,39 @@ drag the marker in RViz; the arm tracks it until the time runs out
 `--seconds`를 생략해도 기본값은 60초입니다. 생략한다고 무기한 실행되지는
 않습니다.
 
-첫 accepted IK target은 startup 실측 관절과 비교하고, 이후 target은 직전
-accepted target과 비교합니다. 어느 한 관절이라도 변화량 절댓값이 `0.30 rad`
-이상이면 해당 target을 publish하기 전에 `refused: IK target jump refused before
-publish`로 종료합니다. 이 하드 경계는 분석용 `--ik-jump-threshold`와 별개이며
-CLI로 완화할 수 없습니다. deterministic profile에서는 position clamp도 예상하지
-않은 목표로 취급해 첫 clamp를 publish하기 전에 거부합니다. 수동 marker 모드의
-속도·lead·position clamp는 기존처럼 제한 후 계속합니다.
+첫 IK target은 startup 실측 관절, 이후 target은 직전 accepted target을 seed와
+연속성 기준으로 사용합니다. 어느 한 관절이라도 변화량 절댓값이 `0.30 rad`
+이상이면 그 해는 worker target으로 승격하거나 publish하지 않습니다. 같은
+Cartesian 목표를 직전 연속 관절해 seed로 최대 4회(최초 solve + retry 3회)
+계산하며, 그동안 controller는 이전 accepted target만 유지합니다. 제한 횟수
+안에 모든 관절이 `0.30 rad` 미만인 해가 나오면 그 해만 수락하고, 끝까지
+찾지 못하면 `refused: IK target jump refused before publish`로 안전 종료합니다.
+
+`0.30 rad` 비교는 `>=`인 하드 경계이며 분석용 `--ik-jump-threshold`와
+별개입니다. CLI로 완화하거나 제거할 수 없습니다. deterministic profile에서는
+position clamp도 예상하지 않은 목표로 취급해 첫 clamp를 publish하기 전에
+거부합니다. 수동 marker 모드의 속도·lead·position clamp는 기존처럼 제한 후
+계속합니다.
 
 60초가 지나거나 터미널에서 `Ctrl+C`를 누르면 추종이 끝납니다. trajectory
 controller는 마지막 명령 위치를 유지하므로 팔은 마지막 위치를 계속 잡습니다.
 `/tmp/right-follow.json`에는 마커, IK, 활성 명령, 실측 상태를 분리한 요약과
 100 Hz trace가 저장됩니다. 이 파일은 비교 분석용 실험 데이터이며 Git에
 커밋하지 않습니다.
+
+safety refusal이 발생해도 `--output`을 지정했다면 이미 승인·발행된 sample까지
+원자적으로 저장한 partial JSON을 먼저 쓰고 종료 코드 3을 반환합니다. 기존
+schema v1과 `kind: pose_follow_diagnostics`를 유지하며 다음 구조화 필드가
+추가됩니다.
+
+- `result.termination: safety_refused`, `result.is_partial: true`
+- `result.refusal.reason`, `refused_sequence`, `profile_phase`
+- `result.refusal.joint_delta_rad`, `triggered_joints`, retry 횟수
+- `result.ik.continuity_rejected/retries/exhausted`와 각 rejected solve event
+
+거부된 sequence는 `trace[].ik_sequence`에 나타나지 않습니다. 즉 partial
+trace에는 offending target이 아니라 그 직전까지 실제로 승인된 target, command,
+measurement만 들어갑니다.
 
 ## 5. 무기한 운전
 
