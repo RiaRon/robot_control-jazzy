@@ -1,6 +1,6 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-18 (Asia/Seoul)
+마지막 갱신: 2026-08-20 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
@@ -161,3 +161,32 @@ robotctl pose follow \
 '최신 인계 — deterministic 진단 배치'를 따른다. 두 clean JSON을 확보하기
 전에는 kp나 속도 한계를 바꾸지 않는다. IK continuity 보호는 다음 별도 개발
 배치이며 이번 커밋에는 포함되지 않았다.
+
+## 최신 완료 — MATLAB pose-follow 분석 번들
+
+- 기준: `jazzy` `8a700c0`, 작업 브랜치
+  `feature/matlab-pose-follow-analysis`
+- Pull Request: [#14](https://github.com/RiaRon/robot_control-jazzy/pull/14)
+  (`jazzy` 대상, open)
+- `matlab/pose_follow/`에 읽기 전용 분석기를 추가했다. 로봇 제어 코드와 ROS
+  package는 변경하지 않았다.
+- 2026-08-18 legacy real schema v1과 deterministic diagnostics가 확장된
+  schema v1을 필드 기반으로 정규화한다.
+- `ramp`, `hold`, `return`, `origin-hold`별 TCP 위치·자세 mean/RMS/max/p95,
+  layer 거리/signed projection, IK latency·accepted/failed/superseded,
+  J1/J4/J7 target-command-measured와 IK target jump를 분석한다.
+- 고정 분석 번들은 CSV, JSON, MAT, PNG 6개와 7-page PDF다. MATLAB은 연구일지를
+  직접 쓰지 않고 Work가 사용할 구조화 근거만 생성한다.
+- 사용법, MATLAB R2021b+와 base MATLAB-only 요구사항, raw JSON·output의 Git
+  제외 지침은 `docs/matlab-pose-follow-analysis.md`에 있다.
+
+검증:
+
+- MATLAB R2026a parser: 2026-08-18 real
+  `right-follow-kp2-slow.json` 2,964 samples 성공
+- 현재 fake deterministic JSON: 네 canonical phase와 전체 bundle 성공
+- jump fake JSON: J4 jump event parsing과 detail PNG 생성 성공
+- PNG 6개: 약 2,500 px 폭, 비어 있지 않은 raster 확인
+- PDF: 표지와 그림 6개, 7 pages
+- 관련 문서/Python 계약: `9 passed`
+- 전체 Python: `636 passed, 4 skipped`
