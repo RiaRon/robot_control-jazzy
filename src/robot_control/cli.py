@@ -73,6 +73,18 @@ from .hdgp_export import (
 from .interface import CanonicalInterface
 from .ik_follow import LatestIkWorker
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
+from .ready import (
+    READY_ACCELERATION_RAD_S2,
+    READY_POSTURE_NAME,
+    READY_SETTLE_TIMEOUT_SEC,
+    READY_SETTLE_WINDOW_SEC,
+    READY_SPEED_RAD_S,
+    READY_TARGET_RAD,
+    READY_TOLERANCE_RAD,
+    RIGHT_ARM_GROUP,
+    check_ready,
+    ready_metadata,
+)
 from .safety import CommandGate, SafetyError
 from .servo import CartesianPI
 from .srdf import named_state, repository_root
@@ -452,22 +464,23 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
     joints.add_argument("--duration", type=float, default=DEFAULT_DURATION_SEC)
     joints.add_argument("--execute", action="store_true")
 
-    # ready/rest are the bringup and shutdown moves: from wherever each arm is
-    # to the initial working state (elbow at READY_ELBOW_RAD, the rest at
-    # zero), and back down. Paced by PARK_SPEED_RAD_PER_SEC, not --duration, so
-    # they are slow no matter how far the arm has to travel.
-    for name, blurb in (
-        ("ready", "raise each arm to the initial working state, slowly"),
-        ("rest", "lower each arm back to all zeros, slowly"),
-    ):
-        park = stages.add_parser(name, help=blurb)
-        park.add_argument("--profile", default="openarm_tesollo")
-        park.add_argument(
-            "--group",
-            action="append",
-            help="an arm group to move; repeatable. Default: every *_arm group",
-        )
-        park.add_argument("--execute", action="store_true")
+    ready = stages.add_parser(
+        "ready", help="move the right arm to the standard experiment posture"
+    )
+    ready.add_argument("--profile", default="openarm_tesollo")
+    ready.add_argument("--group", required=True)
+    ready.add_argument("--before-output", type=Path)
+    ready.add_argument("--after-output", type=Path)
+    ready.add_argument("--execute", action="store_true")
+
+    rest = stages.add_parser("rest", help="lower an arm to the table rest posture")
+    rest.add_argument("--profile", default="openarm_tesollo")
+    rest.add_argument(
+        "--group",
+        action="append",
+        help="an arm group to move; repeatable. Default: every *_arm group",
+    )
+    rest.add_argument("--execute", action="store_true")
 
     end_effector = stages.add_parser("ee", help="set a group by end-effector pose")
     end_effector.add_argument("--profile", default="openarm_tesollo")
@@ -786,8 +799,10 @@ def _pose(args: argparse.Namespace) -> int:
             return _pose_show(args, profile)
         if args.stage == "joints":
             return _pose_joints(args, profile)
-        if args.stage in ("ready", "rest"):
-            return _pose_park(args, profile, raise_elbow=args.stage == "ready")
+        if args.stage == "ready":
+            return _pose_ready(args, profile)
+        if args.stage == "rest":
+            return _pose_park(args, profile, raise_elbow=False)
         if args.stage == "gravity":
             return _pose_gravity(args, profile)
         if args.stage == "torque":
@@ -1084,6 +1099,153 @@ def _pose_joints(args, profile) -> int:
         else:
             adapter.send_trajectory(points, period_sec=1.0 / rate)
         print(f"EXECUTED: {group.name} over {args.duration:g} s")
+    return 0
+
+
+def _minimum_jerk_trajectory(start, target, rate_hz):
+    """Joint trajectory bounded by the ready speed and acceleration limits."""
+    start = np.asarray(start, dtype=float)
+    target = np.asarray(target, dtype=float)
+    travel = float(np.max(np.abs(target - start)))
+    if travel < 1e-9:
+        return [], 0.0
+    duration = max(
+        1.875 * travel / READY_SPEED_RAD_S,
+        np.sqrt(5.774 * travel / READY_ACCELERATION_RAD_S2),
+        1.0,
+    )
+    steps = max(1, int(np.ceil(duration * rate_hz)))
+    duration = steps / rate_hz
+    points = []
+    for step in range(1, steps + 1):
+        phase = step / steps
+        blend = 10 * phase**3 - 15 * phase**4 + 6 * phase**5
+        points.append(start + blend * (target - start))
+    return points, duration
+
+
+def _ready_snapshot(profile, group, state, pose, *, result=None):
+    payload = {
+        "schema_version": 1,
+        "kind": "pose_snapshot",
+        "profile": profile.name,
+        "groups": [
+            {
+                "name": group.name,
+                "joint_names": list(group.joints),
+                "joint_positions_rad": np.asarray(state, dtype=float).tolist(),
+                "tcp": {
+                    "frame_id": pose.frame_id,
+                    "tip_link": group.tip_link,
+                    "xyz_m": list(pose.position),
+                    "quaternion_xyzw": list(pose.orientation),
+                    "rpy_rad": list(pose.rpy),
+                },
+            }
+        ],
+        "ready_posture": ready_metadata(check_ready(state)),
+    }
+    if result is not None:
+        payload["ready_result"] = result
+    return payload
+
+
+def _wait_for_ready_settle(adapter):
+    started = time.monotonic()
+    stable_since = None
+    last = None
+    while time.monotonic() - started <= READY_SETTLE_TIMEOUT_SEC:
+        last = check_ready(adapter.read_state(timeout_sec=1.0))
+        now = time.monotonic()
+        if last.passed:
+            stable_since = now if stable_since is None else stable_since
+            if now - stable_since >= READY_SETTLE_WINDOW_SEC:
+                return last, now - started
+        else:
+            stable_since = None
+        time.sleep(0.02)
+    worst = float(np.max(np.abs(last.error))) if last is not None else float("nan")
+    raise SafetyError(
+        f"{READY_POSTURE_NAME} did not settle within "
+        f"{READY_SETTLE_TIMEOUT_SEC:g} s; worst joint error {worst:.4f} rad"
+    )
+
+
+def _pose_ready(args, profile) -> int:
+    """Move only the right arm to the selected deterministic start posture."""
+    from .ros_adapter import RosAdapter
+
+    group = _group(profile, args.group)
+    if group.name != RIGHT_ARM_GROUP:
+        raise ValueError(
+            f"pose ready currently supports only {RIGHT_ARM_GROUP!r}; "
+            "the left arm is not activated"
+        )
+    if (args.before_output is not None or args.after_output is not None) and not args.execute:
+        raise ValueError("ready pose snapshots require --execute")
+    _gate(profile, group, seed=None).authorize_trajectory(
+        [READY_TARGET_RAD], start_time_sec=0.0, period_sec=1.0
+    )
+    interface = CanonicalInterface(profile)
+    if not args.execute:
+        print(
+            f"DRY RUN: {READY_POSTURE_NAME}; right arm only; "
+            f"speed <= {READY_SPEED_RAD_S:g} rad/s, acceleration <= "
+            f"{READY_ACCELERATION_RAD_S2:g} rad/s^2"
+        )
+        _describe(group, interface, READY_TARGET_RAD)
+        print("DRY RUN: no ROS connection was opened; pass --execute to send")
+        return 0
+
+    for output_path in (args.before_output, args.after_output):
+        if output_path is not None:
+            _preflight_output(output_path)
+    with RosAdapter(profile, group.name, execute=True) as adapter:
+        before = adapter.read_state(timeout_sec=1.0)
+        before_pose = adapter.read_pose(timeout_sec=1.0)
+        if args.before_output is not None:
+            _write_json_atomic(
+                args.before_output,
+                _ready_snapshot(profile, group, before, before_pose),
+            )
+        here = _start_pose(profile, group, before)
+        lifted = here.copy()
+        lifted[ELBOW_INDEX] = READY_TARGET_RAD[ELBOW_INDEX]
+        rate = profile.endpoint().command_rate_hz
+        motion_started = time.monotonic()
+        planned_duration = 0.0
+        for target in (lifted, READY_TARGET_RAD):
+            points, duration = _minimum_jerk_trajectory(here, target, rate)
+            if not points:
+                continue
+            points = _gate(profile, group, seed=here).authorize_trajectory(
+                points, start_time_sec=0.0, period_sec=1.0 / rate
+            )
+            adapter.send_trajectory(points, period_sec=1.0 / rate)
+            here = np.asarray(target, dtype=float).copy()
+            planned_duration += duration
+        settled, settling_sec = _wait_for_ready_settle(adapter)
+        after_pose = adapter.read_pose(timeout_sec=1.0)
+        result = {
+            "planned_motion_sec": planned_duration,
+            "elapsed_motion_sec": time.monotonic() - motion_started,
+            "settling_sec": settling_sec,
+            "joint_error_rad": settled.error.tolist(),
+            "max_abs_joint_error_rad": float(np.max(np.abs(settled.error))),
+            "passed": settled.passed,
+        }
+        if args.after_output is not None:
+            _write_json_atomic(
+                args.after_output,
+                _ready_snapshot(
+                    profile, group, settled.actual, after_pose, result=result
+                ),
+            )
+        print(
+            f"EXECUTED: {READY_POSTURE_NAME}; max error "
+            f"{result['max_abs_joint_error_rad']:.4f} rad; settled in "
+            f"{settling_sec:.2f} s"
+        )
     return 0
 
 
@@ -1847,6 +2009,76 @@ def _pose_follow(args, profile) -> int:
     if args.output is not None:
         _preflight_output(args.output)
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
+        state = adapter.read_state(timeout_sec=1.0)
+        ready_check = (
+            None if diagnostic_profile is None else check_ready(state)
+        )
+        if ready_check is not None and not ready_check.passed:
+            errors = ", ".join(
+                f"{name}={value:+.4f}"
+                for name, value in zip(group.joints, ready_check.error)
+            )
+            message = (
+                f"deterministic diagnostic requires {READY_POSTURE_NAME} within "
+                f"{READY_TOLERANCE_RAD:.3f} rad; run `robotctl pose ready "
+                f"--group {RIGHT_ARM_GROUP}` separately first; errors: {errors}"
+            )
+            refusal = {
+                "reason": "ready_posture_required",
+                "message": message,
+                "refused_sequence": None,
+                "profile_phase": "before_start",
+                "attempts": 0,
+                "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                "reference_sequence": None,
+                "joint_delta_rad": ready_check.error.tolist(),
+                "triggered_joints": [
+                    name
+                    for name, value in zip(group.joints, ready_check.error)
+                    if abs(value) > READY_TOLERANCE_RAD
+                ],
+            }
+            diagnostics = {
+                "group": group.name,
+                "joint_names": list(group.joints),
+                "settings": {
+                    "diagnostic_profile": diagnostic_spec,
+                    "ready_posture": ready_metadata(),
+                },
+                "result": {
+                    "termination": "safety_refused",
+                    "is_partial": True,
+                    "refusal": refusal,
+                    "ready_posture": ready_metadata(ready_check),
+                    "cycles": 0,
+                    "samples": 0,
+                    "ik": {
+                        "submitted": 0,
+                        "succeeded": 0,
+                        "failed": 0,
+                        "superseded": 0,
+                        "solve_attempts": 0,
+                        "continuity_rejected": 0,
+                        "continuity_retries": 0,
+                        "continuity_exhausted": 0,
+                        "continuity_events": [],
+                        "events": [],
+                    },
+                },
+                "trace": [],
+            }
+            if args.output is not None:
+                _write_json_atomic(
+                    args.output,
+                    {
+                        "schema_version": 1,
+                        "kind": "pose_follow_diagnostics",
+                        "profile": profile.name,
+                        **diagnostics,
+                    },
+                )
+                print(f"wrote partial pose follow diagnostics: {args.output}")
+            raise SafetyError(message)
         chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
         # 드래그 중 들어오는 마커 변경을 구독한다.
@@ -1855,9 +2087,6 @@ def _pose_follow(args, profile) -> int:
         # 사용자가 아직 드래그하지 않았어도 시작 정렬을 할 수 있도록
         # RViz가 현재 보관 중인 파란 마커 위치를 한 번 직접 읽는다.
         startup_marker_target = adapter.read_marker_pose()
-
-        # 시작 시점의 실제 관절각을 읽는다.
-        state = adapter.read_state()
         print(
             f"following {group.tip_link} at {1.0 / period:g} Hz for "
             f"{args.seconds:g} s, gravity "
@@ -1906,6 +2135,7 @@ def _pose_follow(args, profile) -> int:
                     worker,
                     startup_marker_target,
                     diagnostic_profile,
+                    ready_check,
                 )
             finally:
                 worker.close()
@@ -1938,6 +2168,7 @@ def _follow_loop(
     ik_worker,
     startup_marker_target,
     diagnostic_profile=None,
+    ready_check=None,
 ) -> dict:
     from .ros_adapter import Pose
 
@@ -2302,7 +2533,7 @@ def _follow_loop(
                 rejected = status.continuity_refusal
                 safety_jump = rejected.joint_delta_rad
                 unsafe_jump = np.flatnonzero(
-                    np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD
+                    np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD - 1e-12
                 )
                 phase = (
                     requested_profile_phases[rejected.sequence - 1]
@@ -2356,7 +2587,7 @@ def _follow_loop(
                     )
                     safety_jump = target_joints - jump_reference
                     unsafe_jump = np.flatnonzero(
-                        np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD
+                        np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD - 1e-12
                     )
                     if unsafe_jump.size:
                         reference = (
@@ -3125,7 +3356,7 @@ def _follow_loop(
     for event in status.continuity_rejections:
         triggered = np.flatnonzero(
             np.abs(event.joint_delta_rad)
-            >= MAX_SAFE_IK_TARGET_JUMP_RAD
+            >= MAX_SAFE_IK_TARGET_JUMP_RAD - 1e-12
         )
         phase = (
             requested_profile_phases[event.sequence - 1]
@@ -3149,6 +3380,7 @@ def _follow_loop(
                 "exhausted": bool(event.exhausted),
             }
         )
+
     orientation_summary = {
         name: {
             "mean": float(component["total"] / sample_divisor),
@@ -3247,11 +3479,19 @@ def _follow_loop(
                 if diagnostic_profile is None
                 else diagnostic_profile.as_dict()
             ),
+            "ready_posture": (
+                None if diagnostic_profile is None else ready_metadata()
+            ),
         },
         "result": {
             "termination": termination,
             "is_partial": refusal is not None,
             "refusal": refusal,
+            "ready_posture": (
+                None
+                if diagnostic_profile is None
+                else ready_metadata(ready_check)
+            ),
             "duration_sec": float(elapsed_total),
             "cycles": int(cycles),
             "samples": int(samples),
