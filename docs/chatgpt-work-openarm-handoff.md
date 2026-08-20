@@ -459,3 +459,29 @@ robotctl pose ready --group openarm_right_arm \
   --after-output /tmp/right-after-ready.json \
   --execute
 ```
+
+## 최신 인계 — A′ v2 ready 중력보상
+
+기본 ready는 A′인 `openarm_right_ready_v2 = [0,0.2,0,0.6,0,0,0] rad`다. D는
+`--posture openarm_right_ready_v1`로만 선택하는 legacy 비교 자세다. deterministic
+follow의 0.020 rad 시작 검사는 v2에 적용되며 ready와 follow는 계속 별도 명령이다.
+
+실물에서는 right trajectory controller와 right effort controller가 동시에 active이고
+각각 position/effort interface를 분리 claim해야 한다. `pose ready`는 measured joint
+state로 runtime URDF gravity torque(scale 1.0)를 controller rate로 내고 성공·실패·
+예외에 zero effort cleanup한다. settle timeout은 마지막 measured pose를 hold하며
+after JSON을 partial로 저장한다.
+
+다음 현장 단계는 follow가 아니라 아래 ready 1회뿐이다. 먼저 시스템 bringup 뒤
+`./ros_ws/load_effort_controllers.sh right`가 성공했는지 확인한다. 데이터 경로를
+준비하고 dry-run을 검토한 다음, 실물 이동이 별도 승인된 경우에만 execute를 한다.
+완료 뒤 follow를 자동 시작하지 않고 after JSON의 reference/feedback/error와
+termination을 검토한다.
+
+```bash
+# --execute publishes right-arm position and gravity-effort commands to hardware.
+robotctl pose ready --group openarm_right_arm \
+  --before-output /home/user/openarm_follow_data/2026-08-20/right-before-ready-v2-gravity.json \
+  --after-output /home/user/openarm_follow_data/2026-08-20/right-after-ready-v2-gravity.json \
+  --execute
+```

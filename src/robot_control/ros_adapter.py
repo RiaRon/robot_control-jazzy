@@ -81,6 +81,20 @@ class Pose:
         return rpy_from_quaternion(self.orientation)
 
 
+@dataclass(frozen=True)
+class ControllerInfo:
+    name: str
+    state: str
+    claimed_interfaces: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ControllerTracking:
+    reference: np.ndarray
+    feedback: np.ndarray
+    error: np.ndarray
+
+
 def quaternion_from_rpy(
     roll: float, pitch: float, yaw: float
 ) -> tuple[float, float, float, float]:
@@ -233,6 +247,72 @@ class RosAdapter:
                 f"{controller} does not report every joint of "
                 f"{self.group.name!r}: {error}"
             ) from error
+
+    def require_position_effort_controllers_active(
+        self, timeout_sec: float = DEFAULT_TIMEOUT_SEC
+    ) -> tuple[ControllerInfo, ControllerInfo]:
+        """Refuse unless position and effort controllers are active and disjoint."""
+        if self.group.effort_controller is None:
+            raise AdapterUnavailable(
+                f"group {self.group.name!r} declares no effort controller"
+            )
+        controllers = self._backend.controller_states(timeout_sec)
+        required = (self.group.controller, self.group.effort_controller)
+        missing = [name for name in required if name not in controllers]
+        if missing:
+            raise AdapterUnavailable(
+                f"required controller(s) are not loaded: {', '.join(missing)}"
+            )
+        position, effort = (controllers[name] for name in required)
+        inactive = [item.name for item in (position, effort) if item.state != "active"]
+        if inactive:
+            raise AdapterUnavailable(
+                f"required controller(s) are not active: {', '.join(inactive)}"
+            )
+        source_names = self.interface.group_source_names(self.group.name)
+        expected_position = {f"{name}/position" for name in source_names}
+        expected_effort = {f"{name}/effort" for name in source_names}
+        position_claims = set(position.claimed_interfaces)
+        effort_claims = set(effort.claimed_interfaces)
+        if not expected_position.issubset(position_claims):
+            missing_claims = sorted(expected_position - position_claims)
+            raise AdapterUnavailable(
+                f"{position.name} does not claim required position interfaces: "
+                f"{', '.join(missing_claims)}"
+            )
+        if not expected_effort.issubset(effort_claims):
+            missing_claims = sorted(expected_effort - effort_claims)
+            raise AdapterUnavailable(
+                f"{effort.name} does not claim required effort interfaces: "
+                f"{', '.join(missing_claims)}"
+            )
+        overlap = position_claims & effort_claims
+        if overlap:
+            raise AdapterUnavailable(
+                "position and effort controllers claim the same interface(s): "
+                + ", ".join(sorted(overlap))
+            )
+        return position, effort
+
+    def read_controller_tracking(
+        self, timeout_sec: float = DEFAULT_TIMEOUT_SEC
+    ) -> ControllerTracking:
+        """Return trajectory reference, feedback, and error in canonical order."""
+        controller = self.group.controller
+        raw = self._backend.controller_state(controller, timeout_sec)
+        converted = []
+        for field in ("reference", "feedback", "error"):
+            try:
+                converted.append(
+                    self.interface.group_state_to_canonical(
+                        self.group.name, raw[field]
+                    )
+                )
+            except (InterfaceError, KeyError) as error:
+                raise AdapterUnavailable(
+                    f"{controller} does not report complete {field} positions: {error}"
+                ) from error
+        return ControllerTracking(*converted)
 
     def send_effort(self, effort: Sequence[float]) -> None:
         """Publish authorized feedforward torque to the group's effort controller.
@@ -451,6 +531,7 @@ REQUIRED_INTERFACES = (
     "control_msgs/action/FollowJointTrajectory",
     "control_msgs/action/ParallelGripperCommand",
     "control_msgs/msg/JointTrajectoryControllerState",
+    "controller_manager_msgs/srv/ListControllers",
     "geometry_msgs/msg/Pose",
     "moveit_msgs/srv/GetPositionIK",
     "sensor_msgs/msg/JointState",
@@ -506,6 +587,7 @@ class _RclpyBackend:
             from geometry_msgs.msg import Pose as PoseMsg
             from geometry_msgs.msg import PoseStamped, Quaternion, Point
             from control_msgs.msg import JointTrajectoryControllerState
+            from controller_manager_msgs.srv import ListControllers
             from moveit_msgs.srv import GetPositionFK, GetPositionIK
             from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy
             from sensor_msgs.msg import JointState
@@ -541,6 +623,7 @@ class _RclpyBackend:
         self._GetInteractiveMarkers = GetInteractiveMarkers
         self._MarkerFeedback = InteractiveMarkerFeedback
         self._ControllerState = JointTrajectoryControllerState
+        self._ListControllers = ListControllers
         self._Float64MultiArray = Float64MultiArray
         self._String = String
         # robot_state_publisher latches the description, so a subscriber that
@@ -574,6 +657,7 @@ class _RclpyBackend:
         self._fk_client = None
         self._ik_client = None
         self._marker_client = None
+        self._controller_client = None
         self._effort_publishers: dict[str, Any] = {}
         self._stream_publishers: dict[str, Any] = {}
         self._marker_subscription = None
@@ -730,16 +814,29 @@ class _RclpyBackend:
             )
         return latest[-1]
 
-    def tracking_error(self, controller: str, timeout_sec: float) -> dict[str, float]:
+    def controller_states(self, timeout_sec: float) -> dict[str, ControllerInfo]:
+        if self._controller_client is None:
+            self._controller_client = self._node.create_client(
+                self._ListControllers, "/controller_manager/list_controllers"
+            )
+        response = self._call(
+            self._controller_client,
+            self._ListControllers.Request(),
+            timeout_sec,
+            "/controller_manager/list_controllers",
+        )
+        return {
+            item.name: ControllerInfo(
+                item.name, item.state, tuple(item.claimed_interfaces)
+            )
+            for item in response.controller
+        }
+
+    def controller_state(self, controller: str, timeout_sec: float) -> dict:
         topic = f"/{controller}/{CONTROLLER_STATE_TOPIC}"
-        latest: list[dict[str, float]] = []
+        latest = []
         subscription = self._node.create_subscription(
-            self._ControllerState,
-            topic,
-            lambda message: latest.append(
-                dict(zip(message.joint_names, message.error.positions))
-            ),
-            10,
+            self._ControllerState, topic, latest.append, 10
         )
         try:
             deadline = time.monotonic() + timeout_sec
@@ -751,7 +848,14 @@ class _RclpyBackend:
             raise AdapterUnavailable(
                 f"no {topic} within {timeout_sec} s; is {controller} active?"
             )
-        return latest[-1]
+        message = latest[-1]
+        return {
+            field: dict(zip(message.joint_names, getattr(message, field).positions))
+            for field in ("reference", "feedback", "error")
+        }
+
+    def tracking_error(self, controller: str, timeout_sec: float) -> dict[str, float]:
+        return self.controller_state(controller, timeout_sec)["error"]
 
     def publish_effort(self, controller: str, values: Sequence[float]) -> None:
         # One publisher per controller, kept for the process's life: gravity

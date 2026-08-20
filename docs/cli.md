@@ -181,30 +181,39 @@ pose setting adds no second route to the hardware.
 
 ## `robotctl pose ready` and `robotctl pose rest`
 
-`ready` is the right-arm-only standard deterministic experiment start:
-`openarm_right_ready_v1 = [0.15,0.55,0.15,0.8,-0.1,0.15,0.1] rad`. It uses no IK,
-raises J4 first, and sends minimum-jerk joint trajectories bounded to 0.10 rad/s
-and 0.10 rad/s². The default is fully offline dry-run. `--before-output` and
-`--after-output` save atomic pose snapshots; the latter includes final joint
-error and settling time. Left-arm ready remains disabled. `rest` retains the
-legacy table-safe shutdown sequence.
+`ready`의 기본값은 오른팔 deterministic 표준 A′ v2:
+`openarm_right_ready_v2 = [0,0.2,0,0.6,0,0,0] rad`이다. 비교용 D는
+`--posture openarm_right_ready_v1`로만 명시 선택한다. IK를 사용하지 않고 J4를
+먼저 올린 뒤 minimum-jerk joint-space reference를 controller rate로 보내며 속도와
+가속도는 각각 0.10 rad/s, 0.10 rad/s² 이하이다. 기본은 완전한 offline dry-run이고
+왼팔 ready는 비활성 상태다.
+
+`--execute` 전에 trajectory controller와 effort controller가 모두 active이고 서로
+분리된 position/effort interface를 claim하는지 검사한다. 하나라도 불일치하면 첫
+position publish 전에 거부한다. 이동과 settle 동안 매 cycle의 현재 관절값으로
+runtime URDF 중력 토크(scale 1.0)를 다시 계산해 effort controller에 발행한다.
+성공·실패·예외 모두 마지막에 zero effort를 발행한다. settle 실패는 먼 target을
+유지하지 않고 마지막 measured pose를 joint limit 안에서 position hold한다.
 
 ```bash
-# --execute publishes joint trajectories and moves the real right arm:
 robotctl pose ready --group openarm_right_arm
-robotctl pose ready --group openarm_right_arm --execute
+robotctl pose ready --group openarm_right_arm --posture openarm_right_ready_v1
+
+# --execute publishes commands and moves the real right arm; effort controller must be active.
 robotctl pose ready --group openarm_right_arm \
-  --before-output /tmp/right-before-ready.json \
-  --after-output /tmp/right-after-ready.json --execute
+  --before-output /data/right-before-ready-v2.json \
+  --after-output /data/right-after-ready-v2.json --execute
 robotctl pose rest --group openarm_right_arm --execute
 ```
 
-The ready tolerance is 0.020 rad per joint. GenericSystem settles essentially
-exactly; the prior real baseline ended at 0.0063 rad worst error, so 0.020 rad
-allows over three times that observed residual while remaining far below the
-0.30 rad IK boundary. Candidate evidence is in
-[`ready-posture-evaluation-2026-08-20.md`](ready-posture-evaluation-2026-08-20.md).
-
+before/after JSON은 원자 저장된다. 실패와 예외도 가능한 최신 feedback으로 partial
+after JSON을 남기며 target, controller reference, feedback, 관절별 error, gravity
+scale/torque, settle 시간·종료 이유, safe hold와 zero cleanup 결과를 기록한다.
+허용 오차는 관절별 0.020 rad다. GenericSystem은 사실상 0 오차이고 과거 중력보상
+실물 baseline worst 0.0063 rad의 3배 이상이면서 기존 IK 0.30 rad hard boundary보다
+충분히 작다. 후보 근거는
+[`ready-posture-evaluation-2026-08-20.md`](ready-posture-evaluation-2026-08-20.md)에
+있다.
 ## `robotctl pose torque`
 
 Run the direct-torque staircase used to identify stiffness, Coulomb friction,
@@ -638,7 +647,7 @@ robotctl pose follow \
 
 A deterministic diagnostic reads the current seven joints before marker setup,
 gravity publication, IK, or trajectory publication. It refuses unless every
-joint is within 0.020 rad of `openarm_right_ready_v1`. `pose ready` and
+joint is within 0.020 rad of `openarm_right_ready_v2`. `pose ready` and
 `pose follow` remain separate commands; follow never moves to ready
 automatically. Manual marker follow is unchanged. Full and pre-start-refused
 JSON record the ready name, target, actual start, per-joint error, and pass flag

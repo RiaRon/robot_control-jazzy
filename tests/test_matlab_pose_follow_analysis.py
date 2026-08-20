@@ -68,3 +68,23 @@ def test_generated_data_is_ignored_locally():
 
     for pattern in ("*.json", "*.csv", "*.mat", "*.png", "*.pdf", "output/"):
         assert pattern in ignore
+
+
+def test_ready_analyzer_compares_target_error_and_gravity_metadata():
+    parser = (MATLAB / "read_ready_json.m").read_text()
+    analyzer = (MATLAB / "analyze_ready_comparison.m").read_text()
+
+    assert "pose_snapshot" in parser
+    for field in (
+        "target_rad", "reference_rad", "feedback_rad", "error_rad",
+        "gravity_enabled", "gravity_scale", "gravity_torque_nm",
+    ):
+        assert field in parser
+    for output in (
+        "ready_summary.csv", "ready_joint_errors.csv",
+        "ready_group_comparison.csv", "ready_analysis_summary.json",
+        "ready_analysis.mat", "ready_target_error.png",
+    ):
+        assert output in analyzer
+    assert "import robot_control" not in analyzer.lower()
+    assert "system('ros2" not in analyzer.lower()

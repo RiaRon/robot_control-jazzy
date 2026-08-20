@@ -15,6 +15,7 @@ import pytest
 from robot_control.profile import load_profile
 from robot_control.ros_adapter import (
     AdapterUnavailable,
+    ControllerInfo,
     IkFailed,
     Pose,
     RosAdapter,
@@ -84,6 +85,7 @@ groups:
   arm:
     joints: [a1, a2]
     controller: arm_controller
+    effort_controller: arm_effort_controller
     moveit_group: arm_group
     tip_link: arm_tip
   hand:
@@ -113,6 +115,15 @@ class RecordingBackend:
         self.trajectories = []
         self.streamed = []
         self.gripper_goals = []
+        self.efforts = []
+        self.controllers = {
+            "arm_controller": ControllerInfo(
+                "arm_controller", "active", ("arm_1/position", "arm_2/position")
+            ),
+            "arm_effort_controller": ControllerInfo(
+                "arm_effort_controller", "active", ("arm_1/effort", "arm_2/effort")
+            ),
+        }
         self.closed = False
         #: What this backend will deliver on the next pump, as
         #: (stamp_ns, {source: position}). A test sets it to stand in for
@@ -159,6 +170,23 @@ class RecordingBackend:
     def compute_ik(self, group, link, pose, seed, timeout_sec):
         self.ik_requests.append((group, link, pose, dict(seed)))
         return self._ik
+
+    def controller_states(self, timeout_sec):
+        return dict(self.controllers)
+
+    def controller_state(self, controller, timeout_sec):
+        reference = {"arm_1": 0.3, "arm_2": -0.4}
+        feedback = {"arm_1": 0.2, "arm_2": -0.35}
+        return {
+            "reference": reference,
+            "feedback": feedback,
+            "error": {
+                name: reference[name] - feedback[name] for name in reference
+            },
+        }
+
+    def publish_effort(self, controller, values):
+        self.efforts.append((controller, list(values)))
 
     def follow_joint_trajectory(self, controller, joint_names, points, period_sec):
         self.trajectories.append(
@@ -566,3 +594,35 @@ def test_a_streamed_point_is_due_immediately(profile):
     controller, _, _, horizon = backend.streamed[-1]
     assert controller == "arm_controller"
     assert horizon == 0.0
+
+def test_ready_controller_check_requires_active_disjoint_position_and_effort(profile):
+    backend = RecordingBackend()
+    adapter = _adapter(profile, backend=backend)
+
+    position, effort = adapter.require_position_effort_controllers_active()
+    assert position.name == "arm_controller"
+    assert effort.name == "arm_effort_controller"
+
+    backend.controllers["arm_effort_controller"] = ControllerInfo(
+        "arm_effort_controller", "inactive", ("arm_1/effort", "arm_2/effort")
+    )
+    with pytest.raises(AdapterUnavailable, match="not active.*arm_effort_controller"):
+        adapter.require_position_effort_controllers_active()
+
+
+def test_ready_controller_check_rejects_interface_overlap(profile):
+    backend = RecordingBackend()
+    backend.controllers["arm_effort_controller"] = ControllerInfo(
+        "arm_effort_controller",
+        "active",
+        ("arm_1/effort", "arm_2/effort", "arm_1/position"),
+    )
+    with pytest.raises(AdapterUnavailable, match="same interface.*arm_1/position"):
+        _adapter(profile, backend=backend).require_position_effort_controllers_active()
+
+
+def test_controller_tracking_converts_reference_feedback_and_error(profile):
+    tracking = _adapter(profile, backend=RecordingBackend()).read_controller_tracking()
+    np.testing.assert_allclose(tracking.reference, [0.3, 0.4])
+    np.testing.assert_allclose(tracking.feedback, [0.2, 0.35])
+    np.testing.assert_allclose(tracking.error, [0.1, 0.05])

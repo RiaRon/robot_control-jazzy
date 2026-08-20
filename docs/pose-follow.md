@@ -246,7 +246,7 @@ measurement만 들어갑니다.
 
 ## deterministic 시작 자세
 
-`--diagnostic-profile` 실행은 `openarm_right_ready_v1`에서만 허용됩니다. 먼저
+`--diagnostic-profile` 실행은 `openarm_right_ready_v2`에서만 허용됩니다. 먼저
 `robotctl pose ready --group openarm_right_arm`을 검토하고, 별도 승인된
 `--execute` ready 명령을 완료한 뒤 새 명령으로 follow를 시작합니다. 자동 ready
 후 즉시 follow하는 경로는 없습니다. 수동 marker follow에는 이 검사를 적용하지

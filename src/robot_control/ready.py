@@ -9,13 +9,19 @@ import numpy as np
 
 
 RIGHT_ARM_GROUP = "openarm_right_arm"
-READY_POSTURE_NAME = "openarm_right_ready_v1"
-READY_TARGET_RAD = np.array([0.15, 0.55, 0.15, 0.8, -0.1, 0.15, 0.1])
+READY_POSTURE_NAME = "openarm_right_ready_v2"
+READY_D_LEGACY_NAME = "openarm_right_ready_v1"
+READY_TARGET_RAD = np.array([0.0, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0])
+READY_D_TARGET_RAD = np.array([0.15, 0.55, 0.15, 0.8, -0.1, 0.15, 0.1])
+READY_POSTURES = {
+    READY_POSTURE_NAME: READY_TARGET_RAD,
+    READY_D_LEGACY_NAME: READY_D_TARGET_RAD,
+}
 
 # GenericSystem reaches the target to floating-point precision. The previous
 # real baselines reported a last maximum joint error of 0.0063 rad; 0.02 rad is
 # more than three times that settled error while still small against the 0.30
-# rad continuity boundary and the selected posture's 0.635 rad limit margin.
+# rad continuity boundary and the v2 posture's 0.375 rad limit margin.
 READY_TOLERANCE_RAD = 0.02
 READY_SPEED_RAD_S = 0.10
 READY_ACCELERATION_RAD_S2 = 0.10
@@ -52,10 +58,25 @@ def check_ready(
     )
 
 
-def ready_metadata(check: ReadyCheck | None = None) -> dict:
+def ready_target(name: str) -> np.ndarray:
+    try:
+        return READY_POSTURES[name].copy()
+    except KeyError as error:
+        raise ValueError(
+            f"unknown ready posture {name!r}; choose from {sorted(READY_POSTURES)}"
+        ) from error
+
+
+def ready_metadata(
+    check: ReadyCheck | None = None,
+    *,
+    name: str = READY_POSTURE_NAME,
+    target: Sequence[float] | None = None,
+) -> dict:
+    selected = ready_target(name) if target is None else np.asarray(target, dtype=float)
     return {
-        "name": READY_POSTURE_NAME,
-        "target_rad": READY_TARGET_RAD.tolist(),
+        "name": name,
+        "target_rad": selected.tolist(),
         "tolerance_rad": READY_TOLERANCE_RAD,
         "actual_start_rad": None if check is None else check.actual.tolist(),
         "start_error_rad": None if check is None else check.error.tolist(),

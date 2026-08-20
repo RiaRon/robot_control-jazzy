@@ -150,3 +150,28 @@ extended phase 네 종류, partial refusal sequence/reason/phase, 통합 parsing
 묶어 비교한다. `run.ik.selection_events`와 `run.continuity_cost`는 후보 수,
 거부 수, 선택 candidate/cost, solve/batch latency와 cost 시계열을 보존한다.
 legacy 파일에는 해당 값이 `NaN`/빈 값으로 남는다.
+
+## ready 도달·중력 비교 분석
+
+`read_ready_json.m`과 `analyze_ready_comparison.m`은 pose-ready before/after JSON을
+읽어 target/reference/feedback, 7관절 오차, max/RMS error, posture 이름,
+gravity 활성/scale/torque와 settle 종료를 정규화한다. legacy snapshot에 새 필드가
+없으면 호출자가 target·posture·gravity 여부를 제공하며 기록되지 않은 reference나
+torque는 `NaN`으로 보존한다.
+
+```matlab
+addpath('matlab/pose_follow');
+analysis = analyze_ready_comparison( ...
+    ["/data/d-no-gravity.json"; "/data/aprime-no-gravity.json"; ...
+     "/data/aprime-gravity.json"], ...
+    "/data/analysis/ready-compare", ...
+    'ExperimentNames', ["D-no-gravity"; "Aprime-no-gravity"; ...
+                        "Aprime-gravity"]);
+```
+
+출력은 `ready_summary.csv`, `ready_joint_errors.csv`,
+`ready_group_comparison.csv`, `ready_analysis_summary.json`,
+`ready_analysis.mat`, `ready_target_error.png`이다. group key는
+`posture_name|gravity=<0|1>`이므로 같은 target에서 중력보상 유무에 따른 도달
+오차를 직접 비교한다. 원시 JSON과 이 생성물은 저장소 밖, 예를 들어
+`/home/user/openarm_follow_data/.../analysis`에 둔다.

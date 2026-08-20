@@ -330,3 +330,26 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 실물 재시험은 이 배치에서 요청하지 않는다. 배포 후 첫 단계도 follow가 아니라
 `robotctl pose ready --group openarm_right_arm` dry-run이며, 실물 이동은 별도 승인된
 동일 명령의 `--execute` 실행으로 분리한다.
+
+## 최신 완료 — A′ v2 표준 ready와 controller-rate 중력보상
+
+- 개발 기준: `origin/jazzy@df06a9d`; 브랜치: `feature/ready-gravity-hold`.
+- 운영자 결정으로 표준은 `openarm_right_ready_v2 = [0,0.2,0,0.6,0,0,0] rad`
+  (A′)이며 D는 명시 선택 가능한 legacy `openarm_right_ready_v1`이다.
+- `pose ready --execute`는 첫 position publish 전에 trajectory+effort controller가
+  모두 active이고 position/effort claim이 분리됐는지 확인한다. 이동·settle 동안
+  measured joints로 gravity scale 1.0 effort를 controller rate로 갱신하며 모든 종료
+  경로에서 zero effort cleanup을 한다.
+- settle timeout/예외는 먼 target 대신 마지막 measured pose를 안전 hold하고
+  target/reference/feedback/error, gravity torque/scale, settle/termination, hold/cleanup을
+  partial after JSON으로 원자 저장한다.
+- 첨부 archive(SHA-256
+  `722095bb0040a30b38a68d72a63a4f04541fd138dadccde4b3254944d02b6a3e`)의 실물
+  no-gravity 결과는 D worst `0.2309 rad`, A′ worst `0.1443 rad`였다. 원시 자료와
+  MATLAB 생성물은 Git에 포함하지 않았다.
+- fake A/A′/D 비교에서 모두 collision-free/rank 6/IK `60/60`; A′는 D보다 경로
+  gravity peak `4.371 vs 8.437 N·m`, 시작 L1 `0.854 vs 1.953 rad`이고 최소 limit
+  margin `0.375 rad`다. GenericSystem v2 gravity ready는 worst `0.0000 rad`, settle
+  `0.52 s`였다.
+- MATLAB R2026a ready target/gravity 비교 bundle 생성 검증을 완료했다. 실물
+  OpenArm/CAN은 사용하지 않았다.
