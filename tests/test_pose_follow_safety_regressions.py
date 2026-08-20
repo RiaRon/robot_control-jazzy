@@ -31,6 +31,20 @@ RETEST_BRANCH_JUMP_RAD = np.array(
     [3.1559, 3.1269, 1.5527, 0.0, 1.5889, 0.0, 0.0]
 )
 
+# Exact seven arm joints from right-pose-before-retest.json in the recovered
+# 2026-08-20 archive. The raw experiment JSON remains outside Git.
+RETEST_INITIAL_JOINTS_RAD = np.array(
+    [
+        -0.0165941863126573,
+        0.004768444342717615,
+        -0.011253528648813571,
+        0.02155336842908362,
+        -0.02536812390325771,
+        -0.018883039597161755,
+        -0.0005722133211261138,
+    ]
+)
+
 
 class CartesianReplayChain:
     """Small FK model that makes replayed joint changes observable as a pose."""
@@ -114,9 +128,7 @@ class SequenceSixBranchReplayArm(ReplayArm):
     """Return five continuous targets, then only the reported bad branch."""
 
     def __init__(self):
-        initial = np.zeros(7)
-        initial[3] = 0.021553368
-        super().__init__(initial)
+        super().__init__(RETEST_INITIAL_JOINTS_RAD)
         self.solve_calls = 0
 
     def solve_ik(self, pose, seed):
@@ -333,6 +345,11 @@ def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
     assert result["is_partial"]
     assert result["samples"] == len(payload["trace"])
     assert result["samples"] > 0
+    np.testing.assert_allclose(
+        payload["trace"][0]["joint_positions_rad"]["measured"],
+        RETEST_INITIAL_JOINTS_RAD,
+        atol=1e-12,
+    )
     assert result["ik"]["submitted"] == 6
     assert result["ik"]["succeeded"] == 5
     assert result["ik"]["continuity_rejected"] == 4
