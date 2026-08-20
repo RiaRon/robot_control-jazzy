@@ -135,10 +135,11 @@ robotctl pose follow \
   --seconds 60
 ```
 
-`DRY RUN: nothing is published`가 출력되면 profile, ROS adapter와
-`/joint_states` 입력 경로까지 연결된 것입니다. marker feedback은 실제 추종을
-시작한 뒤 RViz에서 마커를 드래그할 때 확인됩니다. `--execute`가 없으므로 팔은
-움직이지 않습니다.
+`DRY RUN: nothing is published, including startup alignment; no ROS connection
+is opened`가 출력되어야 합니다. `--execute`가 없으면 ROS adapter 자체를 만들지
+않으므로 marker, `/joint_states`, URDF를 읽지 않고 위치·effort publisher도 만들지
+않습니다. 이 명령은 CLI와 profile 검증이며 ROS 연결 확인은 위의 `ros2 control`,
+`ros2 topic echo`와 `robotctl pose show`로 따로 수행합니다.
 
 > **실물 동작 주의:** CAN 번호만으로 좌우를 검출할 수 없습니다. 오른팔
 > 명령에 왼팔이 반응하면 즉시 중단한 뒤
@@ -178,6 +179,13 @@ robotctl pose follow \
 
 > **이 명령은 실물을 움직입니다.**
 
+`--execute --output`은 ROS adapter를 열기 전에 output 부모 디렉터리를 만들고,
+같은 디렉터리에 임시 파일을 실제로 쓰고 `fsync`하여 저장 가능성을 확인합니다.
+검사가 실패하면 종료 코드 2로 끝나며 startup alignment를 포함한 명령을 발행하지
+않습니다. 셸 로그에 `tee`를 쓸 때는 `tee` 대상도 명령 실행 전에 별도로 생성해
+검사하십시오. 빈 `$RUN_DIR`가 `/파일명`으로 확장되지 않도록
+`${RUN_DIR:?message}`를 사용합니다.
+
 다음 메시지가 나오면 RViz 마커를 천천히 드래그합니다.
 
 ```text
@@ -192,6 +200,14 @@ drag the marker in RViz; the arm tracks it until the time runs out
 
 `--seconds`를 생략해도 기본값은 60초입니다. 생략한다고 무기한 실행되지는
 않습니다.
+
+첫 accepted IK target은 startup 실측 관절과 비교하고, 이후 target은 직전
+accepted target과 비교합니다. 어느 한 관절이라도 변화량 절댓값이 `0.30 rad`
+이상이면 해당 target을 publish하기 전에 `refused: IK target jump refused before
+publish`로 종료합니다. 이 하드 경계는 분석용 `--ik-jump-threshold`와 별개이며
+CLI로 완화할 수 없습니다. deterministic profile에서는 position clamp도 예상하지
+않은 목표로 취급해 첫 clamp를 publish하기 전에 거부합니다. 수동 marker 모드의
+속도·lead·position clamp는 기존처럼 제한 후 계속합니다.
 
 60초가 지나거나 터미널에서 `Ctrl+C`를 누르면 추종이 끝납니다. trajectory
 controller는 마지막 명령 위치를 유지하므로 팔은 마지막 위치를 계속 잡습니다.

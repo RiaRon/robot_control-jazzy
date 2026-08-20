@@ -168,6 +168,11 @@ DEFAULT_MAX_START_ANGLE_RAD = 0.35
 # Diagnostics only: this threshold records an event and never changes a target.
 DEFAULT_IK_TARGET_JUMP_THRESHOLD_RAD = 0.10
 
+# Hard execution boundary: a local IK solve seeded from the measured state must
+# not move any one joint this far. Unlike --ik-jump-threshold, this is not a
+# reporting knob; crossing it refuses the target before its first publication.
+MAX_SAFE_IK_TARGET_JUMP_RAD = 0.30
+
 # How long a streamed command may be ahead of the arm, expressed as travel time
 # at the joint's velocity limit. It has to exceed the standing droop or the arm
 # cannot advance at all, and stay small enough that a blocked joint does not wind
@@ -981,6 +986,42 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _preflight_output(path: Path) -> None:
+    """Prove that *path* can be written before any robot command starts.
+
+    ``os.access`` is advisory and can disagree with mounts, ACLs, or the final
+    process credentials. Creating the same kind of sibling temporary file as
+    ``_write_json_atomic`` exercises the real directory and filename path while
+    leaving an existing destination untouched.
+    """
+    path = Path(path)
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.is_dir():
+            raise IsADirectoryError(f"output path is a directory: {path}")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".preflight",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write("pose-follow output preflight\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as error:
+        raise OSError(
+            "pose follow output is not writable before control starts: "
+            f"{path}: {error}"
+        ) from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _ramp(
     start: Sequence[float] | np.ndarray,
     target: Sequence[float] | np.ndarray,
@@ -1646,15 +1687,11 @@ def _report_sweep(group, sweep, index: int | None) -> None:
 
 
 def _pose_follow(args, profile) -> int:
-    """Track the dragged marker continuously, at the controller rate.
+    """Track a marker or deterministic profile with asynchronous MoveIt IK.
 
-    Differential inverse kinematics rather than /compute_ik: a service round trip
-    per sample cannot keep up, and the Jacobian gives a step that is smooth and
-    local, so the arm sweeps to a nearby solution instead of jumping between
-    branches the way a fresh IK solve can.
-
-    Every sample is clamped by the gate rather than refused, since dragging
-    faster than the arm can move is normal operation, not an error.
+    Manual marker targets retain the established streaming clamp behavior.
+    Deterministic diagnostics add hard pre-publish boundaries for IK branch
+    jumps and unexpected position clamps.
     """
     from .ros_adapter import RosAdapter
 
@@ -1780,6 +1817,30 @@ def _pose_follow(args, profile) -> int:
                 "--max-tcp-angular-speed"
             )
     period = 1.0 / profile.endpoint().command_rate_hz
+    diagnostic_spec = (
+        None if diagnostic_profile is None else diagnostic_profile.as_dict()
+    )
+    if not args.execute:
+        print(
+            f"DRY RUN: would follow {group.tip_link} at {1.0 / period:g} Hz "
+            f"for {args.seconds:g} s"
+        )
+        if diagnostic_spec is not None:
+            print(
+                f"diagnostic profile {diagnostic_spec['kind']}: "
+                f"{diagnostic_spec['repetitions']} round trip(s), "
+                f"{diagnostic_spec['duration_sec']:.1f} s after startup alignment"
+            )
+            print(
+                "  deterministic target only; keep the RViz marker at Current"
+            )
+        print(
+            "DRY RUN: nothing is published, including startup alignment; "
+            "no ROS connection is opened"
+        )
+        return 0
+    if args.output is not None:
+        _preflight_output(args.output)
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
@@ -1805,20 +1866,16 @@ def _pose_follow(args, profile) -> int:
             "startup alignment: do not drag until the actual TCP "
             "reaches the RViz marker"
         )
-        if diagnostic_profile is not None:
-            spec = diagnostic_profile.as_dict()
+        if diagnostic_spec is not None:
             print(
-                f"diagnostic profile {spec['kind']}: "
-                f"{spec['repetitions']} round trip(s), "
-                f"{spec['duration_sec']:.1f} s after startup alignment"
+                f"diagnostic profile {diagnostic_spec['kind']}: "
+                f"{diagnostic_spec['repetitions']} round trip(s), "
+                f"{diagnostic_spec['duration_sec']:.1f} s after startup alignment"
             )
             print(
                 "  deterministic target only; live marker updates are "
                 "ignored after alignment"
             )
-        if not args.execute:
-            print("DRY RUN: nothing is published; pass --execute to follow")
-            return 0
         # MoveIt service calls block, so a second node belongs exclusively to
         # the IK worker while this adapter keeps servicing feedback and commands.
         with RosAdapter(
@@ -2128,15 +2185,17 @@ def _follow_loop(
                         # 정렬 완료 지점에서 IK 목표를 한 번 새로 계산한다.
                         last_submitted_position = None
                         last_submitted_orientation = None
-                        print(
-                            "startup alignment complete; "
-                            "drag the marker in RViz"
-                        )
                         if diagnostic_profile is not None:
                             diagnostic_started_at = cycle
                             print(
-                                "diagnostic profile started; do not drag "
-                                "the RViz marker"
+                                "startup alignment complete; deterministic "
+                                "profile started; keep the RViz marker at "
+                                "Current and do not drag it"
+                            )
+                        else:
+                            print(
+                                "startup alignment complete; "
+                                "drag the marker in RViz"
                             )
 
                 else:
@@ -2214,6 +2273,36 @@ def _follow_loop(
             if status.target is not None and status.target_sequence is not None:
                 target_joints = status.target
                 if status.target_sequence != last_accepted_ik_sequence:
+                    jump_reference = (
+                        state
+                        if last_accepted_ik_target is None
+                        else last_accepted_ik_target
+                    )
+                    safety_jump = target_joints - jump_reference
+                    unsafe_jump = np.flatnonzero(
+                        np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD
+                    )
+                    if unsafe_jump.size:
+                        reference = (
+                            "measured startup state"
+                            if last_accepted_ik_target is None
+                            else (
+                                "accepted IK sequence "
+                                f"{last_accepted_ik_sequence}"
+                            )
+                        )
+                        offenders = ", ".join(
+                            f"{group.joints[index]}="
+                            f"{safety_jump[index]:+.4f} rad"
+                            for index in unsafe_jump
+                        )
+                        raise SafetyError(
+                            "IK target jump refused before publish: "
+                            f"sequence {status.target_sequence} differs from "
+                            f"{reference} by at least "
+                            f"{MAX_SAFE_IK_TARGET_JUMP_RAD:.2f} rad: "
+                            f"{offenders}"
+                        )
                     if last_accepted_ik_target is not None:
                         jump = target_joints - last_accepted_ik_target
                         jump_abs = np.abs(jump)
@@ -2401,6 +2490,22 @@ def _follow_loop(
                     candidate - command
                 )
                 command, limited = gate.follow(candidate, state, elapsed)
+                if (
+                    diagnostic_profile is not None
+                    and "position" in gate.last_follow_limits
+                ):
+                    phase = (
+                        "startup_alignment"
+                        if diagnostic_sample is None
+                        else diagnostic_sample.phase
+                    )
+                    joints = ", ".join(
+                        gate.last_follow_limits["position"]
+                    )
+                    raise SafetyError(
+                        "deterministic profile position clamp refused before "
+                        f"publish during {phase}: {joints}"
+                    )
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
                 for limit_kind, limited_joint_names in (
@@ -2939,6 +3044,9 @@ def _follow_loop(
             "command_rate_hz": float(1.0 / period),
             "ik_target_jump_threshold_rad": float(
                 args.ik_jump_threshold
+            ),
+            "max_safe_ik_target_jump_rad": float(
+                MAX_SAFE_IK_TARGET_JUMP_RAD
             ),
             "diagnostic_profile": (
                 None
