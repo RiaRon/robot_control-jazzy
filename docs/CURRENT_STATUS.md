@@ -253,9 +253,12 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 - 관련 문서/Python 계약: `9 passed`
 - 전체 Python: `636 passed, 4 skipped`
 
-## 진행 중 — sequence-6 IK continuity 및 partial refusal JSON
+## 최신 개발 배치 — sequence-6 IK continuity 및 partial refusal JSON
 
 - 기준: `jazzy@0673903`; 작업 브랜치: `feature/pose-follow-ik-continuity`
+- 기능 커밋: `6ae96b0`
+- Pull Request: [#17](https://github.com/RiaRon/robot_control-jazzy/pull/17)
+  (`jazzy` 대상, open)
 - 2026-08-20 오른팔 translation 실물 1회는 351 samples, 99.0 Hz, 안전 구간
   IK 6/6, failed/superseded 0, live 위치 mean/worst `2.5/8.3 mm`, 방향
   `0.2/0.2 deg`, Cartesian limit와 joint clamp 0이었다.
