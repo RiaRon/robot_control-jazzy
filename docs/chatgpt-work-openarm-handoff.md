@@ -386,12 +386,20 @@ mean/worst `0.2/0.2 deg`, Cartesian limit와 joint clamp 0이었다.
 sequence 6에서 직전 accepted target 대비 J1 `+3.1559`, J2 `+3.1269`, J3
 `+1.5527`, J5 `+1.5889 rad`인 다른 IK branch가 나왔다. 기존 `>= 0.30 rad`
 경계가 첫 publish 전에 차단했다. 실행 전후 J4는 `+0.021553368/+0.0216 rad`,
-CAN FD는 ERROR-ACTIVE이고 tx/rx error counter는 0이었으며 이상 소음·진동은
-없었다.
+현장 기록상 CAN FD는 ERROR-ACTIVE이고 tx/rx error counter는 0이었으며 이상
+소음·진동은 없었다.
 
-전달된 `openarm_follow_data/2026-08-20/openarm-ik-refusal-2026-08-20/`의
-9개 파일은 모두 0바이트라 351-sample trace를 재계산할 수 없다. 위 수치는
-terminal 기록을 근거로 하며, 원시 JSON·log와 생성 분석물은 Git에 넣지 않는다.
+회수한 `openarm-ik-refusal-2026-08-20.tar.gz`는 3,027 bytes이며 SHA-256은
+`a57951e8f2ba52fcc98adf2fe99c3d976e18b29e12e6c3d2b6fd02a1f59c0178`이다.
+pose JSON 4개와 log 5개가 위 수치를 확인한다. follow JSON은 생성되지 않아
+351-sample phase time-series 자체는 재계산할 수 없다. 거부 전후 snapshot의 최대
+관절 변화는 J5 `0.000762951 rad`, TCP 변화는 `0.271920 mm/0.081805 deg`이고
+J4는 정확히 `+0.02155336842908362 rad`로 동일했다. 실제 pre-retest 7개 관절값은
+synthetic replay seed에 반영했다.
+
+첨부 CAN log는 기존 오른팔 매핑 `can0`이 아닌 `can1`을 기록하므로, 그 파일만으로
+오른팔 CAN 상태를 독립적으로 입증하지 않는다. 원시 JSON·log, 압축파일과 생성
+분석물은 Git에 넣지 않는다.
 상세 근거는
 [sequence-6 IK continuity 사건 문서](pose-follow-ik-continuity-incident-2026-08-20.md)에
 있다.
@@ -410,8 +418,9 @@ full deterministic, partial/refused JSON을 한 bundle에서 함께 비교한다
 
 개발 PC에서 실물/CAN 없이 확인한 결과:
 
-- 합성 replay의 sequence 6에서 위 J1/J2/J3/J5 delta를 4회 모두 차단하고,
-  이전 target을 유지한 채 partial JSON 저장 및 exit 3
+- 실제 pre-retest 7개 관절값을 seed로 한 합성 replay의 sequence 6에서 위
+  J1/J2/J3/J5 delta를 4회 모두 차단하고, 이전 target을 유지한 채 partial JSON
+  저장 및 exit 3
 - 실제 ROS MoveIt + `mock_components/GenericSystem`의 비특이 seed에서 10 mm,
   5 mm/s translation 왕복 완료: 408 samples, 99.0 Hz, IK 9/9,
   failed/superseded/continuity refusal/clamp 모두 0

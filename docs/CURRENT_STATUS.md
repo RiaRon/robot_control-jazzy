@@ -264,17 +264,24 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
   `0.2/0.2 deg`, Cartesian limit와 joint clamp 0이었다.
 - sequence 6의 J1/J2 약 pi, J3/J5 약 pi/2 branch jump는 기존 `>= 0.30 rad`
   경계가 첫 publish 전에 차단했다. rotation은 실행하지 않았다.
-- 전달 폴더의 9개 파일은 모두 0바이트라 원시 trace 재계산은 불가능하다. 수치는
-  terminal 기록을 근거로 하며 데이터와 생성물은 Git에 넣지 않는다.
+- 회수한 3,027-byte 압축파일(SHA-256 `a57951e8f2ba52fcc98adf2fe99c3d976e18b29e12e6c3d2b6fd02a1f59c0178`)
+  안의 pose JSON 4개와 log 5개가 terminal 수치를 확인한다. follow JSON은 없어
+  351-sample phase time-series는 재계산할 수 없다.
+- 거부 전후 최대 관절 변화는 J5 `0.000762951 rad`, TCP 변화는
+  `0.271920 mm/0.081805 deg`, J4는 전후 `+0.02155336842908362 rad`로 동일하다.
+  실제 pre-retest 7개 관절값을 sequence-6 replay fixture seed에 반영했다.
+- 첨부 CAN log는 `can1`을 기록한다. 기존 오른팔 매핑은 `can0`이므로 이 파일만으로
+  오른팔 CAN 상태를 입증하지 않으며 매핑을 변경하지 않는다. 원본과 생성물은
+  Git에 넣지 않는다.
 - 불연속 IK 해는 publish·target 승격 없이 이전 accepted target을 유지한다.
   동일한 이전 관절해 seed로 최대 4회 bounded retry하고, 연속 해가 없으면 종료한다.
   기존 `0.30 rad` hard boundary는 유지하며 CLI로 완화할 수 없다.
 - safety refusal도 지금까지의 trace, refusal reason/sequence/phase/7개 delta와
   continuity event를 partial JSON으로 원자 저장한 뒤 exit 3을 반환한다.
 - MATLAB 분석기는 legacy/full/partial-refused JSON을 함께 분석한다.
-- 합성 sequence-6 replay는 4개 bad branch를 모두 publish 전에 차단했고, 실제
-  ROS mock translation은 408 samples, 99.0 Hz, IK 9/9, continuity refusal/clamp
-  0으로 왕복 완료했다.
+- 실제 pre-retest seed의 합성 sequence-6 replay는 4개 bad branch를 모두
+  publish 전에 차단했고, 실제 ROS mock translation은 408 samples, 99.0 Hz,
+  IK 9/9, continuity refusal/clamp 0으로 왕복 완료했다.
 - MATLAB R2026a에서 legacy real + full fake + partial fake bundle의 CSV/JSON/MAT,
   PNG 6개와 7-page PDF 생성을 확인했다.
 - 상세:

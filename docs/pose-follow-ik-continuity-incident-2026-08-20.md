@@ -30,13 +30,38 @@ sequence 6의 MoveIt solve는 성공했지만 직전 관절해와 연속적이�
 하드 경계가 해당 target을 첫 publish 전에 차단했으며, 그 이전 command tracking과
 limit 결과는 정상이다.
 
-## 전달 파일 상태
+## 회수한 압축파일과 교차검증
 
-`/home/cbj4/openarm_follow_data/2026-08-20/openarm-ik-refusal-2026-08-20/`
-아래 pose JSON과 log 9개는 모두 0바이트였고 새 압축파일은 전달되지 않았다.
-따라서 351-sample 원시 trace를 다시 계산할 수 없으며 위 값은 사용자가 보존한
-terminal 결과를 근거로 한다. 0바이트 파일이나 생성 분석물은 Git에 포함하지
-않는다.
+`/home/cbj4/openarm_follow_data/2026-08-20/openarm-ik-refusal-2026-08-20.tar.gz`
+를 읽기 전용으로 확인했다. 크기는 3,027 bytes, SHA-256은
+`a57951e8f2ba52fcc98adf2fe99c3d976e18b29e12e6c3d2b6fd02a1f59c0178`이며,
+pose JSON 4개와 terminal/CAN log 5개가 들어 있다. 원본은 수정하지 않고 `/tmp`에
+풀어 분석했으며 Git에는 포함하지 않는다.
+
+실행 로그가 위 351 samples, 99.0 Hz, IK 6/6, live error, limit/clamp 0과
+sequence-6 delta를 그대로 확인했다. 다만 `--output` refusal 동작이 추가되기 전
+실행이므로 follow JSON/351-sample trace는 없다. 따라서 phase별 time-series를
+MATLAB으로 재계산할 수는 없고, 실제 refusal phase도 로그에 직접 기록되지 않았다.
+`translation_ramp_out`은 deterministic sequence replay에서 확인한 phase이며
+향후 partial JSON은 이 값을 직접 기록한다.
+
+`right-pose-before-retest.json`의 정확한 관절값은 다음과 같다.
+
+```text
+[-0.0165941863126573, +0.004768444342717615,
+ -0.011253528648813571, +0.02155336842908362,
+ -0.02536812390325771, -0.018883039597161755,
+ -0.0005722133211261138]
+```
+
+거부 뒤 snapshot과 비교하면 최대 관절 변화는 J5 `0.000762951 rad`, TCP 변화는
+`0.271920 mm`, `0.081805 deg`다. J4는 전후 모두
+`+0.02155336842908362 rad`다. 이는 약 pi/pi/2 target이 실제 관절 자세로
+반영되지 않았다는 독립적인 근거다.
+
+첨부 CAN log는 `can1`의 ERROR-ACTIVE, tx/rx counter 0, CAN FD 1/5 Mbit/s를
+기록한다. 기존 현장 매핑은 오른팔 `can0`이므로 이 파일만으로 오른팔 CAN 상태를
+독립적으로 입증할 수 없다. 매핑이나 설정은 변경하지 않았다.
 
 ## 변경한 continuity 정책
 
@@ -77,7 +102,8 @@ exit 3과 `refused:` 메시지를 반환한다.
 
 실물/CAN은 사용하지 않았다.
 
-- 합성 sequence-6 replay: J1/J2 `+3.1559/+3.1269 rad`,
+- 실제 pre-retest 7개 관절값을 seed로 사용한 합성 sequence-6 replay:
+  J1/J2 `+3.1559/+3.1269 rad`,
   J3/J5 `+1.5527/+1.5889 rad`; 5개 연속 target 뒤 4개 bad solve를 모두 차단,
   sequence 6 publish 0건, partial JSON 저장, exit 3
 - worker 단위 검증: bad branch 다음 retry에서 연속 해가 나오면 수락; 4회
