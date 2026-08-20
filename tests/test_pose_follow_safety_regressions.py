@@ -7,6 +7,7 @@ import json
 import numpy as np
 
 from robot_control.cli import main
+from robot_control.ready import READY_POSTURE_NAME, READY_TARGET_RAD
 
 
 RIGHT_ARM = ["--group", "openarm_right_arm"]
@@ -114,7 +115,7 @@ class ReplayArm:
     def read_state(self, timeout_sec=None):
         return self.joints.copy()
 
-    def solve_ik(self, pose, seed):
+    def solve_ik(self, pose, seed, timeout_sec=None):
         self.ik_requests.append((pose, np.asarray(seed, dtype=float).copy()))
         return np.asarray(seed, dtype=float) + self.ik_offset
 
@@ -128,10 +129,10 @@ class SequenceSixBranchReplayArm(ReplayArm):
     """Return five continuous targets, then only the reported bad branch."""
 
     def __init__(self):
-        super().__init__(RETEST_INITIAL_JOINTS_RAD)
+        super().__init__(READY_TARGET_RAD)
         self.solve_calls = 0
 
-    def solve_ik(self, pose, seed):
+    def solve_ik(self, pose, seed, timeout_sec=None):
         seed = np.asarray(seed, dtype=float).copy()
         self.ik_requests.append((pose, seed.copy()))
         self.solve_calls += 1
@@ -249,13 +250,13 @@ def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
     branch_offset = np.zeros(7)
     branch_offset[2] = 0.7646
     branch_offset[4] = -0.7480
-    arm = ReplayArm(INCIDENT_INITIAL_JOINTS_RAD, branch_offset)
+    arm = ReplayArm(READY_TARGET_RAD, branch_offset)
     install_replay(monkeypatch, arm)
 
     assert main(diagnostic_args("--execute")) == 3
     assert arm.ik_requests
     np.testing.assert_array_equal(
-        arm.ik_requests[0][1], INCIDENT_INITIAL_JOINTS_RAD
+        arm.ik_requests[0][1], READY_TARGET_RAD
     )
     assert arm.streamed == []
     output = capsys.readouterr().out
@@ -264,31 +265,24 @@ def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
     assert "r_aj_5=-0.7480 rad" in output
 
 
-def test_deterministic_position_clamp_is_refused_before_publish(
+def test_recovered_incident_pose_is_refused_by_ready_check_before_ik(
     monkeypatch, capsys
 ):
-    # J4 is already 0.005531 rad below the URDF and profile lower limit.
-    # No artificial IK offset is needed to reproduce the incident clamp.
     arm = ReplayArm(INCIDENT_INITIAL_JOINTS_RAD)
-    assert INCIDENT_INITIAL_JOINTS_RAD[3] < 0.0
     install_replay(monkeypatch, arm)
 
     assert main(diagnostic_args("--execute")) == 3
-    assert arm.ik_requests
+    assert arm.ik_requests == []
     assert arm.streamed == []
-    np.testing.assert_array_equal(
-        arm.ik_requests[0][1], INCIDENT_INITIAL_JOINTS_RAD
-    )
     output = capsys.readouterr().out
-    assert "deterministic profile position clamp refused before publish" in output
-    assert "lower: r_aj_4" in output
-    assert "upper:" not in output
+    assert READY_POSTURE_NAME in output
+    assert "run `robotctl pose ready" in output
 
 
 def test_ik_target_jump_at_exact_hard_boundary_is_refused(monkeypatch, capsys):
     branch_offset = np.zeros(7)
     branch_offset[0] = 0.30
-    arm = ReplayArm(np.zeros(7), branch_offset)
+    arm = ReplayArm(READY_TARGET_RAD, branch_offset)
     install_replay(monkeypatch, arm)
 
     assert main(diagnostic_args("--execute")) == 3
@@ -302,7 +296,7 @@ def test_ik_target_jump_at_exact_hard_boundary_is_refused(monkeypatch, capsys):
 def test_deterministic_alignment_message_never_invites_marker_drag(
     monkeypatch, capsys
 ):
-    arm = ReplayArm(np.zeros(7))
+    arm = ReplayArm(READY_TARGET_RAD)
     install_replay(monkeypatch, arm)
 
     assert main(diagnostic_args("--execute")) == 0
@@ -347,7 +341,7 @@ def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
     assert result["samples"] > 0
     np.testing.assert_allclose(
         payload["trace"][0]["joint_positions_rad"]["measured"],
-        RETEST_INITIAL_JOINTS_RAD,
+        READY_TARGET_RAD,
         atol=1e-12,
     )
     assert result["ik"]["submitted"] == 6

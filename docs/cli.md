@@ -181,18 +181,28 @@ pose setting adds no second route to the hardware.
 
 ## `robotctl pose ready` and `robotctl pose rest`
 
-Move one or both arms through the slow, table-safe startup and shutdown
-sequence. `ready` raises the elbow before pitching the wrist; `rest` reverses
-that order so the tool does not sweep through the table. Both commands default
-to every `*_arm` group, accept repeatable `--group`, and only print the planned
-phases unless `--execute` is explicit.
+`ready` is the right-arm-only standard deterministic experiment start:
+`openarm_right_ready_v1 = [0.15,0.55,0.15,0.8,-0.1,0.15,0.1] rad`. It uses no IK,
+raises J4 first, and sends minimum-jerk joint trajectories bounded to 0.10 rad/s
+and 0.10 rad/s². The default is fully offline dry-run. `--before-output` and
+`--after-output` save atomic pose snapshots; the latter includes final joint
+error and settling time. Left-arm ready remains disabled. `rest` retains the
+legacy table-safe shutdown sequence.
 
 ```bash
-robotctl pose ready
-# --execute sends slow trajectories and the real arms move through both phases:
+robotctl pose ready --group openarm_right_arm
 robotctl pose ready --group openarm_right_arm --execute
-robotctl pose rest --execute
+robotctl pose ready --group openarm_right_arm \
+  --before-output /tmp/right-before-ready.json \
+  --after-output /tmp/right-after-ready.json --execute
+robotctl pose rest --group openarm_right_arm --execute
 ```
+
+The ready tolerance is 0.020 rad per joint. GenericSystem settles essentially
+exactly; the prior real baseline ended at 0.0063 rad worst error, so 0.020 rad
+allows over three times that observed residual while remaining far below the
+0.30 rad IK boundary. Candidate evidence is in
+[`ready-posture-evaluation-2026-08-20.md`](ready-posture-evaluation-2026-08-20.md).
 
 ## `robotctl pose torque`
 
@@ -622,6 +632,16 @@ robotctl pose follow \
   --gravity 0.75 \
   --output /tmp/right-follow.json
 ```
+
+### Ready posture precondition
+
+A deterministic diagnostic reads the current seven joints before marker setup,
+gravity publication, IK, or trajectory publication. It refuses unless every
+joint is within 0.020 rad of `openarm_right_ready_v1`. `pose ready` and
+`pose follow` remain separate commands; follow never moves to ready
+automatically. Manual marker follow is unchanged. Full and pre-start-refused
+JSON record the ready name, target, actual start, per-joint error, and pass flag
+under `settings.ready_posture` and `result.ready_posture`.
 
 ### Deterministic diagnostic profiles
 

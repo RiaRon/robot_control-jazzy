@@ -184,7 +184,7 @@ class DroopingArm:
     def read_state(self):
         return self.joints.copy()
 
-    def solve_ik(self, _pose, seed):
+    def solve_ik(self, _pose, seed, timeout_sec=None):
         return self.target.copy()
 
     def send_trajectory(self, points, period_sec):
@@ -518,7 +518,7 @@ class DraggableArm(StiffArm):
     def read_state(self, timeout_sec=None):
         return self.joints.copy()
 
-    def solve_ik(self, pose, seed):
+    def solve_ik(self, pose, seed, timeout_sec=None):
         """테스트용 IK가 위치와 Roll·Pitch·Yaw를 모두 관절값으로 바꾼다."""
         from robot_control.cli import _rotation_from_quaternion
 
@@ -1690,6 +1690,10 @@ def test_pose_follow_runs_a_deterministic_profile_on_fake_hardware(
     draggable,
     tmp_path,
 ):
+    from robot_control.ready import READY_TARGET_RAD
+
+    draggable.joints = READY_TARGET_RAD.copy()
+    draggable._target = _reachable_target(_servo_chain(), READY_TARGET_RAD)
     output = tmp_path / "diagnostic.json"
     assert (
         main(
