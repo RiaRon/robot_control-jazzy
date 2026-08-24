@@ -354,3 +354,26 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
   `0.52 s`였다.
 - MATLAB R2026a ready target/gravity 비교 bundle 생성 검증을 완료했다. 실물
   OpenArm/CAN은 사용하지 않았다.
+
+## 최신 완료 — ready–deterministic follow gravity handoff
+
+- 기준: `jazzy@e1903ce`; 브랜치: `feature/follow-gravity-ready-handoff`.
+- deterministic `pose follow --execute`는 ready 검사 전 gravity scale 1.0을
+  활성화하고 A-prime을 follow 전용 0.050 rad로 검사한다. 벗어나면 gravity를
+  유지한 J4-first minimum-jerk trajectory로 재획득한 뒤 TCP alignment, profile
+  순으로 진행한다. standalone ready 0.020 rad 기준은 유지한다.
+- 재획득 실패는 measured-position safe hold, profile publish 0, partial JSON 후
+  zero-effort cleanup한다. JSON에 gravity/reacquisition/alignment/profile/cleanup
+  시점과 termination reason을 기록한다.
+- A-prime +/-0.05 rad fake 2,187 states는 limit failure 0, Jacobian rank 6,
+  maximum condition 38.9763이었다. MoveIt collision 143/143 valid, repeated IK
+  180/180 성공, worst seed delta 0.175789 rad로 0.30 rad 경계 이내였다.
+- 첨부 실물 JSON 분석은 cleanup 직전 J4 ready error 0.047051 rad과 cleanup 뒤
+  J4 drift -0.072862 rad를 분리했다. MATLAB 6-file bundle 검증을 완료했다.
+- 전체 Python `669 passed, 4 skipped`; ROS 2 Jazzy 11 packages build 성공.
+- GenericSystem sagged start는 gravity 680 samples, A-prime reacquisition 549
+  position samples/final error 0, alignment 뒤 translation profile 119 publish,
+  IK 5/5와 clamp 0으로 완료했다.
+- MATLAB R2026a cleanup-drift 6-file bundle 검증 성공.
+- 실물 OpenArm/CAN은 사용하지 않았다. 상세:
+  [`docs/pose-follow-ready-handoff-2026-08-24.md`](pose-follow-ready-handoff-2026-08-24.md).

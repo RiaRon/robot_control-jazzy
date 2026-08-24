@@ -643,15 +643,27 @@ robotctl pose follow \
   --output /tmp/right-follow.json
 ```
 
-### Ready posture precondition
+### Ready posture handoff
 
-A deterministic diagnostic reads the current seven joints before marker setup,
-gravity publication, IK, or trajectory publication. It refuses unless every
-joint is within 0.020 rad of `openarm_right_ready_v2`. `pose ready` and
-`pose follow` remain separate commands; follow never moves to ready
-automatically. Manual marker follow is unchanged. Full and pre-start-refused
-JSON record the ready name, target, actual start, per-joint error, and pass flag
-under `settings.ready_posture` and `result.ready_posture`.
+For `--diagnostic-profile --execute`, deterministic follow activates right-arm
+gravity compensation at the validated scale 1.0 before evaluating A-prime. It
+requires disjoint active position and effort controllers. If feedback is
+outside the follow-only 0.050 rad A-prime tolerance, it reacquires
+`openarm_right_ready_v2` with the same J4-first, minimum-jerk joint path used
+by ready while refreshing gravity torque every control cycle. The standalone
+`pose ready` acceptance tolerance remains 0.020 rad.
+
+Only successful reacquisition proceeds to normal TCP startup alignment, and
+only successful alignment starts the diagnostic profile. Gravity stays active
+through all three phases. Termination, refusal, or exception performs the
+existing three-sample zero-effort cleanup. Reacquisition failure first commands
+a measured-position safe hold, publishes no diagnostic-profile position
+sample, and writes partial JSON when `--output` is supplied.
+
+JSON records activation, reacquisition start/completion/error/duration, startup
+alignment start/completion, diagnostic start and position-publish count, and
+cleanup timing. Manual marker follow remains unchanged. Dry-run still returns
+before constructing a ROS adapter or publisher.
 
 ### Deterministic diagnostic profiles
 

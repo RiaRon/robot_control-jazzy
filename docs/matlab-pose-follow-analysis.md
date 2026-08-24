@@ -175,3 +175,25 @@ analysis = analyze_ready_comparison( ...
 `posture_name|gravity=<0|1>`이므로 같은 target에서 중력보상 유무에 따른 도달
 오차를 직접 비교한다. 원시 JSON과 이 생성물은 저장소 밖, 예를 들어
 `/home/user/openarm_follow_data/.../analysis`에 둔다.
+## cleanup 전 ready 오차와 cleanup 후 drift 분리
+
+`analyze_ready_cleanup_drift.m`은 ready 완료 JSON과 zero-effort cleanup 뒤의
+`pose show` JSON을 한 쌍으로 읽는다. ready 도달 성능은 ready JSON의 cleanup
+직전 feedback으로만 평가하고, 그 feedback에서 post-cleanup pose까지의 변화는
+별도 drift로 계산한다. 따라서 후속 pose의 큰 target 오차를 ready controller의
+도달 실패로 합산하지 않는다.
+
+```matlab
+addpath('matlab/pose_follow');
+analysis = analyze_ready_cleanup_drift( ...
+    '/data/right-after-ready-v2-gravity.json', ...
+    '/data/right-pose-after-ready-v2-gravity-refusal.json', ...
+    '/tmp/ready-cleanup-analysis');
+```
+
+번들은 `ready_cleanup_summary.csv`, `ready_cleanup_joint_drift.csv`,
+`ready_cleanup_analysis.json`, `ready_cleanup_analysis.mat`, PNG와 PDF를
+생성한다. 2026-08-24 첨부 자료에서는 cleanup 직전 worst target error가 J4
+`0.047051 rad`, J4 feedback이 `0.552949 -> 0.480087 rad`로 변해 post-cleanup
+drift가 `0.072862 rad`였다. 이 함수는 JSON을 읽기만 하며 ROS나 controller를
+호출하지 않는다.
