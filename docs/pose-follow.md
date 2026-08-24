@@ -244,12 +244,21 @@ schema v1과 `kind: pose_follow_diagnostics`를 유지하며 다음 구조화 �
 trace에는 offending target이 아니라 그 직전까지 실제로 승인된 target, command,
 measurement만 들어갑니다.
 
-## deterministic 시작 자세
+## deterministic ready 인계
 
-`--diagnostic-profile` 실행은 `openarm_right_ready_v2`에서만 허용됩니다. 먼저
-`robotctl pose ready --group openarm_right_arm`을 검토하고, 별도 승인된
-`--execute` ready 명령을 완료한 뒤 새 명령으로 follow를 시작합니다. 자동 ready
-후 즉시 follow하는 경로는 없습니다. 수동 marker follow에는 이 검사를 적용하지
+`--diagnostic-profile --execute`는 별도의 ready 명령을 요구하지 않습니다.
+ROS adapter를 연 뒤 position/effort controller가 동시에 active이고 서로 다른
+command interface를 claim하는지 확인하고, 검증된 scale 1.0 중력보상을 먼저
+발행합니다. 현재 자세가 A-prime의 follow 전용 0.050 rad 범위를 벗어나면
+중력보상을 유지한 채 J4-first minimum-jerk joint trajectory로 A-prime을
+재획득합니다. `pose ready` 자체의 기준은 기존 0.020 rad 그대로입니다.
+
+재획득 성공 뒤에만 기존 TCP startup alignment를 시작하고, alignment 성공
+뒤에만 deterministic profile 위치 명령을 발행합니다. 재획득 실패는 마지막
+feedback 위치를 safe hold하고 profile publish 0건인 partial JSON을 저장합니다.
+alignment, IK continuity, position-clamp 또는 예외 거부도 partial JSON에 단계와
+termination reason을 남깁니다. 중력보상은 종료 처리 전까지 끊지 않으며 마지막에
+zero effort를 세 번 발행합니다. 수동 marker follow와 dry-run 동작은 바뀌지
 않습니다.
 
 ## 5. 무기한 운전

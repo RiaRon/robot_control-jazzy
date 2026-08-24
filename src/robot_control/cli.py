@@ -74,6 +74,7 @@ from .interface import CanonicalInterface
 from .ik_follow import LatestIkWorker
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .ready import (
+    FOLLOW_REACQUISITION_TOLERANCE_RAD,
     READY_ACCELERATION_RAD_S2,
     READY_D_LEGACY_NAME,
     READY_POSTURE_NAME,
@@ -1208,11 +1209,20 @@ def _ready_stream_points(adapter, chain, gate, points, period_sec, telemetry):
 
 
 def _wait_for_ready_settle(
-    adapter, chain, gate, target, period_sec, telemetry
+    adapter,
+    chain,
+    gate,
+    target,
+    period_sec,
+    telemetry,
+    *,
+    tolerance_rad=READY_TOLERANCE_RAD,
 ):
     started = time.monotonic()
     stable_since = None
-    last = check_ready(telemetry["feedback"], target=target)
+    last = check_ready(
+        telemetry["feedback"], target=target, tolerance_rad=tolerance_rad
+    )
     while time.monotonic() - started <= READY_SETTLE_TIMEOUT_SEC:
         feedback, torque = _ready_control_cycle(
             adapter, chain, gate, target, period_sec
@@ -1225,7 +1235,9 @@ def _wait_for_ready_settle(
         )
         telemetry["gravity_samples"] += 1
         telemetry["position_samples"] += 1
-        last = check_ready(feedback, target=target)
+        last = check_ready(
+            feedback, target=target, tolerance_rad=tolerance_rad
+        )
         now = time.monotonic()
         if last.passed:
             stable_since = now if stable_since is None else stable_since
@@ -1242,6 +1254,259 @@ def _ready_safe_hold(adapter, profile, group, measured):
     authorized = gate.authorize(hold, now_sec=0.0)
     adapter.stream_positions(authorized)
     return np.asarray(authorized, dtype=float)
+
+
+def _attempt_follow_safe_hold(
+    adapter, profile, group, measured, reacquisition_metadata
+):
+    """Best-effort measured-position hold before gravity cleanup."""
+    hold = reacquisition_metadata.setdefault(
+        "safe_hold",
+        {
+            "attempted": False,
+            "applied": False,
+            "reference_rad": None,
+            "error": None,
+        },
+    )
+    if hold["attempted"]:
+        return
+    hold["attempted"] = True
+    try:
+        reference = _ready_safe_hold(adapter, profile, group, measured)
+        hold.update({"applied": True, "reference_rad": reference.tolist()})
+    except Exception as error:
+        hold["error"] = str(error)
+
+
+def _follow_reacquire_ready(
+    adapter,
+    chain,
+    gate,
+    profile,
+    group,
+    state,
+    period_sec,
+    run_started,
+    gravity_metadata,
+    reacquisition_metadata,
+):
+    """Reacquire A-prime while continuously publishing gravity effort."""
+    initial = check_ready(
+        state,
+        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+    )
+    started = time.monotonic()
+    reacquisition_metadata.update(
+        {
+            "started": True,
+            "started_elapsed_sec": float(started - run_started),
+            "required": not initial.passed,
+            "completed": False,
+            "completed_elapsed_sec": None,
+            "duration_sec": None,
+            "tolerance_rad": FOLLOW_REACQUISITION_TOLERANCE_RAD,
+            "initial_rad": initial.actual.tolist(),
+            "initial_error_rad": initial.error.tolist(),
+            "final_rad": initial.actual.tolist(),
+            "final_error_rad": initial.error.tolist(),
+            "max_abs_final_error_rad": float(np.max(np.abs(initial.error))),
+            "motion_samples": 0,
+            "settling_sec": 0.0,
+            "safe_hold": {
+                "attempted": False,
+                "applied": False,
+                "reference_rad": None,
+                "error": None,
+            },
+            "termination_reason": None,
+        }
+    )
+    if initial.passed:
+        completed = time.monotonic()
+        reacquisition_metadata.update(
+            {
+                "completed": True,
+                "completed_elapsed_sec": float(completed - run_started),
+                "duration_sec": float(completed - started),
+            }
+        )
+        return initial.actual.copy()
+
+    telemetry = {
+        "feedback": initial.actual.copy(),
+        "reference": initial.actual.copy(),
+        "torque": np.zeros(len(group.joints)),
+        "torque_worst": np.zeros(len(group.joints)),
+        "gravity_samples": 0,
+        "position_samples": 0,
+    }
+    here = _start_pose(profile, group, initial.actual)
+    lifted = here.copy()
+    lifted[ELBOW_INDEX] = READY_TARGET_RAD[ELBOW_INDEX]
+    for phase_target in (lifted, READY_TARGET_RAD):
+        points, _duration = _minimum_jerk_trajectory(
+            here, phase_target, 1.0 / period_sec
+        )
+        if points:
+            points = _gate(profile, group, seed=here).authorize_trajectory(
+                points, start_time_sec=0.0, period_sec=period_sec
+            )
+            _ready_stream_points(
+                adapter, chain, gate, points, period_sec, telemetry
+            )
+            here = np.asarray(phase_target, dtype=float).copy()
+    final, settling_sec, passed = _wait_for_ready_settle(
+        adapter,
+        chain,
+        gate,
+        READY_TARGET_RAD,
+        period_sec,
+        telemetry,
+        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+    )
+    completed = time.monotonic()
+    gravity_metadata["samples"] += int(telemetry["gravity_samples"])
+    gravity_metadata["last_torque_nm"] = telemetry["torque"].tolist()
+    reacquisition_metadata.update(
+        {
+            "completed": bool(passed),
+            "completed_elapsed_sec": (
+                float(completed - run_started) if passed else None
+            ),
+            "duration_sec": float(completed - started),
+            "final_rad": final.actual.tolist(),
+            "final_error_rad": final.error.tolist(),
+            "max_abs_final_error_rad": float(np.max(np.abs(final.error))),
+            "motion_samples": int(telemetry["position_samples"]),
+            "settling_sec": float(settling_sec),
+        }
+    )
+    if passed:
+        return final.actual.copy()
+
+    message = (
+        f"{READY_POSTURE_NAME} reacquisition did not settle within "
+        f"{READY_SETTLE_TIMEOUT_SEC:g} s at the follow-only "
+        f"{FOLLOW_REACQUISITION_TOLERANCE_RAD:.3f} rad tolerance; worst joint "
+        f"error {np.max(np.abs(final.error)):.4f} rad"
+    )
+    reacquisition_metadata["termination_reason"] = message
+    _attempt_follow_safe_hold(
+        adapter, profile, group, final.actual, reacquisition_metadata
+    )
+    raise SafetyError(message)
+
+
+def _zero_follow_gravity(
+    adapter, joint_count, period_sec, run_started, gravity_metadata
+):
+    cleanup = gravity_metadata["cleanup"]
+    cleanup["attempted"] = True
+    cleanup["started_elapsed_sec"] = float(time.monotonic() - run_started)
+    try:
+        zero = np.zeros(joint_count)
+        for _ in range(3):
+            adapter.send_effort(zero)
+            _ready_sleep(period_sec)
+        cleanup["zero_published"] = True
+    except Exception as error:
+        cleanup["error"] = str(error)
+        raise
+    finally:
+        cleanup["completed_elapsed_sec"] = float(
+            time.monotonic() - run_started
+        )
+
+
+def _handoff_partial_diagnostics(
+    profile,
+    group,
+    diagnostic_spec,
+    state,
+    error,
+    gravity_metadata,
+    reacquisition_metadata,
+):
+    check = check_ready(
+        state,
+        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+    )
+    if not gravity_metadata.get("activated"):
+        reason = "gravity_activation_failed"
+    elif (
+        reacquisition_metadata.get("started")
+        and not reacquisition_metadata.get("completed")
+    ):
+        reason = "ready_reacquisition_failed"
+    else:
+        reason = "startup_alignment_failed"
+    refusal = {
+        "reason": reason,
+        "message": str(error),
+        "refused_sequence": None,
+        "profile_phase": "before_start",
+        "attempts": 0,
+        "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+        "reference_sequence": None,
+        "joint_delta_rad": check.error.tolist(),
+        "triggered_joints": [
+            name
+            for name, value in zip(group.joints, check.error)
+            if abs(value) > FOLLOW_REACQUISITION_TOLERANCE_RAD
+        ],
+    }
+    ready = ready_metadata(
+        check,
+        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+    )
+    return {
+        "group": group.name,
+        "joint_names": list(group.joints),
+        "settings": {
+            "diagnostic_profile": diagnostic_spec,
+            "gravity_scale": gravity_metadata["scale"],
+            "ready_posture": ready,
+        },
+        "result": {
+            "termination": reason,
+            "termination_reason": str(error),
+            "is_partial": True,
+            "refusal": refusal,
+            "ready_posture": ready,
+            "gravity_compensation": gravity_metadata,
+            "ready_reacquisition": reacquisition_metadata,
+            "startup_alignment": {
+                "started": False,
+                "started_elapsed_sec": None,
+                "completed": False,
+                "completed_elapsed_sec": None,
+            },
+            "diagnostic_execution": {
+                "started": False,
+                "started_elapsed_sec": None,
+                "position_publish_count": 0,
+            },
+            "cycles": 0,
+            "samples": 0,
+            "ik": {
+                "submitted": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "superseded": 0,
+                "solve_attempts": 0,
+                "candidate_count": 0,
+                "rejected_candidate_count": 0,
+                "continuity_rejected": 0,
+                "continuity_retries": 0,
+                "continuity_exhausted": 0,
+                "continuity_events": [],
+                "selection_events": [],
+                "events": [],
+            },
+        },
+        "trace": [],
+    }
 
 
 def _pose_ready(args, profile) -> int:
@@ -2195,6 +2460,13 @@ def _pose_follow(args, profile) -> int:
                 "--diagnostic-angular-speed must not exceed "
                 "--max-tcp-angular-speed"
             )
+        if args.gravity is not None:
+            requested_scales = _scale_vector(args.gravity, group)
+            if not np.allclose(requested_scales, 1.0, rtol=0.0, atol=1e-12):
+                raise ValueError(
+                    "deterministic diagnostic follow requires the validated "
+                    "gravity scale 1.0"
+                )
     period = 1.0 / profile.endpoint().command_rate_hz
     diagnostic_spec = (
         None if diagnostic_profile is None else diagnostic_profile.as_dict()
@@ -2220,151 +2492,257 @@ def _pose_follow(args, profile) -> int:
         return 0
     if args.output is not None:
         _preflight_output(args.output)
+    if diagnostic_profile is not None and args.gravity is None:
+        # Deterministic handoff always uses the validated right-arm scale.
+        args.gravity = "1.0"
+    run_started = time.monotonic()
+    gravity_metadata = {
+        "enabled": diagnostic_profile is not None or args.gravity is not None,
+        "scale": (
+            None
+            if diagnostic_profile is None and args.gravity is None
+            else [
+                float(value)
+                for value in _scale_vector(args.gravity, group)
+            ]
+        ),
+        "activated": False,
+        "activation_elapsed_sec": None,
+        "samples": 0,
+        "last_torque_nm": None,
+        "controllers": None,
+        "cleanup": {
+            "attempted": False,
+            "started_elapsed_sec": None,
+            "completed_elapsed_sec": None,
+            "zero_published": False,
+            "error": None,
+        },
+    }
+    reacquisition_metadata = {
+        "started": False,
+        "completed": False,
+        "termination_reason": None,
+    }
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
         state = adapter.read_state(timeout_sec=1.0)
-        ready_check = (
-            None if diagnostic_profile is None else check_ready(state)
-        )
-        if ready_check is not None and not ready_check.passed:
-            errors = ", ".join(
-                f"{name}={value:+.4f}"
-                for name, value in zip(group.joints, ready_check.error)
-            )
-            message = (
-                f"deterministic diagnostic requires {READY_POSTURE_NAME} within "
-                f"{READY_TOLERANCE_RAD:.3f} rad; run `robotctl pose ready "
-                f"--group {RIGHT_ARM_GROUP}` separately first; errors: {errors}"
-            )
-            refusal = {
-                "reason": "ready_posture_required",
-                "message": message,
-                "refused_sequence": None,
-                "profile_phase": "before_start",
-                "attempts": 0,
-                "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
-                "reference_sequence": None,
-                "joint_delta_rad": ready_check.error.tolist(),
-                "triggered_joints": [
-                    name
-                    for name, value in zip(group.joints, ready_check.error)
-                    if abs(value) > READY_TOLERANCE_RAD
-                ],
-            }
-            diagnostics = {
-                "group": group.name,
-                "joint_names": list(group.joints),
-                "settings": {
-                    "diagnostic_profile": diagnostic_spec,
-                    "ready_posture": ready_metadata(ready_check),
-                },
-                "result": {
-                    "termination": "safety_refused",
-                    "is_partial": True,
-                    "refusal": refusal,
-                    "ready_posture": ready_metadata(ready_check),
-                    "cycles": 0,
-                    "samples": 0,
-                    "ik": {
-                        "submitted": 0,
-                        "succeeded": 0,
-                        "failed": 0,
-                        "superseded": 0,
-                        "solve_attempts": 0,
-                        "candidate_count": 0,
-                        "rejected_candidate_count": 0,
-                        "continuity_rejected": 0,
-                        "continuity_retries": 0,
-                        "continuity_exhausted": 0,
-                        "continuity_events": [],
-                        "selection_events": [],
-                        "events": [],
-                    },
-                },
-                "trace": [],
-            }
-            if args.output is not None:
-                _write_json_atomic(
-                    args.output,
-                    {
-                        "schema_version": 1,
-                        "kind": "pose_follow_diagnostics",
-                        "profile": profile.name,
-                        **diagnostics,
-                    },
-                )
-                print(f"wrote partial pose follow diagnostics: {args.output}")
-            raise SafetyError(message)
         chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
-        # 드래그 중 들어오는 마커 변경을 구독한다.
-        adapter.watch_marker()
-
-        # 사용자가 아직 드래그하지 않았어도 시작 정렬을 할 수 있도록
-        # RViz가 현재 보관 중인 파란 마커 위치를 한 번 직접 읽는다.
-        startup_marker_target = adapter.read_marker_pose()
-        print(
-            f"following {group.tip_link} at {1.0 / period:g} Hz for "
-            f"{args.seconds:g} s, gravity "
-            + (
-                "off"
-                if args.gravity is None
-                else f"scale {_scale_label(_scale_vector(args.gravity, group), None)}"
-            )
-        )
-        print(
-            "startup alignment: do not drag until the actual TCP "
-            "reaches the RViz marker"
-        )
-        if diagnostic_spec is not None:
-            print(
-                f"diagnostic profile {diagnostic_spec['kind']}: "
-                f"{diagnostic_spec['repetitions']} round trip(s), "
-                f"{diagnostic_spec['duration_sec']:.1f} s after startup alignment"
-            )
-            print(
-                "  deterministic target only; live marker updates are "
-                "ignored after alignment"
-            )
-        # MoveIt service calls block, so a second node belongs exclusively to
-        # the IK worker while this adapter keeps servicing feedback and commands.
-        with RosAdapter(
-            profile,
-            args.group,
-            execute=False,
-            node_name="robot_control_pose_follow_ik",
-        ) as ik_adapter:
-            joint_ranges = np.array(
-                [joint.upper - joint.lower for joint in _joint_limits(profile, group)]
-            )
-            median_range = float(np.median(joint_ranges))
-            joint_weights = (median_range / joint_ranges) ** 2
-            worker = LatestIkWorker(
-                lambda pose, seed: ik_adapter.solve_ik(
-                    pose, seed, timeout_sec=IK_CANDIDATE_SOLVE_TIMEOUT_SEC
-                ),
-                max_target_jump_rad=MAX_SAFE_IK_TARGET_JUMP_RAD,
-                max_continuity_attempts=IK_CONTINUITY_MAX_ATTEMPTS,
-                max_batch_latency_sec=IK_CANDIDATE_BATCH_LATENCY_SEC,
-                joint_weights=joint_weights,
-                continuous_joints=np.zeros(len(group.joints), dtype=bool),
-            )
+        if diagnostic_profile is not None:
             try:
-                diagnostics = _follow_loop(
+                position_info, effort_info = (
+                    adapter.require_position_effort_controllers_active(
+                        timeout_sec=2.0
+                    )
+                )
+                gravity_metadata["controllers"] = {
+                    "position": position_info.name,
+                    "effort": effort_info.name,
+                    "state": "active",
+                    "simultaneous_interfaces_checked": True,
+                }
+                torque = gate.authorize_effort(
+                    chain.gravity_torque(state)
+                    * _scale_vector(args.gravity, group)
+                )
+                adapter.send_effort(torque)
+                gravity_metadata.update(
+                    {
+                        "activated": True,
+                        "activation_elapsed_sec": float(
+                            time.monotonic() - run_started
+                        ),
+                        "samples": 1,
+                        "last_torque_nm": torque.tolist(),
+                    }
+                )
+                state = _follow_reacquire_ready(
                     adapter,
                     chain,
                     gate,
+                    profile,
                     group,
                     state,
                     period,
-                    args,
-                    worker,
-                    startup_marker_target,
-                    diagnostic_profile,
-                    ready_check,
-                    joint_weights,
+                    run_started,
+                    gravity_metadata,
+                    reacquisition_metadata,
                 )
-            finally:
-                worker.close()
+            except Exception as error:
+                if (
+                    reacquisition_metadata.get("started")
+                    and not reacquisition_metadata.get("completed")
+                ):
+                    try:
+                        measured = adapter.read_state(timeout_sec=1.0)
+                    except Exception:
+                        measured = state
+                    _attempt_follow_safe_hold(
+                        adapter, profile, group, measured, reacquisition_metadata
+                    )
+                    if reacquisition_metadata.get("termination_reason") is None:
+                        reacquisition_metadata["termination_reason"] = str(error)
+                if gravity_metadata["activated"]:
+                    try:
+                        _zero_follow_gravity(
+                            adapter,
+                            len(group.joints),
+                            period,
+                            run_started,
+                            gravity_metadata,
+                        )
+                    except Exception as cleanup_error:
+                        gravity_metadata["cleanup"]["error"] = str(
+                            cleanup_error
+                        )
+                diagnostics = _handoff_partial_diagnostics(
+                    profile,
+                    group,
+                    diagnostic_spec,
+                    state,
+                    error,
+                    gravity_metadata,
+                    reacquisition_metadata,
+                )
+                if args.output is not None:
+                    _write_json_atomic(
+                        args.output,
+                        {
+                            "schema_version": 1,
+                            "kind": "pose_follow_diagnostics",
+                            "profile": profile.name,
+                            **diagnostics,
+                        },
+                    )
+                    print(
+                        f"wrote partial pose follow diagnostics: {args.output}"
+                    )
+                raise SafetyError(str(error)) from error
+        ready_check = (
+            None
+            if diagnostic_profile is None
+            else check_ready(
+                state,
+                tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+            )
+        )
+        try:
+            # 드래그 중 들어오는 마커 변경을 구독한다.
+            adapter.watch_marker()
+
+            # 사용자가 아직 드래그하지 않았어도 시작 정렬을 할 수 있도록
+            # RViz가 현재 보관 중인 파란 마커 위치를 한 번 직접 읽는다.
+            startup_marker_target = adapter.read_marker_pose()
+            print(
+                f"following {group.tip_link} at {1.0 / period:g} Hz for "
+                f"{args.seconds:g} s, gravity "
+                + (
+                    "off"
+                    if args.gravity is None
+                    else f"scale {_scale_label(_scale_vector(args.gravity, group), None)}"
+                )
+            )
+            print(
+                "startup alignment: do not drag until the actual TCP "
+                "reaches the RViz marker"
+            )
+            if diagnostic_spec is not None:
+                print(
+                    f"diagnostic profile {diagnostic_spec['kind']}: "
+                    f"{diagnostic_spec['repetitions']} round trip(s), "
+                    f"{diagnostic_spec['duration_sec']:.1f} s after startup alignment"
+                )
+                print(
+                    "  deterministic target only; live marker updates are "
+                    "ignored after alignment"
+                )
+            # MoveIt service calls block, so a second node belongs exclusively to
+            # the IK worker while this adapter keeps servicing feedback and commands.
+            with RosAdapter(
+                profile,
+                args.group,
+                execute=False,
+                node_name="robot_control_pose_follow_ik",
+            ) as ik_adapter:
+                joint_ranges = np.array(
+                    [joint.upper - joint.lower for joint in _joint_limits(profile, group)]
+                )
+                median_range = float(np.median(joint_ranges))
+                joint_weights = (median_range / joint_ranges) ** 2
+                worker = LatestIkWorker(
+                    lambda pose, seed: ik_adapter.solve_ik(
+                        pose, seed, timeout_sec=IK_CANDIDATE_SOLVE_TIMEOUT_SEC
+                    ),
+                    max_target_jump_rad=MAX_SAFE_IK_TARGET_JUMP_RAD,
+                    max_continuity_attempts=IK_CONTINUITY_MAX_ATTEMPTS,
+                    max_batch_latency_sec=IK_CANDIDATE_BATCH_LATENCY_SEC,
+                    joint_weights=joint_weights,
+                    continuous_joints=np.zeros(len(group.joints), dtype=bool),
+                )
+                try:
+                    diagnostics = _follow_loop(
+                        adapter,
+                        chain,
+                        gate,
+                        group,
+                        state,
+                        period,
+                        args,
+                        worker,
+                        startup_marker_target,
+                        diagnostic_profile,
+                        ready_check,
+                        joint_weights,
+                        run_started,
+                        gravity_metadata,
+                        reacquisition_metadata,
+                    )
+                finally:
+                    worker.close()
+        except Exception as error:
+            if (
+                gravity_metadata["activated"]
+                and not gravity_metadata["cleanup"]["attempted"]
+            ):
+                try:
+                    _zero_follow_gravity(
+                        adapter,
+                        len(group.joints),
+                        period,
+                        run_started,
+                        gravity_metadata,
+                    )
+                except Exception as cleanup_error:
+                    gravity_metadata["cleanup"]["error"] = str(
+                        cleanup_error
+                    )
+            if diagnostic_profile is not None:
+                diagnostics = _handoff_partial_diagnostics(
+                    profile,
+                    group,
+                    diagnostic_spec,
+                    state,
+                    error,
+                    gravity_metadata,
+                    reacquisition_metadata,
+                )
+                if args.output is not None:
+                    _write_json_atomic(
+                        args.output,
+                        {
+                            "schema_version": 1,
+                            "kind": "pose_follow_diagnostics",
+                            "profile": profile.name,
+                            **diagnostics,
+                        },
+                    )
+                    print(
+                        "wrote partial pose follow diagnostics: "
+                        f"{args.output}"
+                    )
+            if diagnostic_profile is not None:
+                raise SafetyError(str(error)) from error
+            raise
     refusal = diagnostics["result"].get("refusal")
     if args.output is not None:
         _write_json_atomic(
@@ -2396,8 +2774,31 @@ def _follow_loop(
     diagnostic_profile=None,
     ready_check=None,
     ik_joint_weights=None,
+    run_started=None,
+    gravity_metadata=None,
+    reacquisition_metadata=None,
 ) -> dict:
     from .ros_adapter import Pose
+    if run_started is None:
+        run_started = time.monotonic()
+    if gravity_metadata is None:
+        gravity_metadata = {
+            "enabled": args.gravity is not None,
+            "scale": None,
+            "activated": args.gravity is not None,
+            "activation_elapsed_sec": None,
+            "samples": 0,
+            "last_torque_nm": None,
+            "controllers": None,
+            "cleanup": {
+                "attempted": False,
+                "started_elapsed_sec": None,
+                "completed_elapsed_sec": None,
+                "zero_published": False,
+                "error": None,
+            },
+        }
+    reacquisition_metadata = reacquisition_metadata or None
 
     scales = None if args.gravity is None else _scale_vector(args.gravity, group)
     if scales is not None and not np.any(scales):
@@ -2412,6 +2813,8 @@ def _follow_loop(
     diagnostic_started_at = None
     diagnostic_sample = None
     diagnostic_origin_orientation = None
+    diagnostic_started_elapsed_sec = None
+    diagnostic_position_publish_count = 0
 
     # 마지막으로 IK에 제출한 위치와 방향을 각각 저장한다.
     # 마커 변화가 충분히 클 때만 새 IK를 요청하기 위해 사용한다.
@@ -2538,6 +2941,7 @@ def _follow_loop(
 
     state_wait_total = 0.0
     started = time.monotonic()
+    startup_alignment_started_elapsed_sec = float(started - run_started)
     last_cycle = started
     deadline = started + args.seconds
     termination = "completed"
@@ -2575,9 +2979,12 @@ def _follow_loop(
             state_wait_total += time.monotonic() - wait_started
             cycles += 1
             if scales is not None:
-                adapter.send_effort(
-                    gate.authorize_effort(chain.gravity_torque(state) * scales)
+                torque = gate.authorize_effort(
+                    chain.gravity_torque(state) * scales
                 )
+                adapter.send_effort(torque)
+                gravity_metadata["samples"] += 1
+                gravity_metadata["last_torque_nm"] = torque.tolist()
             if target is not None:
                                 # 현재 실제 관절각으로 실제 TCP 위치를 계산한다.
                 # 실제 관절각으로 현재 TCP의 전체 자세를 계산한다.
@@ -2650,9 +3057,7 @@ def _follow_loop(
                         # 따라서 이후 최종 목표도 파란 마커의 절대 위치와 같다.
                         marker_origin = marker_position.copy()
                         tcp_origin = marker_position.copy()
-                        startup_alignment_completed_elapsed_sec = (
-                            startup_settle_elapsed
-                        )
+                        startup_alignment_completed_elapsed_sec = float(cycle - run_started)
                         diagnostic_origin_orientation = marker_orientation
 
                         # 정렬 완료 지점에서 IK 목표를 한 번 새로 계산한다.
@@ -2660,6 +3065,9 @@ def _follow_loop(
                         last_submitted_orientation = None
                         if diagnostic_profile is not None:
                             diagnostic_started_at = cycle
+                            diagnostic_started_elapsed_sec = float(
+                                cycle - run_started
+                            )
                             print(
                                 "startup alignment complete; deterministic "
                                 "profile started; keep the RViz marker at "
@@ -3357,6 +3765,8 @@ def _follow_loop(
                     }
                 )
 
+                if diagnostic_sample is not None:
+                    diagnostic_position_publish_count += 1
                 adapter.stream_positions(command)
 
                 samples += 1
@@ -3389,6 +3799,33 @@ def _follow_loop(
                 "joint_delta_rad": None,
                 "triggered_joints": [],
             }
+    except Exception as error:
+        if diagnostic_profile is None:
+            raise
+        termination = "exception"
+        refusal = {
+            "reason": (
+                "startup_alignment_failed"
+                if diagnostic_started_at is None
+                else "diagnostic_exception"
+            ),
+            "message": str(error),
+            "refused_sequence": None,
+            "profile_phase": (
+                "startup_alignment"
+                if diagnostic_sample is None
+                else diagnostic_sample.phase
+            ),
+            "attempts": 0,
+            "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+            "reference_sequence": (
+                None
+                if last_accepted_ik_sequence is None
+                else int(last_accepted_ik_sequence)
+            ),
+            "joint_delta_rad": None,
+            "triggered_joints": [],
+        }
     except KeyboardInterrupt:
         termination = "interrupted"
         print("\ninterrupted")
@@ -3397,7 +3834,32 @@ def _follow_loop(
         # last approved command, which may still lead the measured joints by
         # max_lead, so the arm can settle slightly after gravity effort is zeroed.
         if scales is not None:
-            adapter.send_effort(np.zeros(len(group.joints)))
+            try:
+                _zero_follow_gravity(
+                    adapter,
+                    len(group.joints),
+                    period,
+                    run_started,
+                    gravity_metadata,
+                )
+            except Exception as error:
+                termination = "exception"
+                if refusal is None:
+                    refusal = {
+                        "reason": "gravity_cleanup_failed",
+                        "message": str(error),
+                        "refused_sequence": None,
+                        "profile_phase": (
+                            "startup_alignment"
+                            if diagnostic_sample is None
+                            else diagnostic_sample.phase
+                        ),
+                        "attempts": 0,
+                        "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                        "reference_sequence": None,
+                        "joint_delta_rad": None,
+                        "triggered_joints": [],
+                    }
         elapsed_total = max(time.monotonic() - started, 1e-12)
         status = ik_worker.snapshot()
         print(f"followed {samples} samples; the arm holds its last commanded pose")
@@ -3761,18 +4223,34 @@ def _follow_loop(
             "ready_posture": (
                 None
                 if diagnostic_profile is None
-                else ready_metadata(ready_check)
+                else ready_metadata(
+                    ready_check,
+                    tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+                )
             ),
         },
         "result": {
             "termination": termination,
+            "termination_reason": None if refusal is None else refusal["message"],
             "is_partial": refusal is not None,
             "refusal": refusal,
             "ready_posture": (
                 None
                 if diagnostic_profile is None
-                else ready_metadata(ready_check)
+                else ready_metadata(
+                    ready_check,
+                    tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+                )
             ),
+            "gravity_compensation": gravity_metadata,
+            "ready_reacquisition": reacquisition_metadata,
+            "diagnostic_execution": {
+                "started": diagnostic_started_at is not None,
+                "started_elapsed_sec": diagnostic_started_elapsed_sec,
+                "position_publish_count": int(
+                    diagnostic_position_publish_count
+                ),
+            },
             "duration_sec": float(elapsed_total),
             "cycles": int(cycles),
             "samples": int(samples),
@@ -3802,6 +4280,8 @@ def _follow_loop(
                 "events": ik_timing_events,
             },
             "startup_alignment": {
+                "started": True,
+                "started_elapsed_sec": startup_alignment_started_elapsed_sec,
                 "completed": (
                     startup_alignment_completed_elapsed_sec is not None
                 ),

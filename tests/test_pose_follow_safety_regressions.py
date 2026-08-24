@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -85,6 +86,7 @@ class ReplayArm:
     """Read an initial pose and return a controlled IK branch offset."""
 
     def __init__(self, initial_joints, ik_offset=None):
+        self.efforts = []
         self.joints = np.asarray(initial_joints, dtype=float).copy()
         self.ik_offset = np.zeros(7) if ik_offset is None else np.asarray(
             ik_offset, dtype=float
@@ -102,6 +104,15 @@ class ReplayArm:
 
     def watch_marker(self):
         return None
+
+    def require_position_effort_controllers_active(self, timeout_sec=None):
+        return (
+            SimpleNamespace(name="right_joint_trajectory_controller"),
+            SimpleNamespace(name="right_forward_effort_controller"),
+        )
+
+    def send_effort(self, effort):
+        self.efforts.append(np.asarray(effort, dtype=float).copy())
 
     def read_marker_pose(self, timeout_sec=None):
         return self.target
@@ -265,18 +276,30 @@ def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
     assert "r_aj_5=-0.7480 rad" in output
 
 
-def test_recovered_incident_pose_is_refused_by_ready_check_before_ik(
-    monkeypatch, capsys
+def test_recovered_incident_pose_is_reacquired_before_ik(
+    monkeypatch, tmp_path
 ):
     arm = ReplayArm(INCIDENT_INITIAL_JOINTS_RAD)
     install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "incident-reacquired.json"
 
-    assert main(diagnostic_args("--execute")) == 3
+    assert (
+        main(
+            diagnostic_args(
+                "--output",
+                str(output),
+                "--execute",
+            )
+        )
+        == 3
+    )
+    assert arm.streamed
     assert arm.ik_requests == []
-    assert arm.streamed == []
-    output = capsys.readouterr().out
-    assert READY_POSTURE_NAME in output
-    assert "run `robotctl pose ready" in output
+    result = json.loads(output.read_text())["result"]
+    assert result["ready_reacquisition"]["required"]
+    assert result["ready_reacquisition"]["completed"]
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
 
 
 def test_ik_target_jump_at_exact_hard_boundary_is_refused(monkeypatch, capsys):
@@ -370,3 +393,240 @@ def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
     terminal = capsys.readouterr().out
     assert "wrote partial pose follow diagnostics" in terminal
     assert "IK target jump refused before publish after 4" in terminal
+
+
+def _install_fast_reacquisition(monkeypatch):
+    monkeypatch.setattr("robot_control.cli._ready_sleep", lambda _seconds: None)
+    monkeypatch.setattr("robot_control.cli.READY_SETTLE_WINDOW_SEC", 0.0)
+    monkeypatch.setattr("robot_control.cli.READY_SETTLE_TIMEOUT_SEC", 0.03)
+
+
+class HandoffReplayArm(ReplayArm):
+    def __init__(self, initial_joints, *, track_positions=True):
+        super().__init__(initial_joints)
+        self.track_positions = track_positions
+        self.events = []
+
+    def require_position_effort_controllers_active(self, timeout_sec=None):
+        self.events.append("controllers_checked")
+        return super().require_position_effort_controllers_active(timeout_sec)
+
+    def send_effort(self, effort):
+        self.events.append("effort")
+        super().send_effort(effort)
+
+    def stream_positions(self, positions):
+        self.events.append("position")
+        command = np.asarray(positions, dtype=float).copy()
+        self.streamed.append(command)
+        if self.track_positions:
+            self.joints = command
+
+    def read_marker_pose(self, timeout_sec=None):
+        return pose_from_joints(self.chain, self.joints)
+
+    def latest_marker_target(self):
+        return pose_from_joints(self.chain, self.joints)
+
+
+def test_sagged_start_keeps_gravity_on_through_reacquisition_alignment_and_profile(
+    monkeypatch, tmp_path
+):
+    sagged = np.array(
+        [-0.0887, 0.1055, 0.0013, 0.4801, -0.0261, -0.0380, -0.0345]
+    )
+    arm = HandoffReplayArm(sagged)
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "handoff.json"
+
+    assert (
+        main(
+            diagnostic_args(
+                "--output",
+                str(output),
+                "--execute",
+            )
+        )
+        == 0
+    )
+
+    payload = json.loads(output.read_text())
+    result = payload["result"]
+    gravity = result["gravity_compensation"]
+    reacquisition = result["ready_reacquisition"]
+    alignment = result["startup_alignment"]
+    diagnostic = result["diagnostic_execution"]
+
+    assert gravity["activated"]
+    assert gravity["scale"] == [1.0] * 7
+    assert gravity["activation_elapsed_sec"] <= reacquisition["started_elapsed_sec"]
+    assert reacquisition["required"]
+    assert reacquisition["completed"]
+    assert reacquisition["max_abs_final_error_rad"] <= 0.05
+    assert reacquisition["motion_samples"] >= 1
+    assert alignment["completed"]
+    assert diagnostic["started"]
+    assert diagnostic["position_publish_count"] > 0
+    assert (
+        reacquisition["completed_elapsed_sec"]
+        <= alignment["started_elapsed_sec"]
+        <= alignment["completed_elapsed_sec"]
+        <= diagnostic["started_elapsed_sec"]
+    )
+    cleanup = gravity["cleanup"]
+    assert cleanup["zero_published"]
+    assert cleanup["started_elapsed_sec"] >= diagnostic["started_elapsed_sec"]
+    assert arm.events.index("effort") < arm.events.index("position")
+    assert len(arm.efforts) > 3
+    for zero in arm.efforts[-3:]:
+        np.testing.assert_allclose(zero, np.zeros(7))
+
+
+def test_reacquisition_failure_holds_safely_writes_partial_and_never_starts_profile(
+    monkeypatch, tmp_path
+):
+    arm = HandoffReplayArm(
+        [-0.0887, 0.1055, 0.0013, 0.4801, -0.0261, -0.0380, -0.0345],
+        track_positions=False,
+    )
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "reacquisition-failed.json"
+
+    assert (
+        main(
+            diagnostic_args(
+                "--output",
+                str(output),
+                "--execute",
+            )
+        )
+        == 3
+    )
+
+    payload = json.loads(output.read_text())
+    result = payload["result"]
+    reacquisition = result["ready_reacquisition"]
+    assert result["termination"] == "ready_reacquisition_failed"
+    assert result["is_partial"]
+    assert result["ik"]["submitted"] == 0
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert not result["startup_alignment"]["started"]
+    assert reacquisition["safe_hold"]["attempted"]
+    assert reacquisition["safe_hold"]["applied"]
+    assert result["gravity_compensation"]["cleanup"]["zero_published"]
+    assert arm.ik_requests == []
+
+
+def test_startup_alignment_failure_keeps_profile_publish_zero_and_writes_partial(
+    monkeypatch, tmp_path
+):
+    arm = HandoffReplayArm(READY_TARGET_RAD)
+    arm.target = pose_from_joints(arm.chain, READY_TARGET_RAD)
+    arm.target = type(arm.target)(
+        (arm.target.position[0] + 1.0, *arm.target.position[1:]),
+        arm.target.orientation,
+        arm.target.frame_id,
+    )
+    arm.read_marker_pose = lambda timeout_sec=None: arm.target
+    arm.latest_marker_target = lambda: arm.target
+    install_replay(monkeypatch, arm)
+    output = tmp_path / "alignment-failed.json"
+
+    assert (
+        main(
+            diagnostic_args(
+                "--output",
+                str(output),
+                "--execute",
+            )
+        )
+        == 3
+    )
+
+    result = json.loads(output.read_text())["result"]
+    assert result["termination"] == "exception"
+    assert result["refusal"]["reason"] == "startup_alignment_failed"
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert not result["diagnostic_execution"]["started"]
+    assert result["gravity_compensation"]["cleanup"]["zero_published"]
+
+def test_deterministic_follow_rejects_unvalidated_gravity_scale_before_ros(
+    monkeypatch, capsys
+):
+    from robot_control import ros_adapter
+
+    monkeypatch.setattr(
+        ros_adapter,
+        "RosAdapter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid scale opened ROS")
+        ),
+    )
+
+    assert main(diagnostic_args("--gravity", "0.9", "--execute")) == 2
+    assert "requires the validated gravity scale 1.0" in capsys.readouterr().out
+
+
+def test_controller_activation_failure_writes_zero_profile_partial(
+    monkeypatch, tmp_path
+):
+    arm = HandoffReplayArm(READY_TARGET_RAD)
+    arm.require_position_effort_controllers_active = lambda timeout_sec=None: (
+        (_ for _ in ()).throw(RuntimeError("effort controller unavailable"))
+    )
+    install_replay(monkeypatch, arm)
+    output = tmp_path / "controller-failed.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+    result = json.loads(output.read_text())["result"]
+    assert result["termination"] == "gravity_activation_failed"
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert not result["gravity_compensation"]["activated"]
+    assert not result["gravity_compensation"]["cleanup"]["attempted"]
+    assert arm.streamed == []
+
+
+def test_reacquisition_exception_safe_holds_before_cleanup(
+    monkeypatch, tmp_path
+):
+    arm = HandoffReplayArm(
+        [-0.0887, 0.1055, 0.0013, 0.4801, -0.0261, -0.0380, -0.0345]
+    )
+    install_replay(monkeypatch, arm)
+    monkeypatch.setattr(
+        "robot_control.cli._minimum_jerk_trajectory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("trajectory generation failed")
+        ),
+    )
+    output = tmp_path / "reacquisition-exception.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+    result = json.loads(output.read_text())["result"]
+    reacquisition = result["ready_reacquisition"]
+    assert result["termination"] == "ready_reacquisition_failed"
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert reacquisition["safe_hold"]["attempted"]
+    assert reacquisition["safe_hold"]["applied"]
+    assert result["gravity_compensation"]["cleanup"]["zero_published"]
+    assert arm.ik_requests == []
+
+
+def test_marker_setup_exception_cleans_gravity_and_writes_zero_profile_partial(
+    monkeypatch, tmp_path
+):
+    arm = HandoffReplayArm(READY_TARGET_RAD)
+    arm.read_marker_pose = lambda timeout_sec=None: (
+        (_ for _ in ()).throw(RuntimeError("marker service unavailable"))
+    )
+    install_replay(monkeypatch, arm)
+    output = tmp_path / "marker-failed.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+    result = json.loads(output.read_text())["result"]
+    assert result["termination"] == "startup_alignment_failed"
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert result["gravity_compensation"]["cleanup"]["zero_published"]
+    assert arm.ik_requests == []

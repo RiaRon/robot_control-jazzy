@@ -373,6 +373,12 @@ class StiffArm:
 
     def __exit__(self, *_exception):
         return None
+    def require_position_effort_controllers_active(self, timeout_sec=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(name="position"), SimpleNamespace(name="effort")
+
+
 
     def read_robot_description(self):
         return "<robot name='stub'/>"  # unused: the chain is injected

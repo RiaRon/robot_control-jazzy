@@ -17,3 +17,7 @@ Ready 도달 비교는 `read_ready_json.m`과 `analyze_ready_comparison.m`을 �
 target/reference/feedback, 관절별 오차와 gravity 여부·scale·torque를 정규화하고,
 같은 posture+gravity 조합별 CSV/JSON/MAT/PNG 비교 번들을 생성합니다. 생성물과
 원시 pose JSON은 Git에 포함하지 않습니다.
+
+Cleanup 경계 분석은 `analyze_ready_cleanup_drift.m`을 사용합니다. ready 완료
+JSON의 cleanup 직전 feedback 오차와 이후 pose JSON의 gravity-zero drift를
+분리해 CSV/JSON/MAT/PNG/PDF 번들을 만들며 ROS publisher는 열지 않습니다.

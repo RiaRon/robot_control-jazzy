@@ -111,6 +111,7 @@ class RecordingBackend:
         self._marker = marker
         self.ik_requests = []
         self.fk_requests = []
+        self.validity_requests = []
         self.marker_requests = []
         self.trajectories = []
         self.streamed = []
@@ -171,6 +172,10 @@ class RecordingBackend:
         self.ik_requests.append((group, link, pose, dict(seed)))
         return self._ik
 
+    def check_state_validity(self, group, seed, timeout_sec):
+        self.validity_requests.append((group, dict(seed)))
+        return True, ()
+
     def controller_states(self, timeout_sec):
         return dict(self.controllers)
 
@@ -214,6 +219,10 @@ def test_adapter_reads_without_execute_but_refuses_to_send(profile):
     np.testing.assert_allclose(adapter.read_state(), [0.1, 0.2])
     adapter.read_pose()
     adapter.solve_ik(Pose((0.1, 0.2, 0.3), NEUTRAL), seed=np.array([0.0, 0.0]))
+    assert adapter.check_state_validity([0.25, 0.5]) == (True, ())
+    assert backend.validity_requests == [
+        ("arm_group", {"arm_1": 0.25, "arm_2": -0.5})
+    ]
 
     with pytest.raises(SafetyError, match="--execute"):
         adapter.send_trajectory([np.array([0.1, 0.2])], period_sec=0.5)

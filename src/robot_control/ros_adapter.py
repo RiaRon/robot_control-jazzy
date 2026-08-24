@@ -473,6 +473,21 @@ class RosAdapter:
         except InterfaceError as error:
             raise IkFailed(f"IK solution does not cover the group: {error}") from error
 
+    def check_state_validity(
+        self,
+        joints: Sequence[float],
+        timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Check a canonical planning-group state in MoveIt's fake scene."""
+        self._require_planning_group()
+        source = self.interface.group_command_to_source(self.group.name, joints)
+        valid, contacts = self._backend.check_state_validity(
+            self.group.moveit_group,
+            source,
+            timeout_sec,
+        )
+        return bool(valid), tuple(contacts)
+
     def send_trajectory(
         self, points: Sequence[Sequence[float]], period_sec: float
     ) -> None:
@@ -534,6 +549,7 @@ REQUIRED_INTERFACES = (
     "controller_manager_msgs/srv/ListControllers",
     "geometry_msgs/msg/Pose",
     "moveit_msgs/srv/GetPositionIK",
+    "moveit_msgs/srv/GetStateValidity",
     "sensor_msgs/msg/JointState",
     "trajectory_msgs/msg/JointTrajectory",
     "visualization_msgs/srv/GetInteractiveMarkers",
@@ -588,7 +604,7 @@ class _RclpyBackend:
             from geometry_msgs.msg import PoseStamped, Quaternion, Point
             from control_msgs.msg import JointTrajectoryControllerState
             from controller_manager_msgs.srv import ListControllers
-            from moveit_msgs.srv import GetPositionFK, GetPositionIK
+            from moveit_msgs.srv import GetPositionFK, GetPositionIK, GetStateValidity
             from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy
             from sensor_msgs.msg import JointState
             from std_msgs.msg import Float64MultiArray, Header, String
@@ -620,6 +636,7 @@ class _RclpyBackend:
         self._PoseMsg, self._PoseStamped = PoseMsg, PoseStamped
         self._Quaternion, self._Point = Quaternion, Point
         self._GetPositionFK, self._GetPositionIK = GetPositionFK, GetPositionIK
+        self._GetStateValidity = GetStateValidity
         self._GetInteractiveMarkers = GetInteractiveMarkers
         self._MarkerFeedback = InteractiveMarkerFeedback
         self._ControllerState = JointTrajectoryControllerState
@@ -656,6 +673,7 @@ class _RclpyBackend:
         self._recorded: list[tuple[int, dict[str, float]]] | None = None
         self._fk_client = None
         self._ik_client = None
+        self._state_validity_client = None
         self._marker_client = None
         self._controller_client = None
         self._effort_publishers: dict[str, Any] = {}
@@ -791,6 +809,32 @@ class _RclpyBackend:
             zip(response.solution.joint_state.name, response.solution.joint_state.position)
         )
         return (response.error_code.val, solution)
+
+    def check_state_validity(
+        self,
+        group: str,
+        seed: Mapping[str, float],
+        timeout_sec: float,
+    ) -> tuple[bool, tuple[str, ...]]:
+        if self._state_validity_client is None:
+            self._state_validity_client = self._node.create_client(
+                self._GetStateValidity, "/check_state_validity"
+            )
+        request = self._GetStateValidity.Request()
+        request.group_name = group
+        request.robot_state.joint_state = self._joint_state(seed, "world")
+        request.robot_state.is_diff = True
+        response = self._call(
+            self._state_validity_client,
+            request,
+            timeout_sec,
+            "/check_state_validity",
+        )
+        contacts = tuple(
+            f"{contact.contact_body_1}<->{contact.contact_body_2}"
+            for contact in response.contacts
+        )
+        return bool(response.valid), contacts
 
     def robot_description(self, timeout_sec: float) -> str:
         # Published transient-local, so a late subscriber still receives it.

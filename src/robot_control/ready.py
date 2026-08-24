@@ -23,6 +23,13 @@ READY_POSTURES = {
 # more than three times that settled error while still small against the 0.30
 # rad continuity boundary and the v2 posture's 0.375 rad limit margin.
 READY_TOLERANCE_RAD = 0.02
+# Keep the pose-ready acceptance criterion above unchanged. Deterministic
+# follow has a separate handoff criterion because gravity-compensated hardware
+# feedback can remain just outside 0.02 rad even while the controller reference
+# is exactly A-prime. The 2026-08-24 run's pre-cleanup worst error was
+# 0.047051 rad; the 0.05 rad follow-only bound is validated around A-prime in
+# docs/pose-follow-ready-handoff-2026-08-24.md.
+FOLLOW_REACQUISITION_TOLERANCE_RAD = 0.05
 READY_SPEED_RAD_S = 0.10
 READY_ACCELERATION_RAD_S2 = 0.10
 READY_SETTLE_TIMEOUT_SEC = 5.0
@@ -72,12 +79,13 @@ def ready_metadata(
     *,
     name: str = READY_POSTURE_NAME,
     target: Sequence[float] | None = None,
+    tolerance_rad: float = READY_TOLERANCE_RAD,
 ) -> dict:
     selected = ready_target(name) if target is None else np.asarray(target, dtype=float)
     return {
         "name": name,
         "target_rad": selected.tolist(),
-        "tolerance_rad": READY_TOLERANCE_RAD,
+        "tolerance_rad": float(tolerance_rad),
         "actual_start_rad": None if check is None else check.actual.tolist(),
         "start_error_rad": None if check is None else check.error.tolist(),
         "passed": None if check is None else check.passed,
