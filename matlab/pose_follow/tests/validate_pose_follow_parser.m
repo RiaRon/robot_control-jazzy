@@ -10,7 +10,11 @@ addpath(toolDir);
 legacy = read_pose_follow_json(legacyJson, 'legacy-real');
 current = read_pose_follow_json(currentJson, 'current-fake');
 assert(legacy.schema_variant == "legacy-2026-08-18");
-assert(current.schema_variant == "extended");
+assert(any(current.schema_variant == ["extended", "measured-handoff-v2"]));
+if current.schema_version >= 2
+    assert(current.schema_variant == "measured-handoff-v2");
+    assert(any(current.phase == "convergence-gate"));
+end
 assert(all(isfinite(legacy.position_error_signed_projection_m(:, [1, 3:6])), ...
     'all'), 'Legacy signed projections were not reconstructed.');
 for phase = ["ramp", "hold", "return", "origin-hold"]
@@ -37,10 +41,20 @@ analysis = analyze_pose_follow( ...
 assert(numel(analysis.experiments) == numel(files));
 
 required = [ ...
-    "summary.csv"; "analysis_summary.json"; "analysis.mat"; ...
+    "summary.csv"; "joint_summary.csv"; ...
+    "analysis_summary.json"; "analysis.mat"; ...
     "tcp_error_timeseries.png"; "error_layers.png"; ...
     "joint_tracking.png"; "j1_j4_j7_detail.png"; ...
     "ik_events.png"; "phase_comparison.png"; "research_report.pdf"];
+for figureIndex = 1:12
+    stem = sprintf('%02d_', figureIndex);
+    matches = dir(fullfile(outputDir, string(stem) + "*"));
+    matchedNames = string({matches.name});
+    for extension = [".png", ".pdf", ".svg", ".fig"]
+        assert(any(endsWith(matchedNames, extension)), ...
+            'Missing %s observability figure %s.', stem, extension);
+    end
+end
 for index = 1:numel(required)
     assert(isfile(fullfile(outputDir, required(index))), ...
         'Missing bundle file %s.', required(index));

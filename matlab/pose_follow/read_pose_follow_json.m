@@ -46,6 +46,9 @@ layerNames = [ ...
     "command_to_measured"];
 
 timeSec = nan(sampleCount, 1);
+timestampSec = nan(sampleCount, 1);
+globalSampleIndex = nan(sampleCount, 1);
+stage = strings(sampleCount, 1);
 ikSequence = nan(sampleCount, 1);
 continuityCost = nan(sampleCount, 1);
 rawPhase = strings(sampleCount, 1);
@@ -55,10 +58,35 @@ orientationErrorRad = nan(sampleCount, numel(layerNames));
 ikTargetRad = nan(sampleCount, jointCount);
 commandRad = nan(sampleCount, jointCount);
 measuredRad = nan(sampleCount, jointCount);
+nextCommandRad = nan(sampleCount, jointCount);
+commandVelocityRadS = nan(sampleCount, jointCount);
+measuredVelocityRadS = nan(sampleCount, jointCount);
+poseNames = {'live_marker', 'accepted_marker', 'ik_target', 'command', 'measured'};
+tcpPositions = struct();
+tcpOrientations = struct();
+for poseIndex = 1:numel(poseNames)
+    tcpPositions.(poseNames{poseIndex}) = nan(sampleCount, 3);
+    tcpOrientations.(poseNames{poseIndex}) = nan(sampleCount, 4);
+end
+gravityTorqueNm = nan(sampleCount, jointCount);
+cartesianSpeedLimited = false(sampleCount, 1);
+cartesianAngularSpeedLimited = false(sampleCount, 1);
+jointVelocityLimited = false(sampleCount, 1);
+leadLimited = false(sampleCount, 1);
+positionLimited = false(sampleCount, 1);
 
 for sampleIndex = 1:sampleCount
     sample = trace(sampleIndex);
     timeSec(sampleIndex) = scalarField(sample, 'elapsed_sec');
+    timestampSec(sampleIndex) = scalarField(sample, 'timestamp_sec');
+    if ~isfinite(timestampSec(sampleIndex))
+        timestampSec(sampleIndex) = timeSec(sampleIndex);
+    end
+    globalSampleIndex(sampleIndex) = scalarField(sample, 'sample_index');
+    if ~isfinite(globalSampleIndex(sampleIndex))
+        globalSampleIndex(sampleIndex) = sampleIndex - 1;
+    end
+    stage(sampleIndex) = string(fieldOr(sample, 'stage', "unlabeled"));
     ikSequence(sampleIndex) = scalarField(sample, 'ik_sequence');
     continuityCost(sampleIndex) = scalarField(sample, 'ik_continuity_cost');
 
@@ -67,7 +95,7 @@ for sampleIndex = 1:sampleCount
             isfield(sample.diagnostic_profile, 'phase')
         rawPhase(sampleIndex) = string(sample.diagnostic_profile.phase);
     else
-        rawPhase(sampleIndex) = "unlabeled";
+        rawPhase(sampleIndex) = stagePhase(stage(sampleIndex));
     end
 
     for layerIndex = 1:numel(layerNames)
@@ -87,6 +115,29 @@ for sampleIndex = 1:sampleCount
         sample, jointCount, 'joint_positions_rad', 'command');
     measuredRad(sampleIndex, :) = nestedVector( ...
         sample, jointCount, 'joint_positions_rad', 'measured');
+    nextCommandRad(sampleIndex, :) = nestedVector( ...
+        sample, jointCount, 'joint_positions_rad', 'next_command');
+    commandVelocityRadS(sampleIndex, :) = nestedVector( ...
+        sample, jointCount, 'joint_velocity_rad_s', 'command');
+    measuredVelocityRadS(sampleIndex, :) = nestedVector( ...
+        sample, jointCount, 'joint_velocity_rad_s', 'measured');
+    for poseIndex = 1:numel(poseNames)
+        poseName = poseNames{poseIndex};
+        tcpPositions.(poseName)(sampleIndex, :) = nestedVector( ...
+            sample, 3, 'tcp_positions_m', poseName);
+        tcpOrientations.(poseName)(sampleIndex, :) = nestedVector( ...
+            sample, 4, 'tcp_orientations_xyzw', poseName);
+    end
+    gravityTorqueNm(sampleIndex, :) = nestedVector( ...
+        sample, jointCount, 'control_state', 'gravity_torque_nm');
+    cartesianSpeedLimited(sampleIndex) = nestedLogical( ...
+        sample, 'limits', 'cartesian_speed');
+    cartesianAngularSpeedLimited(sampleIndex) = nestedLogical( ...
+        sample, 'limits', 'cartesian_angular_speed');
+    jointVelocityLimited(sampleIndex) = jointLimitActive( ...
+        sample, 'velocity');
+    leadLimited(sampleIndex) = jointLimitActive(sample, 'lead');
+    positionLimited(sampleIndex) = jointLimitActive(sample, 'position');
 
     % Legacy real traces do not store signed projections.  Reconstruct the
     % exact quantities from their five TCP positions using the same vector
@@ -94,6 +145,19 @@ for sampleIndex = 1:sampleCount
     if any(~isfinite(signedProjectionM(sampleIndex, :)))
         signedProjectionM(sampleIndex, :) = reconstructProjections( ...
             sample, layerNames, signedProjectionM(sampleIndex, :));
+    end
+end
+
+if sampleCount > 1
+    for jointIndex = 1:jointCount
+        if all(~isfinite(commandVelocityRadS(:, jointIndex)))
+            commandVelocityRadS(:, jointIndex) = gradient( ...
+                commandRad(:, jointIndex), timeSec);
+        end
+        if all(~isfinite(measuredVelocityRadS(:, jointIndex)))
+            measuredVelocityRadS(:, jointIndex) = gradient( ...
+                measuredRad(:, jointIndex), timeSec);
+        end
     end
 end
 
@@ -109,7 +173,9 @@ hasExtendedTrace = sampleCount > 0 && ( ...
 hasEventTiming = isfield(raw.result, 'ik') && ...
     isfield(raw.result.ik, 'events');
 hasJumpEvents = isfield(raw.result, 'ik_target_jumps');
-if hasExtendedTrace || hasEventTiming || hasJumpEvents
+if schemaVersion >= 2
+    schemaVariant = "measured-handoff-v2";
+elseif hasExtendedTrace || hasEventTiming || hasJumpEvents
     schemaVariant = "extended";
 else
     schemaVariant = "legacy-2026-08-18";
@@ -129,6 +195,9 @@ run.profile = string(fieldOr(raw, 'profile', ""));
 run.joint_names = jointNames;
 run.layer_names = layerNames;
 run.time_sec = timeSec;
+run.timestamp_sec = timestampSec;
+run.sample_index = globalSampleIndex;
+run.stage = stage;
 run.raw_phase = rawPhase;
 run.phase = phase;
 run.ik_sequence = ikSequence;
@@ -139,7 +208,23 @@ run.orientation_error_rad = orientationErrorRad;
 run.joint_positions_rad = struct( ...
     'ik_target', ikTargetRad, ...
     'command', commandRad, ...
+    'next_command', nextCommandRad, ...
     'measured', measuredRad);
+run.joint_velocity_rad_s = struct( ...
+    'command', commandVelocityRadS, 'measured', measuredVelocityRadS);
+run.tcp_positions_m = tcpPositions;
+run.tcp_orientations_xyzw = tcpOrientations;
+run.gravity_torque_nm = gravityTorqueNm;
+run.limits = struct( ...
+    'cartesian_speed', cartesianSpeedLimited, ...
+    'cartesian_angular_speed', cartesianAngularSpeedLimited, ...
+    'joint_velocity', jointVelocityLimited, ...
+    'lead', leadLimited, 'position', positionLimited, ...
+    'joint_acceleration_available', false);
+run.timeline = fieldOr(raw.result, 'timeline', struct());
+run.handoff_sync = fieldOr(raw.result, 'handoff_sync', struct());
+run.convergence_gate = fieldOr(raw.result, 'convergence_gate', struct());
+run.statistics_by_window = fieldOr(raw.result, 'statistics_by_window', struct());
 run.ik = ik;
 run.ik_target_jumps = jumps;
 run.termination = string(fieldOr(raw.result, 'termination', "unknown"));
@@ -197,6 +282,42 @@ end
 candidate = container.(fieldName);
 if isnumeric(candidate) && isscalar(candidate) && ~isempty(candidate)
     value = double(candidate);
+end
+end
+
+
+function value = nestedLogical(parent, containerName, fieldName)
+value = false;
+if ~isstruct(parent) || ~isfield(parent, containerName)
+    return;
+end
+container = parent.(containerName);
+if isstruct(container) && isfield(container, fieldName)
+    candidate = container.(fieldName);
+    if (islogical(candidate) || isnumeric(candidate)) && isscalar(candidate)
+        value = logical(candidate);
+    end
+end
+end
+
+
+function active = jointLimitActive(sample, limiterName)
+active = false;
+if ~isstruct(sample) || ~isfield(sample, 'limits') || ...
+        ~isstruct(sample.limits) || ~isfield(sample.limits, 'joint') || ...
+        ~isstruct(sample.limits.joint) || ...
+        ~isfield(sample.limits.joint, limiterName)
+    return;
+end
+value = sample.limits.joint.(limiterName);
+if iscell(value)
+    active = ~isempty(value);
+elseif isstring(value) || ischar(value)
+    active = strlength(string(value)) > 0;
+elseif isnumeric(value) || islogical(value)
+    active = any(value(:));
+elseif isstruct(value)
+    active = ~isempty(fieldnames(value));
 end
 end
 
@@ -274,6 +395,22 @@ end
 end
 
 
+function phase = stagePhase(stage)
+stage = string(stage);
+if stage == "startup_alignment"
+    phase = "startup-alignment";
+elseif stage == "convergence_gate"
+    phase = "convergence-gate";
+elseif stage == "handoff_sync" || stage == "ready_reacquisition"
+    phase = "handoff";
+elseif startsWith(stage, "profile_")
+    phase = erase(stage, "profile_");
+else
+    phase = "unlabeled";
+end
+end
+
+
 function ik = normalizeIk(result, jointNames)
 ikRaw = fieldOr(result, 'ik', struct());
 ik = struct();
@@ -332,7 +469,7 @@ for index = 1:numel(eventsRaw)
         scalarField(event, 'request_to_complete_sec');
     events(index).request_to_accepted_sec = ...
         scalarField(event, 'request_to_accepted_sec');
-    events(index).phase = "unassigned";
+    events(index).phase = string(fieldOr(event, 'profile_phase', "unassigned"));
 end
 ik.events = events;
 ik.event_timing_available = true;

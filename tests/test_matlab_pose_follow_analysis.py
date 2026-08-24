@@ -14,6 +14,7 @@ def test_parser_uses_matlab_jsondecode_fileread_and_supports_both_variants():
     assert "jsondecode(fileread(filePath))" in parser
     assert '"legacy-2026-08-18"' in parser
     assert '"extended"' in parser
+    assert '"measured-handoff-v2"' in parser
     assert "reconstructProjections" in parser
     assert "canonicalPhase" in parser
     assert "normalizeRefusal" in parser
@@ -25,6 +26,7 @@ def test_analyzer_declares_the_complete_bundle_without_robot_dependencies():
     analyzer = (MATLAB / "analyze_pose_follow.m").read_text()
     required = {
         "summary.csv",
+        "joint_summary.csv",
         "analysis_summary.json",
         "analysis.mat",
         "tcp_error_timeseries.png",
@@ -40,6 +42,13 @@ def test_analyzer_declares_the_complete_bundle_without_robot_dependencies():
     assert "refusal_reason" in analyzer
     assert "refused_sequence" in analyzer
     assert "continuity_rejected" in analyzer
+    assert "profile-only" in analyzer
+    assert "Resolution', 300" in analyzer
+    figures = (MATLAB / "makeObservabilityFigures.m").read_text()
+    for index in range(1, 13):
+        assert f'"{index:02d}_' in figures
+    for evidence in ("quaternionAngle", "abs(dotProduct)", "acos"):
+        assert evidence in figures
     assert "import robot_control" not in analyzer.lower()
     assert "system('ros2" not in analyzer.lower()
 
@@ -54,6 +63,8 @@ def test_documentation_names_versions_phases_and_git_data_policy():
         "hold",
         "return",
         "origin-hold",
+        "profile-only",
+        "schema v2",
         "원시 pose-follow JSON",
         "output 폴더",
         "ChatGPT Work",

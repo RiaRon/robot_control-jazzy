@@ -2,7 +2,7 @@ function analysis = analyze_pose_follow(inputFiles, outputDir, varargin)
 %ANALYZE_POSE_FOLLOW Build a reproducible pose-follow analysis bundle.
 %   ANALYSIS = ANALYZE_POSE_FOLLOW(INPUTFILES, OUTPUTDIR) reads one or more
 %   pose-follow JSON files without modifying them and writes:
-%     summary.csv, analysis_summary.json, analysis.mat,
+%     summary.csv, joint_summary.csv, analysis_summary.json, analysis.mat,
 %     tcp_error_timeseries.png, error_layers.png, joint_tracking.png,
 %     j1_j4_j7_detail.png, ik_events.png, phase_comparison.png, and
 %     research_report.pdf.
@@ -66,15 +66,33 @@ end
 runs = vertcat(runsCell{:});
 
 [summaryTable, experimentSummaries] = buildSummary(runs);
+jointSummaryTable = buildJointSummary(runs);
 style = analysisStyle(numel(runs));
 generatedUtc = string(datetime('now', 'TimeZone', 'UTC', ...
     'Format', 'yyyy-MM-dd''T''HH:mm:ssXXX'));
 
+observabilityNames = [ ...
+    "01_tcp_translation_layers"; ...
+    "02_tcp_orientation_layers"; ...
+    "03_translation_error_decomposition"; ...
+    "04_orientation_error_decomposition"; ...
+    "05_joint_positions"; "06_joint_velocities"; ...
+    "07_handoff_convergence_zoom"; ...
+    "08_hold_command_lead_overshoot"; ...
+    "09_limiter_activation"; "10_phase_statistics"; ...
+    "11_joint_max_error_heatmap"; "12_profile_comparison"];
+observabilityFiles = strings(0, 1);
+for baseName = observabilityNames.'
+    observabilityFiles = [observabilityFiles; ... %#ok<AGROW>
+        baseName + ".png"; baseName + ".pdf"; ...
+        baseName + ".svg"; baseName + ".fig"];
+end
 bundleNames = [ ...
-    "summary.csv"; "analysis_summary.json"; "analysis.mat"; ...
+    "summary.csv"; "joint_summary.csv"; ...
+    "analysis_summary.json"; "analysis.mat"; ...
     "tcp_error_timeseries.png"; "error_layers.png"; ...
     "joint_tracking.png"; "j1_j4_j7_detail.png"; ...
-    "ik_events.png"; "phase_comparison.png"];
+    "ik_events.png"; "phase_comparison.png"; observabilityFiles];
 if parser.Results.CreatePDF
     bundleNames(end + 1) = "research_report.pdf";
 end
@@ -85,16 +103,18 @@ analysis.generator = "analyze_pose_follow";
 analysis.generator_contract = "jazzy-8a700c0-pose-follow";
 analysis.output_directory = string(java.io.File(outputDir).getCanonicalPath());
 analysis.bundle_files = bundleNames;
-analysis.phase_order = ["all"; "ramp"; "hold"; "return"; ...
-    "origin-hold"; "unlabeled"];
+analysis.phase_order = ["all"; "handoff"; "startup-alignment"; ...
+    "convergence-gate"; "profile-only"; "ramp"; "hold"; ...
+    "return"; "origin-hold"; "unlabeled"];
 analysis.layer_names = runs(1).layer_names;
 analysis.style = style;
 analysis.experiments = runs;
 analysis.experiment_summaries = experimentSummaries;
 
 writetable(summaryTable, fullfile(outputDir, 'summary.csv'));
+writetable(jointSummaryTable, fullfile(outputDir, 'joint_summary.csv'));
 save(fullfile(outputDir, 'analysis.mat'), ...
-    'analysis', 'summaryTable', '-v7');
+    'analysis', 'summaryTable', 'jointSummaryTable', '-v7');
 
 jsonSummary = struct();
 jsonSummary.generated_utc = generatedUtc;
@@ -107,6 +127,7 @@ jsonSummary.bundle_files = bundleNames;
 jsonSummary.style = style;
 jsonSummary.experiments = experimentSummaries;
 jsonSummary.summary_rows = table2struct(summaryTable);
+jsonSummary.joint_summary_rows = table2struct(jointSummaryTable);
 writeJson(fullfile(outputDir, 'analysis_summary.json'), jsonSummary);
 
 visible = char(string(parser.Results.Visible));
@@ -134,12 +155,31 @@ figureFiles = { ...
     'ik_events.png', 'phase_comparison.png'};
 for index = 1:numel(figures)
     exportgraphics(figures{index}, fullfile(outputDir, figureFiles{index}), ...
-        'Resolution', 180);
+        'Resolution', 300);
     if parser.Results.CreatePDF
         exportgraphics(figures{index}, pdfPath, ...
             'ContentType', 'vector', 'Append', true);
     end
     close(figures{index});
+end
+
+[observabilityFigures, generatedNames] = makeObservabilityFigures( ...
+    runs, summaryTable, jointSummaryTable, style, visible);
+assert(isequal(string(generatedNames(:)), observabilityNames));
+for index = 1:numel(observabilityFigures)
+    basePath = fullfile(outputDir, char(observabilityNames(index)));
+    exportgraphics(observabilityFigures{index}, [basePath '.png'], ...
+        'Resolution', 300);
+    exportgraphics(observabilityFigures{index}, [basePath '.pdf'], ...
+        'ContentType', 'vector');
+    exportgraphics(observabilityFigures{index}, [basePath '.svg'], ...
+        'ContentType', 'vector');
+    savefig(observabilityFigures{index}, [basePath '.fig']);
+    if parser.Results.CreatePDF
+        exportgraphics(observabilityFigures{index}, pdfPath, ...
+            'ContentType', 'vector', 'Append', true);
+    end
+    close(observabilityFigures{index});
 end
 
 fprintf('Pose-follow analysis bundle: %s\n', analysis.output_directory);
@@ -183,9 +223,13 @@ style.layer_colors_rgb = [ ...
     0.9290, 0.6940, 0.1250; ...
     0.4940, 0.1840, 0.5560; ...
     0.4660, 0.6740, 0.1880];
-style.phase_names = ["ramp"; "hold"; "return"; ...
+style.phase_names = ["handoff"; "startup-alignment"; ...
+    "convergence-gate"; "ramp"; "hold"; "return"; ...
     "origin-hold"; "unlabeled"];
 style.phase_colors_rgb = [ ...
+    0.76, 0.86, 0.96; ...
+    0.92, 0.84, 0.70; ...
+    0.98, 0.90, 0.58; ...
     0.65, 0.82, 0.98; ...
     0.70, 0.90, 0.70; ...
     0.98, 0.80, 0.58; ...
@@ -202,8 +246,9 @@ end
 
 
 function [summaryTable, experimentSummaries] = buildSummary(runs)
-phaseOrder = ["all"; "ramp"; "hold"; "return"; ...
-    "origin-hold"; "unlabeled"];
+phaseOrder = ["all"; "handoff"; "startup-alignment"; ...
+    "convergence-gate"; "profile-only"; "ramp"; "hold"; ...
+    "return"; "origin-hold"; "unlabeled"];
 rowTemplate = summaryRowTemplate();
 rows = repmat(rowTemplate, numel(runs) * numel(phaseOrder), 1);
 experimentTemplate = struct( ...
@@ -241,8 +286,24 @@ row = struct( ...
     'phase', "", 'samples', 0, 'phase_duration_sec', nan, ...
     'tcp_position_mean_mm', nan, 'tcp_position_rms_mm', nan, ...
     'tcp_position_max_mm', nan, 'tcp_position_p95_mm', nan, ...
+    'tcp_position_final_mm', nan, ...
+    'tcp_accepted_position_mean_mm', nan, ...
+    'tcp_accepted_position_rms_mm', nan, ...
+    'tcp_accepted_position_max_mm', nan, ...
+    'tcp_accepted_position_p95_mm', nan, ...
+    'tcp_accepted_position_final_mm', nan, ...
     'tcp_orientation_mean_deg', nan, 'tcp_orientation_rms_deg', nan, ...
     'tcp_orientation_max_deg', nan, 'tcp_orientation_p95_deg', nan, ...
+    'tcp_orientation_final_deg', nan, ...
+    'tcp_accepted_orientation_mean_deg', nan, ...
+    'tcp_accepted_orientation_rms_deg', nan, ...
+    'tcp_accepted_orientation_max_deg', nan, ...
+    'tcp_accepted_orientation_p95_deg', nan, ...
+    'tcp_accepted_orientation_final_deg', nan, ...
+    'cartesian_linear_limiter_samples', 0, ...
+    'cartesian_linear_limiter_ratio', nan, ...
+    'cartesian_angular_limiter_samples', 0, ...
+    'cartesian_angular_limiter_ratio', nan, ...
     'ik_submitted', nan, 'ik_accepted', nan, 'ik_failed', nan, ...
     'ik_superseded', nan, 'ik_acceptance_rate', nan, ...
     'ik_continuity_rejected', nan, 'ik_continuity_retries', nan, ...
@@ -279,6 +340,8 @@ end
 row.phase = phaseName;
 if phaseName == "all"
     mask = true(size(run.time_sec));
+elseif phaseName == "profile-only"
+    mask = ismember(run.phase, ["ramp", "hold", "return", "origin-hold"]);
 else
     mask = run.phase == phaseName;
 end
@@ -294,14 +357,39 @@ positionMm = run.position_error_m(mask, 1) * 1000;
 orientationDeg = rad2deg(run.orientation_error_rad(mask, 1));
 positionStats = distributionStats(positionMm);
 orientationStats = distributionStats(orientationDeg);
+acceptedPositionStats = distributionStats( ...
+    run.position_error_m(mask, 2) * 1000);
+acceptedOrientationStats = distributionStats( ...
+    rad2deg(run.orientation_error_rad(mask, 2)));
 row.tcp_position_mean_mm = positionStats.mean;
 row.tcp_position_rms_mm = positionStats.rms;
 row.tcp_position_max_mm = positionStats.max;
 row.tcp_position_p95_mm = positionStats.p95;
+row.tcp_position_final_mm = positionStats.final;
+row.tcp_accepted_position_mean_mm = acceptedPositionStats.mean;
+row.tcp_accepted_position_rms_mm = acceptedPositionStats.rms;
+row.tcp_accepted_position_max_mm = acceptedPositionStats.max;
+row.tcp_accepted_position_p95_mm = acceptedPositionStats.p95;
+row.tcp_accepted_position_final_mm = acceptedPositionStats.final;
 row.tcp_orientation_mean_deg = orientationStats.mean;
 row.tcp_orientation_rms_deg = orientationStats.rms;
 row.tcp_orientation_max_deg = orientationStats.max;
 row.tcp_orientation_p95_deg = orientationStats.p95;
+row.tcp_orientation_final_deg = orientationStats.final;
+row.tcp_accepted_orientation_mean_deg = acceptedOrientationStats.mean;
+row.tcp_accepted_orientation_rms_deg = acceptedOrientationStats.rms;
+row.tcp_accepted_orientation_max_deg = acceptedOrientationStats.max;
+row.tcp_accepted_orientation_p95_deg = acceptedOrientationStats.p95;
+row.tcp_accepted_orientation_final_deg = acceptedOrientationStats.final;
+row.cartesian_linear_limiter_samples = sum(run.limits.cartesian_speed(mask));
+row.cartesian_angular_limiter_samples = ...
+    sum(run.limits.cartesian_angular_speed(mask));
+if row.samples > 0
+    row.cartesian_linear_limiter_ratio = ...
+        row.cartesian_linear_limiter_samples / row.samples;
+    row.cartesian_angular_limiter_ratio = ...
+        row.cartesian_angular_limiter_samples / row.samples;
+end
 
 [eventMask, hasTiming] = ikEventMask(run, phaseName);
 if phaseName == "all" || hasTiming
@@ -352,6 +440,81 @@ if run.ik_target_jumps.available
         row.ik_target_jump_events = sum(jumpPhases == phaseName);
     end
 end
+end
+
+
+function tableOut = buildJointSummary(runs)
+phaseOrder = ["all"; "handoff"; "startup-alignment"; ...
+    "convergence-gate"; "profile-only"; "ramp"; "hold"; ...
+    "return"; "origin-hold"; "unlabeled"];
+layers = ["ik_to_measured"; "command_to_measured"];
+template = struct('experiment', "", 'source_file', "", 'profile', "", ...
+    'phase', "", 'joint', "", 'error_layer', "", 'samples', 0, ...
+    'mean_abs_rad', nan, 'rms_rad', nan, 'max_abs_rad', nan, ...
+    'final_rad', nan, 'overshoot_rad', nan, 'settling_time_sec', nan);
+rows = repmat(template, numel(runs) * numel(phaseOrder) * ...
+    numel(runs(1).joint_names) * numel(layers), 1);
+rowIndex = 0;
+for runIndex = 1:numel(runs)
+    run = runs(runIndex);
+    for phaseName = phaseOrder.'
+        if phaseName == "all"
+            mask = true(size(run.time_sec));
+        elseif phaseName == "profile-only"
+            mask = ismember(run.phase, ...
+                ["ramp", "hold", "return", "origin-hold"]);
+        else
+            mask = run.phase == phaseName;
+        end
+        for layer = layers.'
+            if layer == "ik_to_measured"
+                errorRad = run.joint_positions_rad.ik_target - ...
+                    run.joint_positions_rad.measured;
+            else
+                errorRad = run.joint_positions_rad.command - ...
+                    run.joint_positions_rad.measured;
+            end
+            for jointIndex = 1:numel(run.joint_names)
+                rowIndex = rowIndex + 1;
+                row = template;
+                row.experiment = run.experiment;
+                row.source_file = run.source_file;
+                row.profile = run.profile;
+                row.phase = phaseName;
+                row.joint = run.joint_names(jointIndex);
+                row.error_layer = layer;
+                values = errorRad(mask, jointIndex);
+                times = run.time_sec(mask);
+                finite = isfinite(values) & isfinite(times);
+                values = values(finite);
+                times = times(finite);
+                row.samples = numel(values);
+                if ~isempty(values)
+                    absolute = abs(values);
+                    row.mean_abs_rad = mean(absolute);
+                    row.rms_rad = sqrt(mean(values .^ 2));
+                    row.max_abs_rad = max(absolute);
+                    row.final_rad = values(end);
+                    firstSign = sign(values(1));
+                    if firstSign == 0
+                        row.overshoot_rad = 0;
+                    else
+                        row.overshoot_rad = max(max(-firstSign .* values, 0));
+                    end
+                    tolerance = 0.01;
+                    for sampleIndex = 1:numel(values)
+                        if all(absolute(sampleIndex:end) <= tolerance)
+                            row.settling_time_sec = times(sampleIndex) - times(1);
+                            break;
+                        end
+                    end
+                end
+                rows(rowIndex) = row;
+            end
+        end
+    end
+end
+tableOut = struct2table(rows(1:rowIndex));
 end
 
 
@@ -412,7 +575,8 @@ end
 function stats = distributionStats(values)
 values = double(values(:));
 values = values(isfinite(values));
-stats = struct('mean', nan, 'rms', nan, 'max', nan, 'p95', nan);
+stats = struct('mean', nan, 'rms', nan, 'max', nan, 'p95', nan, ...
+    'final', nan);
 if isempty(values)
     return;
 end
@@ -420,6 +584,7 @@ stats.mean = mean(values);
 stats.rms = sqrt(mean(values .^ 2));
 stats.max = max(values);
 stats.p95 = percentileLinear(values, 0.95);
+stats.final = values(end);
 end
 
 
@@ -451,7 +616,12 @@ times = nan(numel(run.ik.events), 1);
 for index = 1:numel(run.ik.events)
     times(index) = run.ik.events(index).requested_sec;
 end
-mask = phaseAtTimes(run, times) == phaseName;
+eventPhases = phaseAtTimes(run, times);
+if phaseName == "profile-only"
+    mask = ismember(eventPhases, ["ramp", "hold", "return", "origin-hold"]);
+else
+    mask = eventPhases == phaseName;
+end
 end
 
 
