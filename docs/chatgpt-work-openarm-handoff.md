@@ -462,6 +462,9 @@ robotctl pose ready --group openarm_right_arm \
 
 ## 최신 인계 — measured-state handoff observability (2026-08-25)
 
+Pull Request: [#23](https://github.com/RiaRon/robot_control-jazzy/pull/23)
+(`jazzy` 대상, 자동 merge하지 않음)
+
 이 절은 위 실물 절차보다 최신이다. 이번 개발은 개발 PC의 저장 데이터, Python,
 MATLAB R2026a와 ROS `mock_components/GenericSystem`만 사용했다. 실물 OpenArm,
 CAN, 실물 `--execute`, controller 전환은 수행하지 않았다.
