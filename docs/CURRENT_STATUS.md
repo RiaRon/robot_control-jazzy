@@ -1,6 +1,6 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-20 (Asia/Seoul)
+마지막 갱신: 2026-08-24 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
@@ -379,3 +379,25 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 - MATLAB R2026a cleanup-drift 6-file bundle 검증 성공.
 - 실물 OpenArm/CAN은 사용하지 않았다. 상세:
   [`docs/pose-follow-ready-handoff-2026-08-24.md`](pose-follow-ready-handoff-2026-08-24.md).
+
+## 최신 분석 — 2026-08-24 실물 ready-handoff translation
+
+- `/home/cbj4/openarm_follow_data/2026-08-24-handoff` 원본은 읽기만 했고 로봇
+  명령, 제어 코드 수정, PR은 수행하지 않았다.
+- MATLAB R2026a로 `ready reacquisition`, `startup alignment`, `ramp`, `hold`,
+  `return`, `origin hold`를 분리했다. 재획득 451 motion sample은 메타데이터만
+  있고 100 Hz TCP trace에는 없으므로 그 구간 통계는 결측으로 보존했다.
+- 기록된 48.466 mm worst는 startup alignment였고 실제 translation profile
+  991 samples의 accepted-marker 위치 오차는 mean/RMS/max/p95
+  `11.676/11.974/16.842/16.558 mm`였다.
+- 1,180 speed-limit sample 중 startup/ramp/hold/return/origin hold는 각각
+  `377/147/256/198/202`였다. profile 전체는 `803/991 (81.0%)`였다.
+- J7 `0.104893 rad`는 startup alignment 첫 accepted IK target과 아직 움직이지
+  않은 command/measured의 초기 차이였다. accepted target 간 J7 최대 변화는
+  `0.008299 rad`라서 branch jump 증거는 아니다.
+- startup alignment를 포함하면 profile-only 대비 mean/RMS/max/p95가 각각
+  `19.1/50.8/187.8/160.7%` 증가했다. ready reacquisition의 TCP 기여는 trace
+  부재로 정량화하지 않았다.
+- MATLAB CSV/JSON/MAT/PNG/PDF와 재현 스크립트는 Git 제외 경로
+  `artifacts/2026-08-24-handoff-matlab-analysis/`에 있다. 다음 단계는 사용자가
+  원인별 해결 후보를 선택한 뒤 별도 코드 작업 범위를 정하는 것이다.
