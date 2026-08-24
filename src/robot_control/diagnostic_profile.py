@@ -31,6 +31,9 @@ class ProfileSample:
     phase: str
     repetition: int
     complete: bool
+    translation_progress: float
+    rotation_progress: float
+    canonical_phase: str
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,7 @@ class DiagnosticProfile:
     def stages(self) -> tuple[_Stage, ...]:
         stages: list[_Stage] = []
         for repetition in range(1, self.repetitions + 1):
-            if self.kind in ("translation", "translation-rotation"):
+            if self.kind == "translation":
                 ramp = self.distance_m / self.linear_speed_m_s
                 stages += [
                     _Stage("translation_ramp_out", repetition, ramp, 0.0, 1.0),
@@ -94,7 +97,7 @@ class DiagnosticProfile:
                     _Stage("translation_ramp_back", repetition, ramp, 1.0, 0.0),
                     _Stage("origin_hold", repetition, self.hold_sec),
                 ]
-            if self.kind in ("rotation", "translation-rotation"):
+            if self.kind == "rotation":
                 ramp = self.angle_rad / self.angular_speed_rad_s
                 stages += [
                     _Stage(
@@ -107,6 +110,29 @@ class DiagnosticProfile:
                     ),
                     _Stage(
                         "rotation_ramp_back", repetition, ramp,
+                        rotation_start=1.0, rotation_end=0.0,
+                    ),
+                    _Stage("origin_hold", repetition, self.hold_sec),
+                ]
+            if self.kind == "translation-rotation":
+                ramp = max(
+                    self.distance_m / self.linear_speed_m_s,
+                    self.angle_rad / self.angular_speed_rad_s,
+                )
+                stages += [
+                    _Stage(
+                        "combined_ramp_out", repetition, ramp,
+                        translation_start=0.0, translation_end=1.0,
+                        rotation_start=0.0, rotation_end=1.0,
+                    ),
+                    _Stage(
+                        "combined_hold", repetition, self.hold_sec,
+                        translation_start=1.0, translation_end=1.0,
+                        rotation_start=1.0, rotation_end=1.0,
+                    ),
+                    _Stage(
+                        "combined_ramp_back", repetition, ramp,
+                        translation_start=1.0, translation_end=0.0,
                         rotation_start=1.0, rotation_end=0.0,
                     ),
                     _Stage("origin_hold", repetition, self.hold_sec),
@@ -160,6 +186,9 @@ class DiagnosticProfile:
             tuple(float(value) for value in position),
             tuple(float(value) for value in rotated),
             phase, repetition, complete,
+            float(translation_fraction),
+            float(rotation_fraction),
+            _canonical_phase(phase),
         )
 
     def as_dict(self) -> dict:
@@ -196,3 +225,15 @@ def _quaternion_multiply(left: np.ndarray, right: np.ndarray) -> np.ndarray:
         lw * rz + lx * ry - ly * rx + lz * rw,
         lw * rw - lx * rx - ly * ry - lz * rz,
     ), dtype=float)
+
+
+def _canonical_phase(phase: str) -> str:
+    if phase.endswith("_ramp_out"):
+        return "ramp"
+    if phase.endswith("_ramp_back"):
+        return "return"
+    if phase.endswith("_hold") and phase != "origin_hold":
+        return "hold"
+    if phase == "origin_hold":
+        return "origin_hold"
+    return phase

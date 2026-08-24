@@ -72,6 +72,14 @@ from .hdgp_export import (
 )
 from .interface import CanonicalInterface
 from .ik_follow import LatestIkWorker
+from .follow_observability import (
+    ConvergenceObservation,
+    HandoffConvergenceGate,
+    build_timeline,
+    canonical_profile_phase,
+    stage_for_sample,
+    window_statistics,
+)
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .ready import (
     FOLLOW_REACQUISITION_TOLERANCE_RAD,
@@ -1193,7 +1201,9 @@ def _ready_control_cycle(adapter, chain, gate, reference, period_sec):
     return np.asarray(feedback, dtype=float), np.asarray(torque, dtype=float)
 
 
-def _ready_stream_points(adapter, chain, gate, points, period_sec, telemetry):
+def _ready_stream_points(
+    adapter, chain, gate, points, period_sec, telemetry, sample_hook=None
+):
     for point in points:
         feedback, torque = _ready_control_cycle(
             adapter, chain, gate, point, period_sec
@@ -1206,6 +1216,8 @@ def _ready_stream_points(adapter, chain, gate, points, period_sec, telemetry):
         )
         telemetry["gravity_samples"] += 1
         telemetry["position_samples"] += 1
+        if sample_hook is not None:
+            sample_hook(feedback, point, torque)
 
 
 def _wait_for_ready_settle(
@@ -1217,6 +1229,7 @@ def _wait_for_ready_settle(
     telemetry,
     *,
     tolerance_rad=READY_TOLERANCE_RAD,
+    sample_hook=None,
 ):
     started = time.monotonic()
     stable_since = None
@@ -1235,6 +1248,8 @@ def _wait_for_ready_settle(
         )
         telemetry["gravity_samples"] += 1
         telemetry["position_samples"] += 1
+        if sample_hook is not None:
+            sample_hook(feedback, target, torque)
         last = check_ready(
             feedback, target=target, tolerance_rad=tolerance_rad
         )
@@ -1290,6 +1305,7 @@ def _follow_reacquire_ready(
     run_started,
     gravity_metadata,
     reacquisition_metadata,
+    stage_trace=None,
 ):
     """Reacquire A-prime while continuously publishing gravity effort."""
     initial = check_ready(
@@ -1341,6 +1357,24 @@ def _follow_reacquire_ready(
         "gravity_samples": 0,
         "position_samples": 0,
     }
+    def record_sample(feedback, reference, torque):
+        if stage_trace is None:
+            return
+        stage_trace.append(
+            {
+                "sample_index": len(stage_trace),
+                "timestamp_sec": float(time.monotonic() - run_started),
+                "stage": "ready_reacquisition",
+                "joint_positions_rad": {
+                    "ik_target": None,
+                    "command": [float(value) for value in reference],
+                    "next_command": [float(value) for value in reference],
+                    "measured": [float(value) for value in feedback],
+                },
+                "gravity_scale": gravity_metadata["scale"],
+                "gravity_torque_nm": [float(value) for value in torque],
+            }
+        )
     here = _start_pose(profile, group, initial.actual)
     lifted = here.copy()
     lifted[ELBOW_INDEX] = READY_TARGET_RAD[ELBOW_INDEX]
@@ -1353,7 +1387,8 @@ def _follow_reacquire_ready(
                 points, start_time_sec=0.0, period_sec=period_sec
             )
             _ready_stream_points(
-                adapter, chain, gate, points, period_sec, telemetry
+                adapter, chain, gate, points, period_sec, telemetry,
+                sample_hook=record_sample,
             )
             here = np.asarray(phase_target, dtype=float).copy()
     final, settling_sec, passed = _wait_for_ready_settle(
@@ -1364,6 +1399,7 @@ def _follow_reacquire_ready(
         period_sec,
         telemetry,
         tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+        sample_hook=record_sample,
     )
     completed = time.monotonic()
     gravity_metadata["samples"] += int(telemetry["gravity_samples"])
@@ -1419,6 +1455,65 @@ def _zero_follow_gravity(
         )
 
 
+def _follow_handoff_sync(adapter, chain, run_started, stage_trace):
+    """Reacquire measured joints/TCP and make them the sole follow anchor."""
+    from .ros_adapter import Pose
+
+    measured = np.asarray(adapter.read_state(timeout_sec=1.0), dtype=float)
+    matrix = chain.pose(measured)
+    orientation = _quaternion_from_rotation(matrix[:3, :3])
+    pose = Pose(
+        tuple(float(value) for value in matrix[:3, 3]),
+        orientation,
+        "world",
+    )
+    timestamp = float(time.monotonic() - run_started)
+    stage_trace.append(
+        {
+            "sample_index": len(stage_trace),
+            "timestamp_sec": timestamp,
+            "stage": "handoff_sync",
+            "joint_positions_rad": {
+                "ik_target": None,
+                "command": measured.tolist(),
+                "next_command": measured.tolist(),
+                "measured": measured.tolist(),
+            },
+            "tcp_positions_m": {
+                "live_marker": list(pose.position),
+                "accepted_marker": list(pose.position),
+                "ik_target": None,
+                "command": list(pose.position),
+                "measured": list(pose.position),
+            },
+            "tcp_orientations_xyzw": {
+                "live_marker": list(pose.orientation),
+                "accepted_marker": list(pose.orientation),
+                "ik_target": None,
+                "command": list(pose.orientation),
+                "measured": list(pose.orientation),
+            },
+        }
+    )
+    return measured, pose, {
+        "completed": True,
+        "elapsed_sec": timestamp,
+        "sample_index": stage_trace[-1]["sample_index"],
+        "measured_joints_rad": measured.tolist(),
+        "measured_tcp": {
+            "frame_id": "world",
+            "xyz_m": list(pose.position),
+            "quaternion_xyzw": list(pose.orientation),
+        },
+        "marker_reanchored": True,
+        "command_reanchored": True,
+        "ik_seed_reanchored": True,
+        "continuity_reference_reanchored": True,
+        "profile_origin_reanchored": True,
+        "ik_target_forced_to_measured_joints": False,
+    }
+
+
 def _handoff_partial_diagnostics(
     profile,
     group,
@@ -1427,6 +1522,8 @@ def _handoff_partial_diagnostics(
     error,
     gravity_metadata,
     reacquisition_metadata,
+    stage_trace=None,
+    handoff_metadata=None,
 ):
     check = check_ready(
         state,
@@ -1467,6 +1564,7 @@ def _handoff_partial_diagnostics(
             "diagnostic_profile": diagnostic_spec,
             "gravity_scale": gravity_metadata["scale"],
             "ready_posture": ready,
+            "handoff_convergence_gate": HandoffConvergenceGate.thresholds(),
         },
         "result": {
             "termination": reason,
@@ -1476,6 +1574,15 @@ def _handoff_partial_diagnostics(
             "ready_posture": ready,
             "gravity_compensation": gravity_metadata,
             "ready_reacquisition": reacquisition_metadata,
+            "handoff_sync": handoff_metadata,
+            "convergence_gate": {
+                "started": False,
+                "started_elapsed_sec": None,
+                "completed": False,
+                "completed_elapsed_sec": None,
+                "thresholds": HandoffConvergenceGate.thresholds(),
+                "termination_reason": None,
+            },
             "startup_alignment": {
                 "started": False,
                 "started_elapsed_sec": None,
@@ -1506,6 +1613,7 @@ def _handoff_partial_diagnostics(
             },
         },
         "trace": [],
+        "stage_trace": [] if stage_trace is None else stage_trace,
     }
 
 
@@ -2496,6 +2604,8 @@ def _pose_follow(args, profile) -> int:
         # Deterministic handoff always uses the validated right-arm scale.
         args.gravity = "1.0"
     run_started = time.monotonic()
+    stage_trace: list[dict] = []
+    handoff_metadata = None
     gravity_metadata = {
         "enabled": diagnostic_profile is not None or args.gravity is not None,
         "scale": (
@@ -2567,6 +2677,10 @@ def _pose_follow(args, profile) -> int:
                     run_started,
                     gravity_metadata,
                     reacquisition_metadata,
+                    stage_trace,
+                )
+                state, handoff_pose, handoff_metadata = _follow_handoff_sync(
+                    adapter, chain, run_started, stage_trace
                 )
             except Exception as error:
                 if (
@@ -2603,12 +2717,14 @@ def _pose_follow(args, profile) -> int:
                     error,
                     gravity_metadata,
                     reacquisition_metadata,
+                    stage_trace,
+                    handoff_metadata,
                 )
                 if args.output is not None:
                     _write_json_atomic(
                         args.output,
                         {
-                            "schema_version": 1,
+                            "schema_version": 2,
                             "kind": "pose_follow_diagnostics",
                             "profile": profile.name,
                             **diagnostics,
@@ -2632,7 +2748,11 @@ def _pose_follow(args, profile) -> int:
 
             # 사용자가 아직 드래그하지 않았어도 시작 정렬을 할 수 있도록
             # RViz가 현재 보관 중인 파란 마커 위치를 한 번 직접 읽는다.
-            startup_marker_target = adapter.read_marker_pose()
+            startup_marker_target = (
+                handoff_pose
+                if diagnostic_profile is not None
+                else adapter.read_marker_pose()
+            )
             print(
                 f"following {group.tip_link} at {1.0 / period:g} Hz for "
                 f"{args.seconds:g} s, gravity "
@@ -2696,6 +2816,9 @@ def _pose_follow(args, profile) -> int:
                         run_started,
                         gravity_metadata,
                         reacquisition_metadata,
+                        profile,
+                        handoff_metadata,
+                        stage_trace,
                     )
                 finally:
                     worker.close()
@@ -2725,12 +2848,14 @@ def _pose_follow(args, profile) -> int:
                     error,
                     gravity_metadata,
                     reacquisition_metadata,
+                    stage_trace,
+                    handoff_metadata,
                 )
                 if args.output is not None:
                     _write_json_atomic(
                         args.output,
                         {
-                            "schema_version": 1,
+                            "schema_version": 2,
                             "kind": "pose_follow_diagnostics",
                             "profile": profile.name,
                             **diagnostics,
@@ -2748,7 +2873,7 @@ def _pose_follow(args, profile) -> int:
         _write_json_atomic(
             args.output,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "kind": "pose_follow_diagnostics",
                 "profile": profile.name,
                 **diagnostics,
@@ -2777,6 +2902,9 @@ def _follow_loop(
     run_started=None,
     gravity_metadata=None,
     reacquisition_metadata=None,
+    profile=None,
+    handoff_metadata=None,
+    stage_trace=None,
 ) -> dict:
     from .ros_adapter import Pose
     if run_started is None:
@@ -2799,12 +2927,21 @@ def _follow_loop(
             },
         }
     reacquisition_metadata = reacquisition_metadata or None
+    stage_trace = [] if stage_trace is None else stage_trace
 
     scales = None if args.gravity is None else _scale_vector(args.gravity, group)
     if scales is not None and not np.any(scales):
         scales = None
 
     command = np.asarray(state, dtype=float).copy()
+    handoff_joint_reference = np.asarray(
+        (
+            handoff_metadata["measured_joints_rad"]
+            if handoff_metadata is not None
+            else state
+        ),
+        dtype=float,
+    ).copy()
 
     # 시작 정렬이 완료되었는지 판단하기 위한 위치 기준점이다.
     marker_origin = None
@@ -2815,6 +2952,26 @@ def _follow_loop(
     diagnostic_origin_orientation = None
     diagnostic_started_elapsed_sec = None
     diagnostic_position_publish_count = 0
+    convergence_gate = None
+    convergence_completed_elapsed_sec = None
+    convergence_metadata = {
+        "started": False,
+        "started_elapsed_sec": None,
+        "completed": False,
+        "completed_elapsed_sec": None,
+        "duration_sec": None,
+        "samples": 0,
+        "stable_samples": 0,
+        "last_observation": None,
+        "thresholds": HandoffConvergenceGate.thresholds(),
+        "safe_hold": {
+            "attempted": False,
+            "applied": False,
+            "reference_rad": None,
+            "error": None,
+        },
+        "termination_reason": None,
+    }
 
     # 마지막으로 IK에 제출한 위치와 방향을 각각 저장한다.
     # 마커 변화가 충분히 클 때만 새 IK를 요청하기 위해 사용한다.
@@ -2943,6 +3100,8 @@ def _follow_loop(
     started = time.monotonic()
     startup_alignment_started_elapsed_sec = float(started - run_started)
     last_cycle = started
+    previous_measured = np.asarray(state, dtype=float).copy()
+    previous_active_command = command.copy()
     deadline = started + args.seconds
     termination = "completed"
     refusal = None
@@ -2970,6 +3129,10 @@ def _follow_loop(
                     diagnostic_sample.orientation,
                     "world",
                 )
+            elif diagnostic_profile is not None:
+                # A deterministic run is anchored to the post-ready measured
+                # TCP.  A stale RViz marker must not re-enter the handoff.
+                target = startup_marker_target
             else:
                 latest_target = adapter.latest_marker_target()
                 if latest_target is not None:
@@ -2978,11 +3141,16 @@ def _follow_loop(
             state = adapter.read_state(timeout_sec=1.0)
             state_wait_total += time.monotonic() - wait_started
             cycles += 1
+            measured_delta = np.asarray(state, dtype=float) - previous_measured
+            measured_velocity = measured_delta / max(elapsed, 1e-12)
+            previous_measured = np.asarray(state, dtype=float).copy()
+            gravity_torque = None
             if scales is not None:
                 torque = gate.authorize_effort(
                     chain.gravity_torque(state) * scales
                 )
                 adapter.send_effort(torque)
+                gravity_torque = np.asarray(torque, dtype=float).copy()
                 gravity_metadata["samples"] += 1
                 gravity_metadata["last_torque_nm"] = torque.tolist()
             if target is not None:
@@ -3053,8 +3221,8 @@ def _follow_loop(
                         and startup_angle
                         <= args.orientation_tolerance
                     ):
-                        # 두 시작점을 동일한 파란 마커 위치로 저장한다.
-                        # 따라서 이후 최종 목표도 파란 마커의 절대 위치와 같다.
+                        # Deterministic handoff uses the explicitly reacquired
+                        # measured TCP, not the possibly stale RViz marker.
                         marker_origin = marker_position.copy()
                         tcp_origin = marker_position.copy()
                         startup_alignment_completed_elapsed_sec = float(cycle - run_started)
@@ -3064,14 +3232,20 @@ def _follow_loop(
                         last_submitted_position = None
                         last_submitted_orientation = None
                         if diagnostic_profile is not None:
-                            diagnostic_started_at = cycle
-                            diagnostic_started_elapsed_sec = float(
-                                cycle - run_started
+                            convergence_gate = HandoffConvergenceGate(
+                                started_sec=cycle
+                            )
+                            convergence_metadata.update(
+                                {
+                                    "started": True,
+                                    "started_elapsed_sec": float(
+                                        cycle - run_started
+                                    ),
+                                }
                             )
                             print(
-                                "startup alignment complete; deterministic "
-                                "profile started; keep the RViz marker at "
-                                "Current and do not drag it"
+                                "startup alignment complete; waiting for "
+                                "bounded handoff convergence"
                             )
                         else:
                             print(
@@ -3140,7 +3314,12 @@ def _follow_loop(
                             ik_orientation,
                             "world",
                         ),
-                        state,
+                        (
+                            handoff_joint_reference
+                            if diagnostic_profile is not None
+                            and last_accepted_ik_target is None
+                            else state
+                        ),
                     )
 
                     # 다음 IK 요청과 비교할 위치·방향 중간목표를 저장한다.
@@ -3159,7 +3338,11 @@ def _follow_loop(
                     elif diagnostic_sample is not None:
                         request_phase = diagnostic_sample.phase
                     elif diagnostic_started_at is None:
-                        request_phase = "startup_alignment"
+                        request_phase = (
+                            "startup_alignment"
+                            if marker_origin is None
+                            else "convergence_gate"
+                        )
                     else:
                         request_phase = "profile_start"
                     requested_profile_phases.append(request_phase)
@@ -3216,7 +3399,7 @@ def _follow_loop(
                 target_joints = status.target
                 if status.target_sequence != last_accepted_ik_sequence:
                     jump_reference = (
-                        state
+                        handoff_joint_reference
                         if last_accepted_ik_target is None
                         else last_accepted_ik_target
                     )
@@ -3654,8 +3837,109 @@ def _follow_loop(
                 )
                 joint_command_to_measured_last = command_to_measured.copy()
 
+                command_velocity = (
+                    active_command - previous_active_command
+                ) / max(elapsed, 1e-12)
+                previous_active_command = active_command.copy()
+                profile_phase = (
+                    None if diagnostic_sample is None
+                    else diagnostic_sample.phase
+                )
+                if diagnostic_profile is None:
+                    sample_stage = (
+                        "startup_alignment"
+                        if marker_origin is None
+                        else "manual_follow"
+                    )
+                else:
+                    sample_stage = stage_for_sample(
+                        alignment_complete=marker_origin is not None,
+                        gate_complete=(
+                            convergence_completed_elapsed_sec is not None
+                        ),
+                        profile_phase=profile_phase,
+                    )
+
+                gate_timeout_message = None
+                if (
+                    diagnostic_profile is not None
+                    and convergence_gate is not None
+                    and convergence_completed_elapsed_sec is None
+                ):
+                    observation = ConvergenceObservation(
+                        marker_position_error_m=position_errors[
+                            "live_marker_to_measured"
+                        ],
+                        marker_orientation_error_rad=orientation_errors[
+                            "live_marker_to_measured"
+                        ],
+                        ik_to_command_max_error_rad=float(
+                            np.max(target_to_command)
+                        ),
+                        command_to_measured_max_error_rad=float(
+                            np.max(command_to_measured)
+                        ),
+                        measured_sample_delta_max_rad=float(
+                            np.max(np.abs(measured_delta))
+                        ),
+                    )
+                    gate_passed, gate_timed_out = convergence_gate.update(
+                        cycle, observation
+                    )
+                    convergence_metadata.update(
+                        {
+                            "samples": convergence_gate.samples,
+                            "stable_samples": convergence_gate.stable_samples,
+                            "last_observation": observation.as_dict(),
+                        }
+                    )
+                    if gate_passed:
+                        convergence_completed_elapsed_sec = float(
+                            cycle - run_started
+                        )
+                        convergence_metadata.update(
+                            {
+                                "completed": True,
+                                "completed_elapsed_sec": (
+                                    convergence_completed_elapsed_sec
+                                ),
+                                "duration_sec": float(
+                                    cycle - convergence_gate.started_sec
+                                ),
+                            }
+                        )
+                        diagnostic_started_at = cycle
+                        diagnostic_started_elapsed_sec = float(
+                            cycle - run_started
+                        )
+                        print(
+                            "handoff convergence complete; deterministic "
+                            "profile started; keep the RViz marker at Current "
+                            "and do not drag it"
+                        )
+                    elif gate_timed_out:
+                        gate_timeout_message = (
+                            "handoff convergence did not remain within all "
+                            f"thresholds for {convergence_gate.stable_window_sec:.2f} "
+                            f"s before the {convergence_gate.timeout_sec:.1f} s timeout"
+                        )
+                        convergence_metadata.update(
+                            {
+                                "completed": False,
+                                "duration_sec": float(
+                                    cycle - convergence_gate.started_sec
+                                ),
+                                "termination_reason": gate_timeout_message,
+                            }
+                        )
+
+                global_sample_index = len(stage_trace)
+
                 trace.append(
                     {
+                        "sample_index": global_sample_index,
+                        "timestamp_sec": float(cycle - run_started),
+                        "stage": sample_stage,
                         "elapsed_sec": float(cycle - started),
                         "ik_sequence": int(status.target_sequence),
                         "ik_continuity_cost": next(
@@ -3707,10 +3991,44 @@ def _follow_loop(
                             ],
                         },
                         "position_error_m": position_errors,
+                        "translation_error_layers_m": {
+                            "live_to_accepted": position_errors[
+                                "marker_update_staleness"
+                            ],
+                            "accepted_to_ik": position_errors[
+                                "accepted_marker_to_ik_target"
+                            ],
+                            "ik_to_command": position_errors[
+                                "ik_target_to_command"
+                            ],
+                            "command_to_measured": position_errors[
+                                "command_to_measured"
+                            ],
+                            "target_to_measured": position_errors[
+                                "live_marker_to_measured"
+                            ],
+                        },
                         "position_error_signed_projection_m": (
                             signed_position_projections
                         ),
                         "orientation_error_rad": orientation_errors,
+                        "orientation_error_layers_rad": {
+                            "live_to_accepted": orientation_errors[
+                                "marker_update_staleness"
+                            ],
+                            "accepted_to_ik": orientation_errors[
+                                "accepted_marker_to_ik_target"
+                            ],
+                            "ik_to_command": orientation_errors[
+                                "ik_target_to_command"
+                            ],
+                            "command_to_measured": orientation_errors[
+                                "command_to_measured"
+                            ],
+                            "target_to_measured": orientation_errors[
+                                "live_marker_to_measured"
+                            ],
+                        },
                         "diagnostic_profile": (
                             None
                             if diagnostic_sample is None
@@ -3719,6 +4037,15 @@ def _follow_loop(
                                 "repetition": diagnostic_sample.repetition,
                                 "elapsed_sec": float(
                                     cycle - diagnostic_started_at
+                                ),
+                                "canonical_phase": (
+                                    diagnostic_sample.canonical_phase
+                                ),
+                                "translation_progress": float(
+                                    diagnostic_sample.translation_progress
+                                ),
+                                "rotation_progress": float(
+                                    diagnostic_sample.rotation_progress
                                 ),
                             }
                         ),
@@ -3750,6 +4077,14 @@ def _follow_loop(
                                 for value in command_to_measured
                             ],
                         },
+                        "joint_velocity_rad_s": {
+                            "command": [
+                                float(value) for value in command_velocity
+                            ],
+                            "measured": [
+                                float(value) for value in measured_velocity
+                            ],
+                        },
                         "limits": {
                             "cartesian_speed": linear_speed_limited,
                             "cartesian_angular_speed": (
@@ -3761,9 +4096,67 @@ def _follow_loop(
                                     gate.last_follow_limits.items()
                                 )
                             },
+                            "joint_acceleration": None,
+                        },
+                        "control_state": {
+                            "gravity_scale": gravity_metadata.get("scale"),
+                            "gravity_torque_nm": (
+                                None
+                                if gravity_torque is None
+                                else [float(value) for value in gravity_torque]
+                            ),
+                            "controller_state": (
+                                None
+                                if gravity_metadata.get("controllers") is None
+                                else gravity_metadata["controllers"].get("state")
+                            ),
+                            "effort_measurement": "unavailable",
+                            "current_measurement": "unavailable",
                         },
                     }
                 )
+
+                stage_trace.append(
+                    {
+                        "sample_index": global_sample_index,
+                        "timestamp_sec": float(cycle - run_started),
+                        "stage": sample_stage,
+                        "trace_index": len(trace) - 1,
+                    }
+                )
+
+                if gate_timeout_message is not None:
+                    if profile is not None:
+                        hold = convergence_metadata["safe_hold"]
+                        hold["attempted"] = True
+                        try:
+                            reference = _ready_safe_hold(
+                                adapter, profile, group, state
+                            )
+                            hold.update(
+                                {
+                                    "applied": True,
+                                    "reference_rad": reference.tolist(),
+                                }
+                            )
+                        except Exception as hold_error:
+                            hold["error"] = str(hold_error)
+                    refusal = {
+                        "reason": "handoff_convergence_timeout",
+                        "message": gate_timeout_message,
+                        "refused_sequence": int(status.target_sequence),
+                        "profile_phase": "convergence_gate",
+                        "attempts": 0,
+                        "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
+                        "reference_sequence": (
+                            None if last_accepted_ik_sequence is None
+                            else int(last_accepted_ik_sequence)
+                        ),
+                        "joint_delta_rad": None,
+                        "triggered_joints": [],
+                    }
+                    samples += 1
+                    raise SafetyError(gate_timeout_message)
 
                 if diagnostic_sample is not None:
                     diagnostic_position_publish_count += 1
@@ -4023,6 +4416,14 @@ def _follow_loop(
             {
                 "sequence": int(timing.sequence),
                 "outcome": timing.outcome,
+                "profile_phase": (
+                    requested_profile_phases[timing.sequence - 1]
+                    if 0 < timing.sequence <= len(requested_profile_phases)
+                    else "unknown"
+                ),
+                "requested_timestamp_sec": float(
+                    timing.requested_at_sec - run_started
+                ),
                 "requested_elapsed_sec": relative(
                     timing.requested_at_sec
                 ),
@@ -4172,6 +4573,113 @@ def _follow_loop(
             }
         )
 
+    statistics_by_window = window_statistics(
+        trace,
+        joint_tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+        stage_trace=stage_trace,
+    )
+    phase_sets = {
+        "overall_run": None,
+        "ready_reacquisition": set(),
+        "handoff_alignment": {"startup_alignment"},
+        "convergence_gate": {"convergence_gate"},
+        "profile_only": {
+            "translation_ramp_out", "translation_hold",
+            "translation_ramp_back", "rotation_ramp_out",
+            "rotation_hold", "rotation_ramp_back",
+            "combined_ramp_out", "combined_hold",
+            "combined_ramp_back", "origin_hold",
+        },
+        "ramp": {
+            "translation_ramp_out", "rotation_ramp_out",
+            "combined_ramp_out",
+        },
+        "hold": {"translation_hold", "rotation_hold", "combined_hold"},
+        "return": {
+            "translation_ramp_back", "rotation_ramp_back",
+            "combined_ramp_back",
+        },
+        "origin_hold": {"origin_hold"},
+    }
+    for window_name, phases in phase_sets.items():
+        timings = [
+            event for event in ik_timing_events
+            if phases is None or event["profile_phase"] in phases
+        ]
+        selections = [
+            event for event in ik_selection_events
+            if phases is None or event["profile_phase"] in phases
+        ]
+        latencies = [
+            event["request_to_complete_sec"] for event in timings
+            if event["request_to_complete_sec"] is not None
+        ]
+        statistics_by_window["windows"][window_name]["ik"] = {
+            "requests": len(timings),
+            "success": sum(event["outcome"] == "accepted" for event in timings),
+            "failure": sum(event["outcome"] == "failed" for event in timings),
+            "superseded": sum(
+                str(event["outcome"]).startswith("superseded")
+                for event in timings
+            ),
+            "rejected": sum(
+                event["outcome"] == "continuity_refused" for event in timings
+            ),
+            "candidate_count": sum(
+                event["candidate_count"] for event in selections
+            ),
+            "continuity_events": sum(
+                1 for event in ik_continuity_events
+                if phases is None or event["profile_phase"] in phases
+            ),
+            "latency_sec": (
+                {"mean": None, "max": None, "p95": None}
+                if not latencies
+                else {
+                    "mean": float(np.mean(latencies)),
+                    "max": float(np.max(latencies)),
+                    "p95": float(np.percentile(latencies, 95)),
+                }
+            ),
+        }
+
+    alignment_metadata = {
+        "started": True,
+        "started_elapsed_sec": startup_alignment_started_elapsed_sec,
+        "completed": startup_alignment_completed_elapsed_sec is not None,
+        "completed_elapsed_sec": (
+            None if startup_alignment_completed_elapsed_sec is None
+            else float(startup_alignment_completed_elapsed_sec)
+        ),
+    }
+    profile_samples = [
+        sample for sample in trace
+        if str(sample.get("stage", "")).startswith("profile_")
+    ]
+    diagnostic_metadata = {
+        "started": diagnostic_started_at is not None,
+        "started_elapsed_sec": diagnostic_started_elapsed_sec,
+        "completed": termination == "diagnostic_profile_completed",
+        "completed_elapsed_sec": (
+            None if not profile_samples
+            else float(profile_samples[-1]["timestamp_sec"])
+        ),
+        "position_publish_count": int(diagnostic_position_publish_count),
+    }
+    termination_elapsed_sec = float(time.monotonic() - run_started)
+    timeline = build_timeline(
+        stage_trace=stage_trace,
+        trace=trace,
+        reacquisition=reacquisition_metadata,
+        handoff_sync=handoff_metadata,
+        alignment=alignment_metadata,
+        convergence=convergence_metadata,
+        diagnostic=diagnostic_metadata,
+        cleanup=gravity_metadata["cleanup"],
+        termination=termination,
+        termination_elapsed_sec=termination_elapsed_sec,
+    )
+
     return {
         "group": group.name,
         "joint_names": list(group.joints),
@@ -4228,6 +4736,17 @@ def _follow_loop(
                     tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
                 )
             ),
+            "handoff_convergence_gate": HandoffConvergenceGate.thresholds(),
+            "instrumentation_availability": {
+                "joint_position": "recorded",
+                "joint_command_velocity": "derived_from_command_samples",
+                "joint_measured_velocity": "derived_from_measured_samples",
+                "joint_acceleration_limiter": "unavailable_not_implemented",
+                "gravity_command_torque": "recorded_when_enabled",
+                "measured_effort": "unavailable_current_interface",
+                "measured_current": "unavailable_current_interface",
+                "controller_state": "startup_snapshot_when_available",
+            },
         },
         "result": {
             "termination": termination,
@@ -4244,13 +4763,11 @@ def _follow_loop(
             ),
             "gravity_compensation": gravity_metadata,
             "ready_reacquisition": reacquisition_metadata,
-            "diagnostic_execution": {
-                "started": diagnostic_started_at is not None,
-                "started_elapsed_sec": diagnostic_started_elapsed_sec,
-                "position_publish_count": int(
-                    diagnostic_position_publish_count
-                ),
-            },
+            "handoff_sync": handoff_metadata,
+            "convergence_gate": convergence_metadata,
+            "diagnostic_execution": diagnostic_metadata,
+            "timeline": timeline,
+            "statistics_by_window": statistics_by_window,
             "duration_sec": float(elapsed_total),
             "cycles": int(cycles),
             "samples": int(samples),
@@ -4279,20 +4796,7 @@ def _follow_loop(
                 "selection_events": ik_selection_events,
                 "events": ik_timing_events,
             },
-            "startup_alignment": {
-                "started": True,
-                "started_elapsed_sec": startup_alignment_started_elapsed_sec,
-                "completed": (
-                    startup_alignment_completed_elapsed_sec is not None
-                ),
-                "completed_elapsed_sec": (
-                    None
-                    if startup_alignment_completed_elapsed_sec is None
-                    else float(
-                        startup_alignment_completed_elapsed_sec
-                    )
-                ),
-            },
+            "startup_alignment": alignment_metadata,
             "position_error_m": position_summary,
             "position_error_signed_projection_m": (
                 signed_position_summary
@@ -4336,6 +4840,7 @@ def _follow_loop(
             "per_joint": per_joint,
         },
         "trace": trace,
+        "stage_trace": stage_trace,
     }
 
 

@@ -83,6 +83,24 @@ def test_combined_profile_repeats_without_accumulating_offset():
     assert complete.complete
 
 
+def test_combined_profile_moves_translation_and_rotation_in_the_same_ramp():
+    profile = DiagnosticProfile(
+        kind="translation-rotation",
+        distance_m=0.01,
+        angle_rad=0.10,
+        linear_speed_m_s=0.01,
+        angular_speed_rad_s=0.10,
+        hold_sec=0.2,
+    )
+    halfway = profile.sample(0.5, ORIGIN_POSITION, ORIGIN_ORIENTATION)
+    assert halfway.phase == "combined_ramp_out"
+    assert halfway.canonical_phase == "ramp"
+    assert halfway.translation_progress == pytest.approx(0.5)
+    assert halfway.rotation_progress == pytest.approx(0.5)
+    assert halfway.position[0] == pytest.approx(ORIGIN_POSITION[0] + 0.005)
+    assert halfway.orientation[2] == pytest.approx(np.sin(0.025))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
