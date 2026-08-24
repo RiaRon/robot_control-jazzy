@@ -12,6 +12,8 @@
   기능을 보존하면서 2026-08-24 분석 기록도 잃지 않는 기준이라 선택했다.
 - 작업 branch는 `feature/follow-handoff-pose-observability`다. runtime commit은
   `b119ff2`, MATLAB commit은 `9fbd2e8`이다.
+- Pull Request: [#23](https://github.com/RiaRon/robot_control-jazzy/pull/23)
+  (`jazzy` 대상, 자동 merge하지 않음). 기반 문서 commit의 PR #22도 열린 상태다.
 - deterministic Follow는 A′ ready 뒤 measured joints를 다시 읽고 FK TCP,
   live/accepted marker, 내부 command, 최초 IK seed/continuity reference와 profile
   origin을 한 `handoff_sync` event에 맞춘다. IK joint target은 feedback으로
