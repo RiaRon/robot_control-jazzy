@@ -231,8 +231,8 @@ controller는 마지막 명령 위치를 유지하므로 팔은 마지막 위치
 
 safety refusal이 발생해도 `--output`을 지정했다면 이미 승인·발행된 sample까지
 원자적으로 저장한 partial JSON을 먼저 쓰고 종료 코드 3을 반환합니다. 기존
-schema v1과 `kind: pose_follow_diagnostics`를 유지하며 다음 구조화 필드가
-추가됩니다.
+legacy schema v1 parser 호환성을 유지하면서 새 실행은 schema v2와
+`kind: pose_follow_diagnostics`로 다음 구조화 필드를 추가합니다.
 
 - `result.termination: safety_refused`, `result.is_partial: true`
 - `result.refusal.reason`, `refused_sequence`, `profile_phase`
@@ -253,13 +253,25 @@ command interface를 claim하는지 확인하고, 검증된 scale 1.0 중력보�
 중력보상을 유지한 채 J4-first minimum-jerk joint trajectory로 A-prime을
 재획득합니다. `pose ready` 자체의 기준은 기존 0.020 rad 그대로입니다.
 
-재획득 성공 뒤에만 기존 TCP startup alignment를 시작하고, alignment 성공
-뒤에만 deterministic profile 위치 명령을 발행합니다. 재획득 실패는 마지막
+재획득 성공 직후 관절을 한 번 더 읽고 FK한 measured TCP로 live/accepted marker,
+내부 command, 최초 IK seed/continuity reference와 profile origin을 함께
+재동기화합니다. measured TCP 목표를 다시 IK로 풀며 IK target 관절을 measured
+관절값으로 강제하지 않습니다. 기존 0.30 rad continuity gate를 통과한 뒤에만
+진행합니다.
+
+기존 TCP startup alignment 뒤에는 marker↔measured 위치 5 mm·자세 0.035 rad,
+IK↔command와 command↔measured 관절 0.060 rad, measured sample 변화량 0.002 rad
+조건이 0.5초 연속 유지돼야 profile을 시작합니다. 5초 timeout이면 마지막 measured
+위치를 safe hold하고 profile publish 없이 partial JSON을 저장합니다. 재획득 실패는 마지막
 feedback 위치를 safe hold하고 profile publish 0건인 partial JSON을 저장합니다.
 alignment, IK continuity, position-clamp 또는 예외 거부도 partial JSON에 단계와
 termination reason을 남깁니다. 중력보상은 종료 처리 전까지 끊지 않으며 마지막에
 zero effort를 세 번 발행합니다. 수동 marker follow와 dry-run 동작은 바뀌지
 않습니다.
+
+`stage_trace`와 `result.timeline`은 ready reacquisition부터 cleanup까지 같은
+run-relative clock과 sample index를 기록합니다. 성능 비교 기본값은
+`statistics_by_window.profile_only`이고 startup peak는 별도 window에 남습니다.
 
 ## 5. 무기한 운전
 

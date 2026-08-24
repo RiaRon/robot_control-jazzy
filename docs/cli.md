@@ -653,9 +653,17 @@ outside the follow-only 0.050 rad A-prime tolerance, it reacquires
 by ready while refreshing gravity torque every control cycle. The standalone
 `pose ready` acceptance tolerance remains 0.020 rad.
 
-Only successful reacquisition proceeds to normal TCP startup alignment, and
-only successful alignment starts the diagnostic profile. Gravity stays active
-through all three phases. Termination, refusal, or exception performs the
+After successful reacquisition, follow reads measured joints again and uses
+their FK TCP as the live/accepted marker, internal command, first IK seed,
+continuity reference, and profile origin. It solves IK for that measured TCP;
+it does not force the IK joint target equal to feedback. The existing 0.30 rad
+continuity boundary still decides whether that solution is usable.
+
+Successful alignment starts a bounded convergence gate, not the profile. All
+marker-to-measured translation/orientation, IK-to-command, command-to-measured,
+and measured-sample-change bounds must remain satisfied for 0.5 s. A 5 s
+timeout preserves a measured-position safe hold, starts no profile, and writes
+partial JSON. Gravity stays active through all stages. Termination, refusal, or exception performs the
 existing three-sample zero-effort cleanup. Reacquisition failure first commands
 a measured-position safe hold, publishes no diagnostic-profile position
 sample, and writes partial JSON when `--output` is supplied.
@@ -667,10 +675,11 @@ before constructing a ROS adapter or publisher.
 
 ### Deterministic diagnostic profiles
 
-The optional diagnostic target replaces live marker updates only after normal
-startup alignment. Each motion ramps away from the startup marker, holds,
+The optional diagnostic target replaces live marker updates only after handoff
+alignment and convergence. Each motion ramps away from the measured handoff TCP, holds,
 returns on the same path, and holds at the origin. The combined profile runs
-the translation round trip followed by the rotation round trip. Repetitions do
+translation and quaternion rotation simultaneously with separately recorded
+progress. It does not linearly interpolate RPY. Repetitions do
 not accumulate position or angle.
 
 Without `--execute`, the command prints the design and publishes nothing:
@@ -827,7 +836,7 @@ positions, IK sequence and per-sample limit flags. It is intended for temporary
 experiment storage such as `/tmp/right-follow.json`; do not commit large run
 files to Git.
 
-Additive schema-v1 fields record:
+Schema v2 preserves legacy fields and additionally records:
 
 - `result.startup_alignment`: completion flag and elapsed completion time.
 - `result.ik.events`: request, solve-start, complete and accepted elapsed
@@ -839,6 +848,13 @@ Additive schema-v1 fields record:
   threshold-crossing events. These events never change control.
 - `settings.diagnostic_profile` and each trace sample's
   `diagnostic_profile`: the reproducible profile and active phase.
+- `stage_trace` and `result.timeline`: one run-relative clock from Ready
+  reacquisition through handoff, gate, each profile phase, cleanup and termination.
+- five xyz/xyzw TCP layers, J1-J7 IK/command/next-command/measured and velocities,
+  limiter flags, gravity command torque, and explicit unavailable effort/current.
+- windowed statistics for overall, Ready, handoff/alignment, convergence,
+  profile-only, ramp, hold, return and origin hold. `profile-only` is the default
+  performance comparison.
 
 ### Stopping, and what the arm does then
 

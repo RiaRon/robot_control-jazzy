@@ -35,6 +35,12 @@ target error는 `0.1199130236 rad`다. 따라서 후속 pose show의 큰 오차�
 8. ready 재획득, alignment와 profile 동안 gravity를 끊지 않는다.
 9. 정상 종료, safety refusal, 예외에서 zero effort를 세 번 발행한다.
 
+후속 measured-state 관측성 배치는 6과 7 사이에 명시적 `handoff_sync`와 bounded
+convergence gate를 추가한다. Ready 완료 뒤 관절을 다시 읽어 FK TCP, marker,
+command, IK seed/continuity reference, profile origin을 하나의 기준으로 맞춘다.
+alignment 성공만으로 profile을 시작하지 않으며 다섯 안정성 지표가 0.5초 연속
+통과해야 한다. timeout은 5초이고 profile 0건·safe hold·partial JSON으로 끝난다.
+
 재획득 실패는 마지막 measured position을 safe hold하고 profile position publish
 0건, partial JSON과 명확한 termination reason을 남긴다. startup alignment 실패,
 IK continuity refusal과 deterministic position clamp도 profile 시작 전이면 같은
