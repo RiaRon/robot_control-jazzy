@@ -358,6 +358,8 @@ rotation, kp 또는 속도 한계를 변경하지 않는다.
 ## 최신 완료 — ready–deterministic follow gravity handoff
 
 - 기준: `jazzy@e1903ce`; 브랜치: `feature/follow-gravity-ready-handoff`.
+- 구현 커밋: `627458e`; Pull Request:
+  [#20](https://github.com/RiaRon/robot_control-jazzy/pull/20).
 - deterministic `pose follow --execute`는 ready 검사 전 gravity scale 1.0을
   활성화하고 A-prime을 follow 전용 0.050 rad로 검사한다. 벗어나면 gravity를
   유지한 J4-first minimum-jerk trajectory로 재획득한 뒤 TCP alignment, profile
