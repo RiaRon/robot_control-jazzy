@@ -460,6 +460,85 @@ robotctl pose ready --group openarm_right_arm \
   --execute
 ```
 
+## 최신 인계 — measured-state handoff observability (2026-08-25)
+
+이 절은 위 실물 절차보다 최신이다. 이번 개발은 개발 PC의 저장 데이터, Python,
+MATLAB R2026a와 ROS `mock_components/GenericSystem`만 사용했다. 실물 OpenArm,
+CAN, 실물 `--execute`, controller 전환은 수행하지 않았다.
+
+새 deterministic Follow는 A′ ready 뒤 measured joints/TCP를 명시적으로 다시 읽어
+marker, command, IK seed/continuity reference와 profile origin을 재동기화한다.
+measured TCP를 목표로 IK를 다시 풀며 feedback 관절값을 IK target으로 가장하지
+않는다. 기존 closest 후보와 single-joint `0.30 rad` continuity gate는 그대로다.
+
+startup alignment 뒤 bounded convergence gate가 다음 조건을 0.5초 연속 요구한다.
+
+- marker↔measured TCP: position ≤ 5 mm, orientation ≤ 0.035 rad
+- max joint error: IK↔command ≤ 0.060 rad, command↔measured ≤ 0.060 rad
+- max measured per-sample joint change ≤ 0.002 rad
+- 전체 timeout 5초
+
+timeout이면 deterministic profile을 시작하지 않고 마지막 measured joints를 safe
+hold하며 partial schema-v2 JSON을 저장한다. trace는 Ready reacquisition부터 cleanup
+까지 공통 monotonic time/sample index와 stage를 가진다. 비교 기본 window는
+`profile-only`다. 2026-08-24의 48.466 mm startup peak를 profile 수치에 합치지 않는다.
+
+실물 시험은 이 문서 갱신만으로 승인되지 않는다. 별도 승인 후 다음 순서만
+제안한다: deploy/clean Git 확인 → output/log 경로 preflight → dry-run 무발행 확인 →
+E-stop·작업공간·controller/joint-state 확인 → translation 1회 → JSON/MATLAB 검토 →
+rotation 1회 → 검토 → combined 1회. 각 단계에서 아래면 즉시 중단하고 다음
+profile로 넘어가지 않는다.
+
+- gate timeout, IK failed/superseded/continuity refusal 또는 position clamp
+- live TCP position > 30 mm 또는 orientation > 10 deg
+- 비정상 소음·진동·발열·충돌, joint-state 중단 또는 CAN error 증가
+- output JSON/log 누락·문법 오류, Git commit 불일치
+
+수집 파일은 profile별 before pose JSON, schema-v2 follow JSON, 전체 terminal log,
+Git commit과 운영자 안전 관찰 기록이다. raw JSON/log/archive는 Git에 올리지 않는다.
+outer law, gain, gravity scale, 속도 한계는 세 profile 기준선 검토 전 변경하지 않는다.
+
+별도 실물 승인 후 사용하는 profile 인자 기준은 다음과 같다. 먼저 각 명령에서
+`--output ... --execute` 두 항목을 뺀 동일 dry-run이 `no ROS connection is opened`
+로 끝나는지 확인한다. 실제 실행은 한 번에 한 block만 수행하고 결과를 검토한다.
+
+```bash
+RUN_DIR=/home/user/openarm_follow_data/2026-08-25-handoff-v2
+mkdir -p -- "$RUN_DIR"
+test -d "$RUN_DIR" && test -w "$RUN_DIR"
+
+# 1. translation-only — 별도 승인 후에만 실행
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile translation \
+  --diagnostic-distance 0.01 --diagnostic-linear-speed 0.005 \
+  --diagnostic-hold-sec 3 \
+  --output "$RUN_DIR/right-follow-translation.json" --execute \
+  2>&1 | tee "$RUN_DIR/right-follow-translation.log"
+
+# 2. rotation-only — translation 검토 승인 후에만 실행
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile rotation \
+  --diagnostic-angle 0.0872665 --diagnostic-angular-speed 0.05 \
+  --diagnostic-hold-sec 3 \
+  --output "$RUN_DIR/right-follow-rotation.json" --execute \
+  2>&1 | tee "$RUN_DIR/right-follow-rotation.log"
+
+# 3. combined — rotation 검토 승인 후에만 실행
+robotctl pose follow --group openarm_right_arm \
+  --gravity 1.0 --seconds 20 \
+  --max-tcp-speed 0.02 --max-tcp-angular-speed 0.10 \
+  --diagnostic-profile translation-rotation \
+  --diagnostic-distance 0.01 --diagnostic-linear-speed 0.005 \
+  --diagnostic-angle 0.0872665 --diagnostic-angular-speed 0.05 \
+  --diagnostic-hold-sec 3 \
+  --output "$RUN_DIR/right-follow-combined.json" --execute \
+  2>&1 | tee "$RUN_DIR/right-follow-combined.log"
+```
+
 ## 최신 인계 — A′ v2 ready 중력보상
 \nPull Request: [#19](https://github.com/RiaRon/robot_control-jazzy/pull/19)
 

@@ -1,9 +1,73 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-24 (Asia/Seoul)
+마지막 갱신: 2026-08-25 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
+
+## 최신 개발 — measured handoff와 pose observability (2026-08-25)
+
+- base는 `docs/ready-handoff-translation-results@c0ee6aa`다. 이 commit은
+  `origin/jazzy@34ddb17`의 바로 다음 문서 commit이며, PR #20의 ready-handoff
+  기능을 보존하면서 2026-08-24 분석 기록도 잃지 않는 기준이라 선택했다.
+- 작업 branch는 `feature/follow-handoff-pose-observability`다. runtime commit은
+  `b119ff2`, MATLAB commit은 `9fbd2e8`이다.
+- deterministic Follow는 A′ ready 뒤 measured joints를 다시 읽고 FK TCP,
+  live/accepted marker, 내부 command, 최초 IK seed/continuity reference와 profile
+  origin을 한 `handoff_sync` event에 맞춘다. IK joint target은 feedback으로
+  강제하지 않고 measured TCP 목표를 기존 closest/0.30 rad continuity 정책으로
+  다시 푼다.
+- alignment 뒤 position 5 mm, orientation 0.035 rad, IK-command 0.060 rad,
+  command-measured 0.060 rad, measured sample delta 0.002 rad 조건을 0.5초 연속
+  요구한다. timeout은 5초이며 profile 0건, measured safe hold, partial JSON의
+  `handoff_convergence_timeout`으로 끝난다. 임계값은 2026-08-24 startup 마지막
+  0.5초 p95 `3.991 mm/0.0200 rad/0.0520 rad/0.0583 rad/0.00077 rad`를 포함한다.
+- schema v2는 Ready부터 cleanup까지 run-relative monotonic time/sample index,
+  5개 TCP xyz/xyzw layer, J1-J7 IK/command/next/measured와 velocity, limiter,
+  gravity torque/controller availability와 구간별 통계를 기록한다. effort/current와
+  joint-acceleration limiter는 현 interface에서 읽을 수 없어 명시적으로
+  `unavailable`이다.
+- combined profile은 translation과 quaternion rotation을 같은 ramp/hold/return/
+  origin-hold 진행률로 동시에 수행한다. RPY 선형 보간은 사용하지 않는다.
+- 성능 비교 기본값은 `profile-only`다. 전체/Ready/handoff/alignment/gate 및 각
+  profile phase는 삭제하지 않고 별도 window로 유지한다.
+
+저장된 2026-08-24 real legacy translation replay:
+
+```text
+startup (958 samples), live/accepted TCP translation:
+  mean 16.224 mm, RMS 22.697 mm, max 48.466 mm, p95 47.662 mm
+profile-only (991 samples), accepted target -> measured:
+  mean 11.676 mm, RMS 11.974 mm, max 16.842 mm, p95 16.558 mm, final 8.692 mm
+profile-only, live target -> measured:
+  mean 11.699 mm, RMS 12.099 mm, max 17.685 mm, p95 17.405 mm, final 7.659 mm
+profile-only live orientation:
+  mean 1.210 deg, RMS 1.260 deg, max 2.052 deg, p95 2.009 deg, final 1.084 deg
+profile-only Cartesian linear limiter: 803 / 991 (81.03%)
+profile-only worst IK -> measured joint: J4 0.039742 rad
+profile-only worst command -> measured joint: J4 0.070133 rad
+```
+
+따라서 `48.466 mm`는 startup 값이며 profile 성능에 포함하지 않는다. 새 handoff를
+실물에 적용한 rotation/combined, 실제 effort/current, controller delay와 outer-law
+변경 효과는 아직 측정하지 않았다.
+
+개발 PC 검증(실물 OpenArm/CAN 사용 안 함):
+
+- 전체 Python `680 passed, 4 skipped`; 핵심 handoff/gate/profile 회귀 통과
+- ROS 2 Jazzy build 11 packages 성공
+- `mock_components/GenericSystem` pose smoke: right TCP world-z `+30.0 mm`,
+  residual `0.0 mm`
+- fake translation/rotation/combined: gate 약 0.51초/51 stable samples, profile 정상
+  종료, continuity refusal와 limiter 0
+- MATLAB R2026a: 2026-08-18 legacy v1 + fake schema v2 parser validator 성공;
+  2026-08-24 replay와 세 fake profile에서 CSV/JSON/MAT 및 12×PNG/PDF/SVG/FIG 생성
+- CSV와 JSON의 mean/RMS/max/p95/final 전 행 수치 일치; 300 dpi PNG는 예를 들어
+  `3882×2884`, PDF/SVG/FIG 각각 12개 확인
+
+GitHub용 Mermaid, 실제 replay SVG와 작은 summary table은
+[`docs/analysis/pose_follow/`](analysis/pose_follow/README.md)에 있다. 원시 JSON,
+rosbag, HDF5와 archive는 Git에 추가하지 않았다.
 
 ## 저장소와 역할
 

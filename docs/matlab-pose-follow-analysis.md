@@ -10,6 +10,7 @@
 - 2026-08-18 real batch의 legacy schema v1 trace
 - Jazzy `8a700c0`의 deterministic diagnostics가 추가된 extended schema v1 trace
 - safety refusal까지 승인된 trace와 종료 원인을 담은 partial/refused schema v1
+- measured-state handoff, 공통 time base와 convergence gate를 담은 schema v2
 - 같은 필드를 유지하는 이후 JSON
 
 두 형식이 모두 `schema_version: 1`이므로 parser는 버전 숫자만 추측하지 않는다.
@@ -39,6 +40,11 @@ deterministic profile 이름은 다음 네 canonical phase로 정규화한다.
 | `*_hold` | `hold` |
 | `*_ramp_back` | `return` |
 | `origin_hold` | `origin-hold` |
+
+schema v2의 `ready_reacquisition`, `handoff_sync`, `startup_alignment`,
+`convergence_gate`, `profile_*`, `cleanup` stage는 같은 run-relative monotonic
+clock으로 읽는다. `profile-only`는 ramp/hold/return/origin-hold만 포함하며 성능
+비교의 기본값이다. startup의 peak를 profile 통계에 합치지 않는다.
 
 ## MATLAB 요구사항
 
@@ -90,7 +96,8 @@ matlab -batch "addpath('matlab/pose_follow'); analyze_pose_follow( ...
 
 | 파일 | 내용 |
 | --- | --- |
-| `summary.csv` | 실험×phase 비교표. TCP 위치/자세, ready 이름·통과·시작 오차, IK candidate/rejection/selection cost·latency, partial/refusal 통계 |
+| `summary.csv` | 실험×stage/phase 비교표. TCP mean/RMS/max/p95/final, limiter, IK와 partial/refusal 통계 |
+| `joint_summary.csv` | J1-J7의 IK→measured 및 command→measured MeanAbs/RMS/max/final/overshoot/settling |
 | `analysis_summary.json` | Work가 읽기 쉬운 metadata, layer 통계, summary row와 색상 규칙 |
 | `analysis.mat` | 정규화 time series, summary table과 구조화 분석 전체 |
 | `tcp_error_timeseries.png` | TCP 위치(mm)·자세(deg) 오차와 phase band |
@@ -101,12 +108,18 @@ matlab -batch "addpath('matlab/pose_follow'); analyze_pose_follow( ...
 | `phase_comparison.png` | canonical phase별 TCP RMS/p95 실험 비교 |
 | `research_report.pdf` | 요약 표지와 위 6개 그림을 묶은 7-page 연구 보고서 |
 
+추가로 `01_...`부터 `12_...`까지 TCP translation/orientation layer, signed
+decomposition, J1-J7 position/velocity, handoff/gate 확대, hold lead/overshoot,
+limiter overlay, phase 통계, joint heatmap, 세 profile 비교 figure를 만든다. 각
+figure는 `.png`(300 dpi), `.pdf`, `.svg`, `.fig` 네 형식으로 저장된다.
+
 각 time-series 그림은 실험명, elapsed-time 축, 물리 단위, 범례와 profile phase
 색상 band를 표시한다. 한 bundle 안에서는 모든 실험이 같은 time/y 축 범위를
 사용한다. 실험 색은 입력 순서, layer/phase/state 색은 고정 규칙이다. 서로 다른
 bundle도 같은 실험 순서로 호출하면 실험 색이 유지된다.
 
-`summary.csv`의 `phase=all`은 전체 실험, 나머지는 phase별 행이다. legacy
+`summary.csv`의 `phase=all`은 전체 실험, `profile-only`는 startup을 제외한
+기본 성능 window, 나머지는 stage/phase별 행이다. legacy
 실험은 canonical phase 행의 sample 수가 0이고 실제 데이터는 `unlabeled` 행에
 있다. `analysis.mat`은 다음처럼 읽는다.
 
