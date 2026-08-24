@@ -292,14 +292,20 @@ def test_recovered_incident_pose_is_reacquired_before_ik(
                 "--execute",
             )
         )
-        == 3
+        == 0
     )
     assert arm.streamed
-    assert arm.ik_requests == []
-    result = json.loads(output.read_text())["result"]
+    assert arm.ik_requests
+    payload = json.loads(output.read_text())
+    result = payload["result"]
     assert result["ready_reacquisition"]["required"]
     assert result["ready_reacquisition"]["completed"]
-    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert result["handoff_sync"]["completed"]
+    np.testing.assert_allclose(
+        arm.ik_requests[0][1], result["handoff_sync"]["measured_joints_rad"]
+    )
+    assert result["convergence_gate"]["completed"]
+    assert result["diagnostic_execution"]["position_publish_count"] > 0
 
 
 def test_ik_target_jump_at_exact_hard_boundary_is_refused(monkeypatch, capsys):
@@ -321,6 +327,7 @@ def test_deterministic_alignment_message_never_invites_marker_drag(
 ):
     arm = ReplayArm(READY_TARGET_RAD)
     install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
 
     assert main(diagnostic_args("--execute")) == 0
     output = capsys.readouterr().out
@@ -399,6 +406,12 @@ def _install_fast_reacquisition(monkeypatch):
     monkeypatch.setattr("robot_control.cli._ready_sleep", lambda _seconds: None)
     monkeypatch.setattr("robot_control.cli.READY_SETTLE_WINDOW_SEC", 0.0)
     monkeypatch.setattr("robot_control.cli.READY_SETTLE_TIMEOUT_SEC", 0.03)
+    monkeypatch.setattr(
+        "robot_control.follow_observability.HANDOFF_STABLE_WINDOW_SEC", 0.01
+    )
+    monkeypatch.setattr(
+        "robot_control.follow_observability.HANDOFF_TIMEOUT_SEC", 0.08
+    )
 
 
 class HandoffReplayArm(ReplayArm):
@@ -519,7 +532,7 @@ def test_reacquisition_failure_holds_safely_writes_partial_and_never_starts_prof
     assert arm.ik_requests == []
 
 
-def test_startup_alignment_failure_keeps_profile_publish_zero_and_writes_partial(
+def test_stale_rviz_marker_is_reanchored_to_measured_tcp(
     monkeypatch, tmp_path
 ):
     arm = HandoffReplayArm(READY_TARGET_RAD)
@@ -532,6 +545,7 @@ def test_startup_alignment_failure_keeps_profile_publish_zero_and_writes_partial
     arm.read_marker_pose = lambda timeout_sec=None: arm.target
     arm.latest_marker_target = lambda: arm.target
     install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
     output = tmp_path / "alignment-failed.json"
 
     assert (
@@ -542,15 +556,20 @@ def test_startup_alignment_failure_keeps_profile_publish_zero_and_writes_partial
                 "--execute",
             )
         )
-        == 3
+        == 0
     )
 
-    result = json.loads(output.read_text())["result"]
-    assert result["termination"] == "exception"
-    assert result["refusal"]["reason"] == "startup_alignment_failed"
-    assert result["diagnostic_execution"]["position_publish_count"] == 0
-    assert not result["diagnostic_execution"]["started"]
-    assert result["gravity_compensation"]["cleanup"]["zero_published"]
+    payload = json.loads(output.read_text())
+    result = payload["result"]
+    assert result["handoff_sync"]["marker_reanchored"]
+    assert result["startup_alignment"]["completed"]
+    assert result["convergence_gate"]["completed"]
+    assert result["diagnostic_execution"]["position_publish_count"] > 0
+    first = payload["trace"][0]
+    np.testing.assert_allclose(
+        first["tcp_positions_m"]["live_marker"],
+        result["handoff_sync"]["measured_tcp"]["xyz_m"],
+    )
 
 def test_deterministic_follow_rejects_unvalidated_gravity_scale_before_ros(
     monkeypatch, capsys
@@ -614,7 +633,7 @@ def test_reacquisition_exception_safe_holds_before_cleanup(
     assert arm.ik_requests == []
 
 
-def test_marker_setup_exception_cleans_gravity_and_writes_zero_profile_partial(
+def test_deterministic_handoff_does_not_depend_on_marker_service(
     monkeypatch, tmp_path
 ):
     arm = HandoffReplayArm(READY_TARGET_RAD)
@@ -624,9 +643,35 @@ def test_marker_setup_exception_cleans_gravity_and_writes_zero_profile_partial(
     install_replay(monkeypatch, arm)
     output = tmp_path / "marker-failed.json"
 
-    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+    _install_fast_reacquisition(monkeypatch)
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 0
     result = json.loads(output.read_text())["result"]
-    assert result["termination"] == "startup_alignment_failed"
-    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert result["handoff_sync"]["marker_reanchored"]
+    assert result["diagnostic_execution"]["position_publish_count"] > 0
     assert result["gravity_compensation"]["cleanup"]["zero_published"]
-    assert arm.ik_requests == []
+
+
+def test_convergence_timeout_safe_holds_and_writes_partial_json(
+    monkeypatch, tmp_path
+):
+    offset = np.zeros(7)
+    offset[0] = 0.20
+    arm = HandoffReplayArm(READY_TARGET_RAD, track_positions=False)
+    arm.ik_offset = offset
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "convergence-timeout.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+    payload = json.loads(output.read_text())
+    result = payload["result"]
+    assert result["termination"] == "safety_refused"
+    assert result["refusal"]["reason"] == "handoff_convergence_timeout"
+    assert result["convergence_gate"]["safe_hold"]["attempted"]
+    assert result["convergence_gate"]["safe_hold"]["applied"]
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+    assert not any(
+        str(sample["stage"]).startswith("profile_")
+        for sample in payload["trace"]
+    )
+    assert arm.ik_requests

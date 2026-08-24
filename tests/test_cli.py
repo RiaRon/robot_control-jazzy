@@ -1513,12 +1513,16 @@ def test_pose_follow_writes_layered_json_diagnostics(
     )
 
     payload = json.loads(output.read_text())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["kind"] == "pose_follow_diagnostics"
     assert payload["profile"] == "openarm_tesollo"
     assert payload["group"] == "openarm_right_arm"
     assert payload["settings"]["kp_per_sec"] == pytest.approx(2.0)
     assert payload["settings"]["max_tcp_speed_m_s"] == pytest.approx(0.05)
+    assert "handoff_convergence_gate" in payload["settings"]
+    assert payload["settings"]["instrumentation_availability"][
+        "measured_effort"
+    ] == "unavailable_current_interface"
 
     result = payload["result"]
     trace = payload["trace"]
@@ -1558,8 +1562,18 @@ def test_pose_follow_writes_layered_json_diagnostics(
         "command_to_measured",
     }
     assert result["ik_target_jumps"]["threshold_rad"] == pytest.approx(0.1)
+    assert result["timeline"]["clock"] == "monotonic_run_elapsed_sec"
+    assert result["statistics_by_window"]["comparison_default"] == (
+        "profile_only"
+    )
 
     for sample in trace:
+        assert {"sample_index", "timestamp_sec", "stage"} <= sample.keys()
+        assert {"ik_target", "command", "next_command", "measured"} <= (
+            sample["joint_positions_rad"].keys()
+        )
+        assert {"command", "measured"} <= sample["joint_velocity_rad_s"].keys()
+        assert sample["control_state"]["effort_measurement"] == "unavailable"
         positions = sample["tcp_positions_m"]
         expected = np.linalg.norm(
             np.asarray(positions["live_marker"])
@@ -1746,6 +1760,87 @@ def test_pose_follow_runs_a_deterministic_profile_on_fake_hardware(
     assert "translation_ramp_back" in phases
     assert "origin_hold" in phases
     assert draggable.streamed
+
+
+@pytest.mark.parametrize(
+    ("profile_kind", "expected_ramp"),
+    [
+        ("translation", "translation_ramp_out"),
+        ("rotation", "rotation_ramp_out"),
+        ("translation-rotation", "combined_ramp_out"),
+    ],
+)
+def test_pose_follow_all_deterministic_profiles_share_fake_hardware_contract(
+    draggable,
+    tmp_path,
+    profile_kind,
+    expected_ramp,
+):
+    """Translation, rotation, and combined use one gated trace contract."""
+    from robot_control.ready import READY_TARGET_RAD
+
+    draggable.joints = READY_TARGET_RAD.copy()
+    draggable._target = _reachable_target(_servo_chain(), READY_TARGET_RAD)
+    output = tmp_path / f"{profile_kind}.json"
+    assert (
+        main(
+            [
+                "pose",
+                "follow",
+                *RIGHT_ARM,
+                "--diagnostic-profile",
+                profile_kind,
+                "--diagnostic-distance",
+                "0.001",
+                "--diagnostic-angle",
+                "0.01",
+                "--diagnostic-linear-speed",
+                "0.02",
+                "--diagnostic-angular-speed",
+                "0.1",
+                "--diagnostic-hold-sec",
+                "0.01",
+                "--startup-settle-sec",
+                "0",
+                "--seconds",
+                "1.5",
+                "--output",
+                str(output),
+                "--execute",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(output.read_text())
+    result = payload["result"]
+    assert payload["schema_version"] == 2
+    assert result["termination"] == "diagnostic_profile_completed"
+    assert result["convergence_gate"]["completed"]
+    assert result["statistics_by_window"]["comparison_default"] == (
+        "profile_only"
+    )
+    phases = {
+        sample["diagnostic_profile"]["phase"]
+        for sample in payload["trace"]
+        if sample["diagnostic_profile"] is not None
+    }
+    assert expected_ramp in phases
+    assert "origin_hold" in phases
+    profile_samples = [
+        sample
+        for sample in payload["trace"]
+        if sample["stage"].startswith("profile_")
+    ]
+    assert profile_samples
+    assert all(
+        "translation_progress" in sample["diagnostic_profile"]
+        for sample in profile_samples
+    )
+    assert all(
+        "rotation_progress" in sample["diagnostic_profile"]
+        for sample in profile_samples
+    )
 
 
 def test_pose_follow_records_joint_target_jump_without_blocking_it(
