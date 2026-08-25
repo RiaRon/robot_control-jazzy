@@ -647,31 +647,46 @@ robotctl pose follow \
 
 For `--diagnostic-profile --execute`, deterministic follow activates right-arm
 gravity compensation at the validated scale 1.0 before evaluating A-prime. It
-requires disjoint active position and effort controllers. If feedback is
-outside the follow-only 0.050 rad A-prime tolerance, it reacquires
-`openarm_right_ready_v2` with the same J4-first, minimum-jerk joint path used
-by ready while refreshing gravity torque every control cycle. The standalone
-`pose ready` acceptance tolerance remains 0.020 rad.
+requires disjoint active position and effort controllers. Follow Ready is not
+an A-prime accuracy guarantee. If the initial target error exceeds the legacy
+0.050 rad move trigger, it still runs the same bounded J4-first, minimum-jerk
+path toward `openarm_right_ready_v2` while refreshing gravity torque. It then
+requires finite feedback, every measured joint inside both its configured
+joint limit and the conservative 0.060 rad A-prime safety neighbourhood, and a
+stationary measured state. Stationarity means the maximum per-joint measured
+sample change remains at or below 0.002 rad for 0.5 s. A stationary residual
+slightly above 0.050 rad is therefore accepted; target error itself is not the
+stationarity signal. The standalone `pose ready` accuracy tolerance and
+behaviour remain 0.020 rad and unchanged.
 
-After successful reacquisition, follow reads measured joints again and uses
-their FK TCP as the live/accepted marker, internal command, first IK seed,
-continuity reference, and profile origin. It solves IK for that measured TCP;
-it does not force the IK joint target equal to feedback. The existing 0.30 rad
-continuity boundary still decides whether that solution is usable.
+After the safety-and-stationarity decision, follow reads measured joints again
+and uses their FK TCP as the live/accepted marker, internal command, first IK
+seed, continuity reference, and profile origin. It solves IK for that measured
+TCP; it does not force the IK joint target equal to feedback. The existing
+0.30 rad continuity boundary still decides whether that solution is usable.
 
 Successful alignment starts a bounded convergence gate, not the profile. All
 marker-to-measured translation/orientation, IK-to-command, command-to-measured,
 and measured-sample-change bounds must remain satisfied for 0.5 s. A 5 s
 timeout preserves a measured-position safe hold, starts no profile, and writes
-partial JSON. Gravity stays active through all stages. Termination, refusal, or exception performs the
-existing three-sample zero-effort cleanup. Reacquisition failure first commands
-a measured-position safe hold, publishes no diagnostic-profile position
-sample, and writes partial JSON when `--output` is supplied.
+partial JSON. Gravity stays active through all stages. Termination, refusal, or
+exception performs the existing three-sample zero-effort cleanup. An unsafe,
+invalid, or non-stationary Follow Ready result first commands a measured-position
+safe hold, publishes no diagnostic-profile position sample, and writes partial
+JSON when `--output` is supplied.
 
-JSON records activation, reacquisition start/completion/error/duration, startup
-alignment start/completion, diagnostic start and position-publish count, and
-cleanup timing. Manual marker follow remains unchanged. Dry-run still returns
-before constructing a ROS adapter or publisher.
+The first `/joint_states` acquisition allows 3 s for ROS discovery. Once any
+valid state has been acquired, every Follow feedback read retains the existing
+1 s loss watchdog; the runtime watchdog is not extended to 3 s.
+
+Schema v2 JSON additively records the actual initial joint-state wait and
+outcome, the Follow Ready policy/decision, 0.060 rad safety neighbourhood,
+stationary threshold/dwell/timeout and observed delta, final target residual,
+measured-state resynchronization flags, and a concrete failure reason. Existing
+activation, reacquisition, startup alignment, diagnostic, handoff gate, and
+cleanup fields remain present. Manual marker follow uses the same split initial
+acquisition/runtime watchdog. Dry-run still returns before constructing a ROS
+adapter or publisher.
 
 ### Deterministic diagnostic profiles
 

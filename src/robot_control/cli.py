@@ -83,6 +83,9 @@ from .follow_observability import (
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .ready import (
     FOLLOW_REACQUISITION_TOLERANCE_RAD,
+    FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD,
+    FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
+    FOLLOW_READY_STATIONARY_DWELL_SEC,
     READY_ACCELERATION_RAD_S2,
     READY_D_LEGACY_NAME,
     READY_POSTURE_NAME,
@@ -160,6 +163,13 @@ DEFAULT_FOLLOW_KP = 2.0
 DEFAULT_FOLLOW_KI = 1.0
 # 손끝 위치가 목표에서 2mm 이내이면 위치가 도착한 것으로 판단한다.
 DEFAULT_FOLLOW_TOLERANCE_M = 0.002
+
+# Initial discovery and loss of an already-running feedback stream are
+# different safety events.  Give a newly created ROS process three seconds to
+# discover /joint_states, but retain the existing one-second watchdog after
+# acquisition so a running controller never waits longer before refusing.
+FOLLOW_INITIAL_JOINT_STATE_TIMEOUT_SEC = 3.0
+FOLLOW_FEEDBACK_WATCHDOG_SEC = 1.0
 
 # 손끝 방향이 목표에서 약 2도 이내이면 방향이 도착한 것으로 판단한다.
 DEFAULT_FOLLOW_ORIENTATION_TOLERANCE_RAD = 0.035
@@ -1263,6 +1273,130 @@ def _wait_for_ready_settle(
     return last, time.monotonic() - started, False
 
 
+def _follow_ready_safety_check(profile, group, feedback):
+    """Validate measured Follow Ready feedback without demanding A-prime accuracy."""
+    check = check_ready(
+        feedback,
+        tolerance_rad=FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
+    )
+    limits = _joint_limits(profile, group)
+    lower = np.array([joint.lower for joint in limits])
+    upper = np.array([joint.upper for joint in limits])
+    outside = (check.actual < lower) | (check.actual > upper)
+    if np.any(outside):
+        offenders = ", ".join(
+            f"{group.joints[index]}={check.actual[index]:+.4f} outside "
+            f"[{lower[index]:+.4f}, {upper[index]:+.4f}]"
+            for index in np.flatnonzero(outside)
+        )
+        raise SafetyError(
+            f"Follow Ready measured joint limit violation: {offenders}"
+        )
+    if not check.passed:
+        offenders = ", ".join(
+            f"{group.joints[index]}={check.error[index]:+.4f} rad"
+            for index in np.flatnonzero(
+                np.abs(check.error) > FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD
+            )
+        )
+        raise SafetyError(
+            "Follow Ready measured state is outside the safe A-prime "
+            f"neighbourhood of {FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD:.3f} rad: "
+            f"{offenders}"
+        )
+    return check
+
+
+def _follow_ready_observation_cycle(
+    adapter, chain, gate, profile, group, period_sec
+):
+    """Refresh gravity and observe feedback without changing position reference."""
+    cycle_started = time.monotonic()
+    feedback = np.asarray(
+        adapter.read_state(timeout_sec=FOLLOW_FEEDBACK_WATCHDOG_SEC),
+        dtype=float,
+    )
+    check = _follow_ready_safety_check(profile, group, feedback)
+    torque = gate.authorize_effort(chain.gravity_torque(feedback))
+    adapter.send_effort(torque)
+    _ready_sleep(period_sec - (time.monotonic() - cycle_started))
+    return check, np.asarray(torque, dtype=float)
+
+
+def _wait_for_follow_ready_stationary(
+    adapter,
+    chain,
+    gate,
+    profile,
+    group,
+    period_sec,
+    telemetry,
+    *,
+    sample_hook=None,
+):
+    """Accept a safe measured pose after a quiet window, independent of target error."""
+    started = time.monotonic()
+    stable_since = None
+    previous = np.asarray(telemetry["feedback"], dtype=float).copy()
+    observed_worst_delta = 0.0
+    decision_window_max_delta = None
+    stationary_samples = 0
+    last = _follow_ready_safety_check(profile, group, previous)
+    while time.monotonic() - started <= READY_SETTLE_TIMEOUT_SEC:
+        last, torque = _follow_ready_observation_cycle(
+            adapter, chain, gate, profile, group, period_sec
+        )
+        feedback = last.actual
+        telemetry["feedback"] = feedback
+        telemetry["torque"] = torque
+        telemetry["torque_worst"] = np.maximum(
+            telemetry["torque_worst"], np.abs(torque)
+        )
+        telemetry["gravity_samples"] += 1
+        telemetry["stationary_samples"] += 1
+        if sample_hook is not None:
+            sample_hook(feedback, telemetry["reference"], torque)
+        measured_delta = float(np.max(np.abs(feedback - previous)))
+        previous = feedback.copy()
+        observed_worst_delta = max(observed_worst_delta, measured_delta)
+        now = time.monotonic()
+        if measured_delta <= FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD:
+            if stable_since is None:
+                stable_since = now
+                decision_window_max_delta = measured_delta
+                stationary_samples = 1
+            else:
+                decision_window_max_delta = max(
+                    float(decision_window_max_delta), measured_delta
+                )
+                stationary_samples += 1
+            if now - stable_since >= FOLLOW_READY_STATIONARY_DWELL_SEC:
+                return last, now - started, True, {
+                    "method": "max_abs_measured_sample_delta_rad",
+                    "threshold_rad": FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD,
+                    "dwell_sec": FOLLOW_READY_STATIONARY_DWELL_SEC,
+                    "timeout_sec": READY_SETTLE_TIMEOUT_SEC,
+                    "samples": stationary_samples,
+                    "decision_window_max_delta_rad": float(
+                        decision_window_max_delta
+                    ),
+                    "observed_worst_delta_rad": observed_worst_delta,
+                }
+        else:
+            stable_since = None
+            decision_window_max_delta = None
+            stationary_samples = 0
+    return last, time.monotonic() - started, False, {
+        "method": "max_abs_measured_sample_delta_rad",
+        "threshold_rad": FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD,
+        "dwell_sec": FOLLOW_READY_STATIONARY_DWELL_SEC,
+        "timeout_sec": READY_SETTLE_TIMEOUT_SEC,
+        "samples": stationary_samples,
+        "decision_window_max_delta_rad": decision_window_max_delta,
+        "observed_worst_delta_rad": observed_worst_delta,
+    }
+
+
 def _ready_safe_hold(adapter, profile, group, measured):
     hold = _start_pose(profile, group, measured)
     gate = _gate(profile, group, seed=None)
@@ -1322,6 +1456,20 @@ def _follow_reacquire_ready(
             "completed_elapsed_sec": None,
             "duration_sec": None,
             "tolerance_rad": FOLLOW_REACQUISITION_TOLERANCE_RAD,
+            "policy": "safe_stationary_measured_handoff",
+            "decision": None,
+            "decision_passed": False,
+            "safe_neighborhood_rad": FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
+            "target_accuracy_required": False,
+            "stationary": {
+                "method": "max_abs_measured_sample_delta_rad",
+                "threshold_rad": FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD,
+                "dwell_sec": FOLLOW_READY_STATIONARY_DWELL_SEC,
+                "timeout_sec": READY_SETTLE_TIMEOUT_SEC,
+                "samples": 0,
+                "decision_window_max_delta_rad": None,
+                "observed_worst_delta_rad": None,
+            },
             "initial_rad": initial.actual.tolist(),
             "initial_error_rad": initial.error.tolist(),
             "final_rad": initial.actual.tolist(),
@@ -1338,17 +1486,6 @@ def _follow_reacquire_ready(
             "termination_reason": None,
         }
     )
-    if initial.passed:
-        completed = time.monotonic()
-        reacquisition_metadata.update(
-            {
-                "completed": True,
-                "completed_elapsed_sec": float(completed - run_started),
-                "duration_sec": float(completed - started),
-            }
-        )
-        return initial.actual.copy()
-
     telemetry = {
         "feedback": initial.actual.copy(),
         "reference": initial.actual.copy(),
@@ -1356,7 +1493,9 @@ def _follow_reacquire_ready(
         "torque_worst": np.zeros(len(group.joints)),
         "gravity_samples": 0,
         "position_samples": 0,
+        "stationary_samples": 0,
     }
+
     def record_sample(feedback, reference, torque):
         if stage_trace is None:
             return
@@ -1375,32 +1514,65 @@ def _follow_reacquire_ready(
                 "gravity_torque_nm": [float(value) for value in torque],
             }
         )
-    here = _start_pose(profile, group, initial.actual)
-    lifted = here.copy()
-    lifted[ELBOW_INDEX] = READY_TARGET_RAD[ELBOW_INDEX]
-    for phase_target in (lifted, READY_TARGET_RAD):
-        points, _duration = _minimum_jerk_trajectory(
-            here, phase_target, 1.0 / period_sec
-        )
-        if points:
-            points = _gate(profile, group, seed=here).authorize_trajectory(
-                points, start_time_sec=0.0, period_sec=period_sec
+    if not initial.passed:
+        here = _start_pose(profile, group, initial.actual)
+        lifted = here.copy()
+        lifted[ELBOW_INDEX] = READY_TARGET_RAD[ELBOW_INDEX]
+        for phase_target in (lifted, READY_TARGET_RAD):
+            points, _duration = _minimum_jerk_trajectory(
+                here, phase_target, 1.0 / period_sec
             )
-            _ready_stream_points(
-                adapter, chain, gate, points, period_sec, telemetry,
+            if points:
+                points = _gate(profile, group, seed=here).authorize_trajectory(
+                    points, start_time_sec=0.0, period_sec=period_sec
+                )
+                _ready_stream_points(
+                    adapter, chain, gate, points, period_sec, telemetry,
+                    sample_hook=record_sample,
+                )
+                here = np.asarray(phase_target, dtype=float).copy()
+    try:
+        final, settling_sec, passed, stationary = (
+            _wait_for_follow_ready_stationary(
+                adapter,
+                chain,
+                gate,
+                profile,
+                group,
+                period_sec,
+                telemetry,
                 sample_hook=record_sample,
             )
-            here = np.asarray(phase_target, dtype=float).copy()
-    final, settling_sec, passed = _wait_for_ready_settle(
-        adapter,
-        chain,
-        gate,
-        READY_TARGET_RAD,
-        period_sec,
-        telemetry,
-        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
-        sample_hook=record_sample,
-    )
+        )
+    except Exception as error:
+        completed = time.monotonic()
+        gravity_metadata["samples"] += int(telemetry["gravity_samples"])
+        if np.all(np.isfinite(telemetry["torque"])):
+            gravity_metadata["last_torque_nm"] = telemetry["torque"].tolist()
+        final_feedback = np.asarray(telemetry["feedback"], dtype=float)
+        finite = (
+            final_feedback.shape == READY_TARGET_RAD.shape
+            and np.all(np.isfinite(final_feedback))
+        )
+        reacquisition_metadata.update(
+            {
+                "duration_sec": float(completed - started),
+                "final_rad": final_feedback.tolist() if finite else None,
+                "final_error_rad": (
+                    (final_feedback - READY_TARGET_RAD).tolist()
+                    if finite else None
+                ),
+                "max_abs_final_error_rad": (
+                    float(np.max(np.abs(final_feedback - READY_TARGET_RAD)))
+                    if finite else None
+                ),
+                "motion_samples": int(telemetry["position_samples"]),
+                "stationary_samples": int(telemetry["stationary_samples"]),
+                "decision": "rejected_invalid_or_unsafe_feedback",
+                "termination_reason": str(error),
+            }
+        )
+        raise
     completed = time.monotonic()
     gravity_metadata["samples"] += int(telemetry["gravity_samples"])
     gravity_metadata["last_torque_nm"] = telemetry["torque"].tolist()
@@ -1415,17 +1587,24 @@ def _follow_reacquire_ready(
             "final_error_rad": final.error.tolist(),
             "max_abs_final_error_rad": float(np.max(np.abs(final.error))),
             "motion_samples": int(telemetry["position_samples"]),
+            "stationary_samples": int(telemetry["stationary_samples"]),
             "settling_sec": float(settling_sec),
+            "stationary": stationary,
+            "decision": (
+                "accepted_safe_stationary_measured_state"
+                if passed else "rejected_not_stationary"
+            ),
+            "decision_passed": bool(passed),
         }
     )
     if passed:
         return final.actual.copy()
 
     message = (
-        f"{READY_POSTURE_NAME} reacquisition did not settle within "
-        f"{READY_SETTLE_TIMEOUT_SEC:g} s at the follow-only "
-        f"{FOLLOW_REACQUISITION_TOLERANCE_RAD:.3f} rad tolerance; worst joint "
-        f"error {np.max(np.abs(final.error)):.4f} rad"
+        f"{READY_POSTURE_NAME} Follow Ready remained in motion for "
+        f"{READY_SETTLE_TIMEOUT_SEC:g} s; measured sample change did not stay "
+        f"within {FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD:.4f} rad for "
+        f"{FOLLOW_READY_STATIONARY_DWELL_SEC:g} s"
     )
     reacquisition_metadata["termination_reason"] = message
     _attempt_follow_safe_hold(
@@ -1455,11 +1634,16 @@ def _zero_follow_gravity(
         )
 
 
-def _follow_handoff_sync(adapter, chain, run_started, stage_trace):
+def _follow_handoff_sync(
+    adapter, chain, profile, group, run_started, stage_trace
+):
     """Reacquire measured joints/TCP and make them the sole follow anchor."""
     from .ros_adapter import Pose
 
-    measured = np.asarray(adapter.read_state(timeout_sec=1.0), dtype=float)
+    measured = np.asarray(
+        adapter.read_state(timeout_sec=FOLLOW_FEEDBACK_WATCHDOG_SEC), dtype=float
+    )
+    _follow_ready_safety_check(profile, group, measured)
     matrix = chain.pose(measured)
     orientation = _quaternion_from_rotation(matrix[:3, :3])
     pose = Pose(
@@ -1510,6 +1694,7 @@ def _follow_handoff_sync(adapter, chain, run_started, stage_trace):
         "ik_seed_reanchored": True,
         "continuity_reference_reanchored": True,
         "profile_origin_reanchored": True,
+        "measured_state_resynchronized": True,
         "ik_target_forced_to_measured_joints": False,
     }
 
@@ -1524,18 +1709,35 @@ def _handoff_partial_diagnostics(
     reacquisition_metadata,
     stage_trace=None,
     handoff_metadata=None,
+    initial_joint_state_metadata=None,
 ):
-    check = check_ready(
-        state,
-        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+    check = (
+        None
+        if state is None
+        else check_ready(
+            state,
+            tolerance_rad=FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
+        )
     )
-    if not gravity_metadata.get("activated"):
+    if initial_joint_state_metadata is not None and not (
+        initial_joint_state_metadata.get("received")
+    ):
+        reason = "initial_joint_state_acquisition_failed"
+    elif initial_joint_state_metadata is not None and not (
+        initial_joint_state_metadata.get("valid")
+    ):
+        reason = "invalid_initial_joint_state_feedback"
+    elif not gravity_metadata.get("activated"):
         reason = "gravity_activation_failed"
     elif (
         reacquisition_metadata.get("started")
         and not reacquisition_metadata.get("completed")
     ):
         reason = "ready_reacquisition_failed"
+    elif (
+        reacquisition_metadata.get("completed") and handoff_metadata is None
+    ):
+        reason = "handoff_sync_failed"
     else:
         reason = "startup_alignment_failed"
     refusal = {
@@ -1546,16 +1748,20 @@ def _handoff_partial_diagnostics(
         "attempts": 0,
         "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
         "reference_sequence": None,
-        "joint_delta_rad": check.error.tolist(),
-        "triggered_joints": [
-            name
-            for name, value in zip(group.joints, check.error)
-            if abs(value) > FOLLOW_REACQUISITION_TOLERANCE_RAD
-        ],
+        "joint_delta_rad": None if check is None else check.error.tolist(),
+        "triggered_joints": (
+            []
+            if check is None
+            else [
+                name
+                for name, value in zip(group.joints, check.error)
+                if abs(value) > FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD
+            ]
+        ),
     }
     ready = ready_metadata(
         check,
-        tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+        tolerance_rad=FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
     )
     return {
         "group": group.name,
@@ -1565,6 +1771,8 @@ def _handoff_partial_diagnostics(
             "gravity_scale": gravity_metadata["scale"],
             "ready_posture": ready,
             "handoff_convergence_gate": HandoffConvergenceGate.thresholds(),
+            "initial_joint_state_timeout_sec": FOLLOW_INITIAL_JOINT_STATE_TIMEOUT_SEC,
+            "feedback_watchdog_sec": FOLLOW_FEEDBACK_WATCHDOG_SEC,
         },
         "result": {
             "termination": reason,
@@ -1573,6 +1781,7 @@ def _handoff_partial_diagnostics(
             "refusal": refusal,
             "ready_posture": ready,
             "gravity_compensation": gravity_metadata,
+            "initial_joint_state_acquisition": initial_joint_state_metadata,
             "ready_reacquisition": reacquisition_metadata,
             "handoff_sync": handoff_metadata,
             "convergence_gate": {
@@ -2634,8 +2843,66 @@ def _pose_follow(args, profile) -> int:
         "completed": False,
         "termination_reason": None,
     }
+    initial_joint_state_metadata = {
+        "timeout_sec": FOLLOW_INITIAL_JOINT_STATE_TIMEOUT_SEC,
+        "received": False,
+        "valid": False,
+        "wait_sec": None,
+        "failure_reason": None,
+    }
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        state = adapter.read_state(timeout_sec=1.0)
+        acquisition_started = time.monotonic()
+        try:
+            state = adapter.read_state(
+                timeout_sec=FOLLOW_INITIAL_JOINT_STATE_TIMEOUT_SEC
+            )
+            initial_joint_state_metadata["received"] = True
+            state = np.asarray(state, dtype=float)
+            if state.shape != (len(group.joints),) or not np.all(
+                np.isfinite(state)
+            ):
+                raise SafetyError(
+                    "initial /joint_states feedback has invalid shape or "
+                    "non-finite values"
+                )
+        except Exception as error:
+            initial_joint_state_metadata.update(
+                {
+                    "wait_sec": float(time.monotonic() - acquisition_started),
+                    "failure_reason": str(error),
+                }
+            )
+            if args.output is not None:
+                diagnostics = _handoff_partial_diagnostics(
+                    profile,
+                    group,
+                    diagnostic_spec,
+                    None,
+                    error,
+                    gravity_metadata,
+                    reacquisition_metadata,
+                    stage_trace,
+                    handoff_metadata,
+                    initial_joint_state_metadata,
+                )
+                _write_json_atomic(
+                    args.output,
+                    {
+                        "schema_version": 2,
+                        "kind": "pose_follow_diagnostics",
+                        "profile": profile.name,
+                        **diagnostics,
+                    },
+                )
+                print(f"wrote partial pose follow diagnostics: {args.output}")
+            raise
+        initial_joint_state_metadata.update(
+            {
+                "received": True,
+                "valid": True,
+                "wait_sec": float(time.monotonic() - acquisition_started),
+            }
+        )
         chain = _gravity_chain(adapter, profile, group, args.urdf)
         gate = _gate(profile, group, seed=None)
         if diagnostic_profile is not None:
@@ -2680,7 +2947,7 @@ def _pose_follow(args, profile) -> int:
                     stage_trace,
                 )
                 state, handoff_pose, handoff_metadata = _follow_handoff_sync(
-                    adapter, chain, run_started, stage_trace
+                    adapter, chain, profile, group, run_started, stage_trace
                 )
             except Exception as error:
                 if (
@@ -2688,7 +2955,9 @@ def _pose_follow(args, profile) -> int:
                     and not reacquisition_metadata.get("completed")
                 ):
                     try:
-                        measured = adapter.read_state(timeout_sec=1.0)
+                        measured = adapter.read_state(
+                            timeout_sec=FOLLOW_FEEDBACK_WATCHDOG_SEC
+                        )
                     except Exception:
                         measured = state
                     _attempt_follow_safe_hold(
@@ -2719,6 +2988,7 @@ def _pose_follow(args, profile) -> int:
                     reacquisition_metadata,
                     stage_trace,
                     handoff_metadata,
+                    initial_joint_state_metadata,
                 )
                 if args.output is not None:
                     _write_json_atomic(
@@ -2739,7 +3009,7 @@ def _pose_follow(args, profile) -> int:
             if diagnostic_profile is None
             else check_ready(
                 state,
-                tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+                tolerance_rad=FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
             )
         )
         try:
@@ -2819,6 +3089,7 @@ def _pose_follow(args, profile) -> int:
                         profile,
                         handoff_metadata,
                         stage_trace,
+                        initial_joint_state_metadata,
                     )
                 finally:
                     worker.close()
@@ -2850,6 +3121,7 @@ def _pose_follow(args, profile) -> int:
                     reacquisition_metadata,
                     stage_trace,
                     handoff_metadata,
+                    initial_joint_state_metadata,
                 )
                 if args.output is not None:
                     _write_json_atomic(
@@ -2905,6 +3177,7 @@ def _follow_loop(
     profile=None,
     handoff_metadata=None,
     stage_trace=None,
+    initial_joint_state_metadata=None,
 ) -> dict:
     from .ros_adapter import Pose
     if run_started is None:
@@ -3138,7 +3411,9 @@ def _follow_loop(
                 if latest_target is not None:
                     target = latest_target
             wait_started = time.monotonic()
-            state = adapter.read_state(timeout_sec=1.0)
+            state = adapter.read_state(
+                timeout_sec=FOLLOW_FEEDBACK_WATCHDOG_SEC
+            )
             state_wait_total += time.monotonic() - wait_started
             cycles += 1
             measured_delta = np.asarray(state, dtype=float) - previous_measured
@@ -4708,6 +4983,8 @@ def _follow_loop(
             ),
             "max_joint_lead_sec": LEAD_SEC,
             "command_rate_hz": float(1.0 / period),
+            "initial_joint_state_timeout_sec": FOLLOW_INITIAL_JOINT_STATE_TIMEOUT_SEC,
+            "feedback_watchdog_sec": FOLLOW_FEEDBACK_WATCHDOG_SEC,
             "ik_target_jump_threshold_rad": float(
                 args.ik_jump_threshold
             ),
@@ -4733,7 +5010,7 @@ def _follow_loop(
                 if diagnostic_profile is None
                 else ready_metadata(
                     ready_check,
-                    tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+                    tolerance_rad=FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
                 )
             ),
             "handoff_convergence_gate": HandoffConvergenceGate.thresholds(),
@@ -4758,10 +5035,11 @@ def _follow_loop(
                 if diagnostic_profile is None
                 else ready_metadata(
                     ready_check,
-                    tolerance_rad=FOLLOW_REACQUISITION_TOLERANCE_RAD,
+                    tolerance_rad=FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
                 )
             ),
             "gravity_compensation": gravity_metadata,
+            "initial_joint_state_acquisition": initial_joint_state_metadata,
             "ready_reacquisition": reacquisition_metadata,
             "handoff_sync": handoff_metadata,
             "convergence_gate": convergence_metadata,

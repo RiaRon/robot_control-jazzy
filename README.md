@@ -374,6 +374,24 @@ followed 634 samples; the arm holds its last commanded pose
   velocity limit clamped on 74 of 634 samples
 ```
 
+### Follow 전용 Ready는 정확도 시험이 아닙니다
+
+deterministic `--diagnostic-profile --execute`의 Follow Ready는 A′를 정밀하게
+재현하는 단계가 아닙니다. 기존의 제한된 준비자세 이동 뒤 feedback의 유효성,
+joint limit와 A′ 기준 0.060 rad 안전 근접 범위, measured joint 변화량 기준 정지를
+확인하고 그 최종 measured state를 새 Follow 시작점으로 채택합니다. A′ 잔류오차가
+기존 0.050 rad를 조금 넘더라도 0.002 rad/sample 이하 변화가 0.5초 유지되면
+marker·outer command·IK seed와 profile origin을 모두 그 상태로 재동기화합니다.
+
+이후에는 기존 Cartesian handoff convergence gate를 그대로 통과해야 profile이
+시작됩니다. feedback 미획득·NaN/Inf·관절 제한 또는 안전 범위 위반·계속 움직임·
+controller 이상·재동기화나 handoff gate 실패는 profile 전에 안전 중단합니다.
+Standalone `pose ready`는 목적이 다르며 기존 0.020 rad 정확도 기준을 유지합니다.
+
+새 프로세스의 첫 `/joint_states` 획득만 최대 3초 기다리고, 실행 중 feedback-loss
+watchdog은 기존 1초입니다. gain, gravity, 속도·lead·position limiter, IK continuity,
+profile, 제어 주기는 이 정책과 함께 바뀌지 않습니다.
+
 ### `pose ee --from-marker`와 다른 점
 
 `pose ee`는 마커를 **한 번** 읽고 트래젝토리 하나를 보냅니다. `pose follow`는

@@ -7,6 +7,11 @@ from typing import Sequence
 
 import numpy as np
 
+from .follow_observability import (
+    HANDOFF_MEASURED_SAMPLE_DELTA_RAD,
+    HANDOFF_STABLE_WINDOW_SEC,
+)
+
 
 RIGHT_ARM_GROUP = "openarm_right_arm"
 READY_POSTURE_NAME = "openarm_right_ready_v2"
@@ -30,6 +35,22 @@ READY_TOLERANCE_RAD = 0.02
 # 0.047051 rad; the 0.05 rad follow-only bound is validated around A-prime in
 # docs/pose-follow-ready-handoff-2026-08-24.md.
 FOLLOW_REACQUISITION_TOLERANCE_RAD = 0.05
+# Follow Ready no longer treats the target-error tolerance above as an
+# accuracy requirement.  It remains useful for deciding whether the bounded
+# A-prime move is needed and for legacy diagnostics.  The final measured state
+# may be adopted only inside this separate safety neighbourhood.  The
+# 0.060-rad bound includes the observed stationary J4 residual (0.0532 rad)
+# plus encoder noise margin, while remaining five times smaller than the
+# existing 0.30-rad single-joint IK continuity refusal boundary.
+FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD = 0.060
+# Reuse the measured-sample bound and dwell already validated for the Cartesian
+# handoff tail.  At 100 Hz, 0.002 rad/sample is conservative against the
+# 2026-08-24 stationary-tail p95 of 0.00077 rad/sample, and 0.5 s requires 50
+# consecutive quiet samples without changing the controller rate or gains.
+FOLLOW_READY_MAX_MEASURED_SAMPLE_DELTA_RAD = (
+    HANDOFF_MEASURED_SAMPLE_DELTA_RAD
+)
+FOLLOW_READY_STATIONARY_DWELL_SEC = HANDOFF_STABLE_WINDOW_SEC
 READY_SPEED_RAD_S = 0.10
 READY_ACCELERATION_RAD_S2 = 0.10
 READY_SETTLE_TIMEOUT_SEC = 5.0

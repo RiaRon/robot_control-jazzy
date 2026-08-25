@@ -6,9 +6,16 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from robot_control.cli import main
-from robot_control.ready import READY_POSTURE_NAME, READY_TARGET_RAD
+from robot_control.ready import (
+    FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD,
+    READY_POSTURE_NAME,
+    READY_TARGET_RAD,
+    READY_TOLERANCE_RAD,
+    check_ready,
+)
 
 
 RIGHT_ARM = ["--group", "openarm_right_arm"]
@@ -404,6 +411,9 @@ def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
 
 def _install_fast_reacquisition(monkeypatch):
     monkeypatch.setattr("robot_control.cli._ready_sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "robot_control.cli.FOLLOW_READY_STATIONARY_DWELL_SEC", 0.0
+    )
     monkeypatch.setattr("robot_control.cli.READY_SETTLE_WINDOW_SEC", 0.0)
     monkeypatch.setattr("robot_control.cli.READY_SETTLE_TIMEOUT_SEC", 0.03)
     monkeypatch.setattr(
@@ -476,7 +486,10 @@ def test_sagged_start_keeps_gravity_on_through_reacquisition_alignment_and_profi
     assert gravity["activation_elapsed_sec"] <= reacquisition["started_elapsed_sec"]
     assert reacquisition["required"]
     assert reacquisition["completed"]
-    assert reacquisition["max_abs_final_error_rad"] <= 0.05
+    assert reacquisition["decision_passed"]
+    assert (
+        reacquisition["max_abs_final_error_rad"] <= FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD
+    )
     assert reacquisition["motion_samples"] >= 1
     assert alignment["completed"]
     assert diagnostic["started"]
@@ -675,3 +688,230 @@ def test_convergence_timeout_safe_holds_and_writes_partial_json(
         for sample in payload["trace"]
     )
     assert arm.ik_requests
+
+
+class TimeoutRecordingArm(HandoffReplayArm):
+    def __init__(self, initial_joints, *, track_positions=True):
+        super().__init__(initial_joints, track_positions=track_positions)
+        self.state_timeouts = []
+
+    def read_state(self, timeout_sec=None):
+        self.state_timeouts.append(timeout_sec)
+        return super().read_state(timeout_sec)
+
+
+class MovingResidualArm(HandoffReplayArm):
+    def __init__(self):
+        residual = READY_TARGET_RAD.copy()
+        residual[3] -= 0.0532
+        super().__init__(residual, track_positions=False)
+        self._state_reads = 0
+
+    def read_state(self, timeout_sec=None):
+        self._state_reads += 1
+        measured = self.joints.copy()
+        measured[3] += 0.0021 if self._state_reads % 2 else -0.0021
+        return measured
+
+
+class MissingInitialStateArm(HandoffReplayArm):
+    def __init__(self):
+        super().__init__(READY_TARGET_RAD)
+        self.state_timeouts = []
+
+    def read_state(self, timeout_sec=None):
+        from robot_control.ros_adapter import AdapterUnavailable
+
+        self.state_timeouts.append(timeout_sec)
+        raise AdapterUnavailable(
+            f"no /joint_states within {timeout_sec} s (simulated)"
+        )
+
+
+class FailHandoffSyncArm(HandoffReplayArm):
+    def __init__(self):
+        super().__init__(READY_TARGET_RAD)
+        self._state_reads = 0
+
+    def read_state(self, timeout_sec=None):
+        from robot_control.ros_adapter import AdapterUnavailable
+
+        self._state_reads += 1
+        if self._state_reads == 3:
+            raise AdapterUnavailable(
+                "lost /joint_states during measured-state handoff (simulated)"
+            )
+        return super().read_state(timeout_sec)
+
+
+def test_stationary_j4_residual_above_old_tolerance_is_adopted(
+    monkeypatch, tmp_path
+):
+    residual = READY_TARGET_RAD.copy()
+    residual[3] -= 0.0532
+    arm = TimeoutRecordingArm(residual, track_positions=False)
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "stationary-residual.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 0
+
+    result = json.loads(output.read_text())["result"]
+    ready = result["ready_reacquisition"]
+    assert ready["required"]
+    assert ready["completed"]
+    assert ready["decision"] == "accepted_safe_stationary_measured_state"
+    assert ready["target_accuracy_required"] is False
+    assert ready["max_abs_final_error_rad"] == pytest.approx(0.0532)
+    assert ready["max_abs_final_error_rad"] > 0.050
+    assert ready["stationary"]["threshold_rad"] == pytest.approx(0.002)
+    assert ready["stationary"]["decision_window_max_delta_rad"] <= 0.002
+    assert result["ready_posture"]["passed"]
+    handoff = result["handoff_sync"]
+    assert handoff["measured_state_resynchronized"]
+    assert handoff["marker_reanchored"]
+    assert handoff["command_reanchored"]
+    assert handoff["ik_seed_reanchored"]
+    np.testing.assert_allclose(handoff["measured_joints_rad"], residual)
+    assert result["convergence_gate"]["completed"]
+    assert result["diagnostic_execution"]["position_publish_count"] > 0
+
+
+def test_same_ready_residual_is_rejected_while_feedback_keeps_moving(
+    monkeypatch, tmp_path
+):
+    arm = MovingResidualArm()
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    monkeypatch.setattr(
+        "robot_control.cli.FOLLOW_READY_STATIONARY_DWELL_SEC", 0.005
+    )
+    monkeypatch.setattr("robot_control.cli.READY_SETTLE_TIMEOUT_SEC", 0.02)
+    output = tmp_path / "moving-residual.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+
+    result = json.loads(output.read_text())["result"]
+    ready = result["ready_reacquisition"]
+    assert result["termination"] == "ready_reacquisition_failed"
+    assert ready["decision"] == "rejected_not_stationary"
+    assert not ready["decision_passed"]
+    assert ready["stationary"]["observed_worst_delta_rad"] > 0.002
+    assert "remained in motion" in ready["termination_reason"]
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("measured", "message"),
+    [
+        (
+            np.array([0.0, 0.2, 0.0, -0.001, 0.0, 0.0, 0.0]),
+            "joint limit violation",
+        ),
+        (
+            np.array([0.061, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0]),
+            "outside the safe A-prime neighbourhood",
+        ),
+    ],
+)
+def test_follow_ready_rejects_joint_limit_or_safe_neighbourhood_violation(
+    monkeypatch, tmp_path, measured, message
+):
+    arm = HandoffReplayArm(measured, track_positions=False)
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "unsafe-ready.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+
+    result = json.loads(output.read_text())["result"]
+    assert result["termination"] == "ready_reacquisition_failed"
+    assert message in result["termination_reason"]
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_non_finite_initial_joint_feedback_is_refused_with_partial_json(
+    monkeypatch, tmp_path, bad
+):
+    measured = READY_TARGET_RAD.copy()
+    measured[3] = bad
+    arm = HandoffReplayArm(READY_TARGET_RAD)
+    arm.joints = measured
+    install_replay(monkeypatch, arm)
+    output = tmp_path / "non-finite.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+
+    result = json.loads(output.read_text())["result"]
+    acquisition = result["initial_joint_state_acquisition"]
+    assert result["termination"] == "invalid_initial_joint_state_feedback"
+    assert acquisition["received"]
+    assert not acquisition["valid"]
+    assert "non-finite" in acquisition["failure_reason"]
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+
+
+def test_initial_joint_state_uses_three_second_acquisition_then_one_second_watchdog(
+    monkeypatch, tmp_path
+):
+    arm = TimeoutRecordingArm(READY_TARGET_RAD)
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "timeouts.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 0
+
+    payload = json.loads(output.read_text())
+    acquisition = payload["result"]["initial_joint_state_acquisition"]
+    assert arm.state_timeouts[0] == pytest.approx(3.0)
+    assert all(
+        timeout == pytest.approx(1.0) for timeout in arm.state_timeouts[1:]
+    )
+    assert acquisition["received"]
+    assert acquisition["valid"]
+    assert acquisition["timeout_sec"] == pytest.approx(3.0)
+    assert acquisition["wait_sec"] >= 0.0
+    assert payload["settings"]["feedback_watchdog_sec"] == pytest.approx(1.0)
+
+
+def test_initial_joint_state_timeout_is_clear_and_records_three_seconds(
+    monkeypatch, tmp_path, capsys
+):
+    arm = MissingInitialStateArm()
+    install_replay(monkeypatch, arm)
+    output = tmp_path / "initial-timeout.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 2
+
+    result = json.loads(output.read_text())["result"]
+    acquisition = result["initial_joint_state_acquisition"]
+    assert arm.state_timeouts == [3.0]
+    assert result["termination"] == "initial_joint_state_acquisition_failed"
+    assert acquisition["timeout_sec"] == pytest.approx(3.0)
+    assert "no /joint_states within 3.0 s" in acquisition["failure_reason"]
+    assert "no /joint_states within 3.0 s" in capsys.readouterr().out
+
+
+def test_measured_state_handoff_sync_failure_refuses_profile(
+    monkeypatch, tmp_path
+):
+    arm = FailHandoffSyncArm()
+    install_replay(monkeypatch, arm)
+    _install_fast_reacquisition(monkeypatch)
+    output = tmp_path / "handoff-sync-failed.json"
+
+    assert main(diagnostic_args("--output", str(output), "--execute")) == 3
+
+    result = json.loads(output.read_text())["result"]
+    assert result["termination"] == "handoff_sync_failed"
+    assert result["handoff_sync"] is None
+    assert "measured-state handoff" in result["termination_reason"]
+    assert result["diagnostic_execution"]["position_publish_count"] == 0
+
+
+def test_standalone_ready_accuracy_contract_remains_020_rad():
+    assert READY_TOLERANCE_RAD == pytest.approx(0.020)
+    just_outside = READY_TARGET_RAD.copy()
+    just_outside[3] += 0.0201
+    assert not check_ready(just_outside).passed
