@@ -249,26 +249,40 @@ measurement만 들어갑니다.
 `--diagnostic-profile --execute`는 별도의 ready 명령을 요구하지 않습니다.
 ROS adapter를 연 뒤 position/effort controller가 동시에 active이고 서로 다른
 command interface를 claim하는지 확인하고, 검증된 scale 1.0 중력보상을 먼저
-발행합니다. 현재 자세가 A-prime의 follow 전용 0.050 rad 범위를 벗어나면
-중력보상을 유지한 채 J4-first minimum-jerk joint trajectory로 A-prime을
-재획득합니다. `pose ready` 자체의 기준은 기존 0.020 rad 그대로입니다.
+발행합니다. Follow Ready의 목적은 A-prime을 정밀하게 재현하는 것이 아니라,
+제한된 이동으로 안전한 준비자세 근처에 가서 정지를 확인하는 것입니다.
 
-재획득 성공 직후 관절을 한 번 더 읽고 FK한 measured TCP로 live/accepted marker,
-내부 command, 최초 IK seed/continuity reference와 profile origin을 함께
-재동기화합니다. measured TCP 목표를 다시 IK로 풀며 IK target 관절을 measured
-관절값으로 강제하지 않습니다. 기존 0.30 rad continuity gate를 통과한 뒤에만
-진행합니다.
+초기 A-prime target 오차가 기존 이동 trigger인 0.050 rad를 넘으면 J4-first
+minimum-jerk joint trajectory를 그대로 시도합니다. 이동 뒤 최신 feedback이
+유한하고, 모든 관절이 joint limit와 A-prime 기준 0.060 rad 안전 근접 범위 안인지
+확인합니다. 이어서 measured joint sample의 관절별 최대 변화량이 0.002 rad 이하로
+0.5초 유지돼야 정지로 판정합니다. 이 변화량과 dwell은 기존 Cartesian handoff
+gate에서 사용한 실물 stationary-tail 기준을 재사용합니다. 정지 판정은 A-prime
+target error를 사용하지 않으므로 J4 잔류오차 0.0532 rad처럼 0.050 rad를 조금
+넘어도 안전하고 정지해 있으면 성공입니다. standalone `pose ready`의 정확도 기준과
+기존 동작은 0.020 rad 그대로입니다.
+
+판정 직후 관절을 한 번 더 읽고 FK한 measured TCP로 live/accepted marker, 내부
+command, 최초 IK seed/continuity reference와 profile origin을 함께 재동기화합니다.
+measured TCP 목표를 다시 IK로 풀며 IK target 관절을 measured 관절값으로 강제하지
+않습니다. 기존 0.30 rad continuity gate를 통과한 뒤에만 진행합니다.
 
 기존 TCP startup alignment 뒤에는 marker↔measured 위치 5 mm·자세 0.035 rad,
 IK↔command와 command↔measured 관절 0.060 rad, measured sample 변화량 0.002 rad
-조건이 0.5초 연속 유지돼야 profile을 시작합니다. 5초 timeout이면 마지막 measured
-위치를 safe hold하고 profile publish 없이 partial JSON을 저장합니다. 재획득 실패는 마지막
-feedback 위치를 safe hold하고 profile publish 0건인 partial JSON을 저장합니다.
-alignment, IK continuity, position-clamp 또는 예외 거부도 partial JSON에 단계와
-termination reason을 남깁니다. 중력보상은 종료 처리 전까지 끊지 않으며 마지막에
-zero effort를 세 번 발행합니다. 수동 marker follow와 dry-run 동작은 바뀌지
+조건이 0.5초 연속 유지돼야 profile을 시작합니다. 이 기존 Cartesian handoff gate와
+5초 timeout은 변경하지 않았습니다. feedback 미획득·NaN/Inf·joint limit 또는
+안전 근접 범위 위반·계속 움직임·controller 이상·재동기화 또는 handoff gate 실패는
+마지막 feedback 위치를 safe hold하고 profile publish 0건인 partial JSON으로
+종료합니다. 중력보상은 종료 처리 전까지 끊지 않으며 마지막에 zero effort를 세 번
+발행합니다. 수동 marker follow와 dry-run 동작은 바뀌지 않습니다.
+
+첫 `/joint_states` 획득은 ROS discovery를 위해 3초까지 기다립니다. 한 번 유효한
+state를 얻은 뒤의 feedback-loss watchdog은 기존 1초를 유지하며 3초로 늘리지
 않습니다.
 
+schema v2에는 기존 필드를 유지한 채 initial joint-state 실제 대기시간과 결과,
+Follow Ready 정책·판정, 정지 threshold/dwell/관측 변화량, A-prime 대비 final
+residual, measured-state 재동기화 여부와 구체적인 failure reason을 추가합니다.
 `stage_trace`와 `result.timeline`은 ready reacquisition부터 cleanup까지 같은
 run-relative clock과 sample index를 기록합니다. 성능 비교 기본값은
 `statistics_by_window.profile_only`이고 startup peak는 별도 window에 남습니다.

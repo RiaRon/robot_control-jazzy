@@ -1,5 +1,13 @@
 # Ready–deterministic follow 중력보상 인계 (2026-08-24)
 
+> 2026-08-25 정책 갱신: 아래 0.050 rad 내용은 당시 기준선과 제한 이동 trigger의
+> 기록으로 보존한다. 현재 Follow Ready 성공 조건은 A′ target 정확도가 아니라
+> joint limit·0.060 rad 안전 근접 범위와 measured 변화량 0.002 rad/sample 이하
+> 0.5초 정지다. 성공 시 최종 measured state를 PR #23 handoff 기준으로 채택한다.
+> Standalone `pose ready`의 0.020 rad 정확도 기준은 그대로이며 gain·gravity·limiter·
+> profile·기존 Cartesian convergence gate는 변경하지 않았다. 상세 실행 계약은
+> `docs/pose-follow.md`를 따른다.
+
 ## 범위와 입력
 
 이 변경은 ROS 2 Jazzy `jazzy@e1903ce`를 기준으로 코드, Python fake, ROS
