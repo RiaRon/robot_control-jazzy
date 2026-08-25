@@ -5,6 +5,46 @@
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
 
+## 최신 개발 — Follow Startup safety gate (2026-08-25)
+
+- 기준은 PR #23이 병합된 `jazzy@b16844f`이며 작업 branch는
+  `fix/follow-startup-safety-gate`, 구현 commit은 `5b09dfd`다. Pull Request:
+  [#24](https://github.com/RiaRon/robot_control-jazzy/pull/24).
+- Follow 전용 Ready는 더 이상 A′ target에 0.050 rad 이내로 수렴하는 정확도
+  시험이 아니다. 기존 제한 이동 뒤 finite feedback, configured joint limit,
+  A′ 기준 0.060 rad 안전 근접 범위를 확인하고 measured joint의 최대 sample
+  변화량이 0.002 rad 이하로 0.5초 유지되는지를 정지 조건으로 사용한다.
+- 안전하고 정지했다면 J4 0.0532 rad 같은 잔류오차도 수락하며, 최종 measured
+  joints/TCP로 marker, outer command, IK seed, continuity reference, profile
+  origin을 재동기화한다. 그 뒤 PR #23의 기존 Cartesian handoff convergence
+  gate를 그대로 통과해야 Profile을 시작한다.
+- feedback 미획득, NaN/Inf, joint limit/안전 근접 범위 위반, 계속 움직임,
+  controller 이상, measured-state 재동기화 또는 convergence gate 실패는 Profile
+  publish 전에 안전 중단한다.
+- 최초 `/joint_states` acquisition만 3초로 분리했고 실행 중 feedback-loss
+  watchdog은 기존 1초다. schema v2는 유지하며 wait/Ready/stationary/residual/
+  resync/failure 진단을 additive field로 추가했다.
+- standalone `pose ready`의 0.020 rad 기준, Follow Ready 5초 timeout, outer
+  command law, gain, gravity, TCP/joint limiter, IK continuity, Profile, 제어 주기는
+  변경하지 않았다. Startup 정확도 튜닝이나 실물 Startup 재시험을 요구하지 않는다.
+
+개발 PC 검증(실물 OpenArm/CAN 사용 안 함):
+
+- 관련 Follow/문서/reader 회귀 `41 passed`; 전체 Python
+  `690 passed, 4 skipped`; compileall과 `git diff --check` 성공
+- ROS 2 Jazzy 11 packages build 성공
+- GenericSystem pose smoke: world-z +30.0 mm, residual 0.0 mm
+- GenericSystem translation/rotation/combined 모두
+  `diagnostic_profile_completed`; measured resync와 기존 convergence gate 완료,
+  continuity refusal와 limiter 0
+- combined 최초 joint-state 실제 wait 약 1.068초는 새 3초 acquisition으로
+  진행했고 JSON의 runtime watchdog은 1초로 유지됐다.
+- MATLAB R2026a에서 2026-08-18 legacy v1과 새 schema v2 JSON을 같은 reader와
+  analyzer로 replay해 summary/figure bundle 생성을 확인했다.
+- ament workspace lint는 vendored ROS packages와 기존 Python baseline의
+  copyright/cpplint/flake8/pep257/uncrustify 오류 때문에 clean하지 않다. 변경
+  파일의 compile/test/diff 검사는 통과했다.
+
 ## 최신 개발 — measured handoff와 pose observability (2026-08-25)
 
 - base는 `docs/ready-handoff-translation-results@c0ee6aa`다. 이 commit은
