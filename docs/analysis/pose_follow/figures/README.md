@@ -39,3 +39,7 @@ marker를 함께 사용해 색상만으로 상태를 구분하지 않는다.
 확대한 기준선이다. 새 gate를 소급해 존재한 것처럼 표시하지 않는다. 전체 네 형식
 bundle은 Git 제외 `artifacts/pose_follow_matlab_validation/real_final_v2/`에 생성해
 검증했다.
+
+## 2026-08-26 schema v2 Translation baseline
+
+- [accepted-target 기준 7개 비교 figure](2026-08-26-translation/README.md)
