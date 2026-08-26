@@ -22,6 +22,7 @@ Cartesian intermediate target과 joint/controller 설정도 변경하지 않았�
 - [측정 계층·통계 분리·profile 검증](diagrams/measurement_pipeline.md)
 - [발표 figure metadata](figures/README.md)
 - [2026-08-24 기준선 표](tables/README.md)
+- [2026-08-26 Translation baseline 분석](2026-08-26-translation-baseline.md)
 - MATLAB: [`matlab/pose_follow`](../../../matlab/pose_follow)
 
 ## Schema v2

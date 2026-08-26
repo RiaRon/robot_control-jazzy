@@ -1,0 +1,11 @@
+Run,Phase,Samples,CartesianLinearCount,CartesianLinearPct,CartesianAngularCount,CartesianAngularPct,JointVelocityCount,JointLeadCount,JointPositionCount,JointLowerLimitCount,JointUpperLimitCount
+Run 1,profile-only,991,317,31.9878910191726,4,0.403632694248234,0,0,0,0,0
+Run 1,ramp,198,0,0,0,0,0,0,0,0,0
+Run 1,hold,297,0,0,0,0,0,0,0,0,0
+Run 1,return,198,19,9.5959595959596,0,0,0,0,0,0,0
+Run 1,origin-hold,298,298,100,4,1.34228187919463,0,0,0,0,0
+Run 2,profile-only,992,229,23.0846774193548,0,0,0,0,0,0,0
+Run 2,ramp,198,0,0,0,0,0,0,0,0,0
+Run 2,hold,298,110,36.9127516778523,0,0,0,0,0,0,0
+Run 2,return,198,0,0,0,0,0,0,0,0,0
+Run 2,origin-hold,298,119,39.9328859060403,0,0,0,0,0,0,0

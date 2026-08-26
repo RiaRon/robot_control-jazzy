@@ -7,3 +7,7 @@ rosbag, HDF5와 tar archive는 포함하지 않는다. `profile-only` 행을 성
 - [phase/stage TCP·IK·limiter summary](2026-08-24-summary.csv)
 - [J1-J7 joint summary](2026-08-24-joint-summary.csv)
 - [structured JSON summary](2026-08-24-analysis-summary.json)
+
+## 2026-08-26 schema v2 Translation baseline
+
+- [accepted-target, phase, joint, IK와 limiter 표](2026-08-26-translation/README.md)

@@ -1,0 +1,3 @@
+Run,Submitted,Succeeded,Failed,Superseded,SolveAttempts,Candidates,RejectedCandidates,ContinuityRejected,ContinuityRetries,ContinuityExhausted,RecordedJumpEvents,MaxSampleToSampleTargetJump_rad,DecompositionRMS_um,DecompositionMaxAbs_um
+Run 1,9,9,0,0,36,36,0,0,0,0,0,0.0143778110180561,3.40634796125381e-12,1.64798730217797e-11
+Run 2,10,10,0,0,40,40,0,0,0,0,0,0.0136823740151837,1.60677161327233e-12,6.93889390390723e-12
