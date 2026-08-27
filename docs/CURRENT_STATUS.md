@@ -1,9 +1,49 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-25 (Asia/Seoul)
+마지막 갱신: 2026-08-27 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
+
+## 최신 개발 — Follow outer target-crossing clamp (2026-08-27)
+
+- 최신 `jazzy@8740811`에서 branch
+  `fix/follow-outer-command-crossing-clamp`를 만들었다. 기존 measured-error law
+  `command + kp * (IK - measured) * dt`와 `kp=2.0 s^-1`는 유지한다.
+- 관절별 `IK-command`와 `IK-raw`의 부호가 바뀌는 target crossing을 같은 cycle의
+  최신 IK 기준으로 판정해 outer candidate를 IK에서 clamp한다. command가 이미
+  target에 있으면 measured lag만으로 바깥 누적을 재시작하지 않는다.
+- moving target reversal 뒤 raw가 새 target에서 더 멀어지거나 stale offset에서
+  진행하지 않으면 target을 bounded recovery candidate로 요청한다. 이후 기존
+  Cartesian linear/angular, joint velocity, measured lead, position/joint safety
+  limiter가 그대로 적용되며 limiter 뒤 final command를 덮어쓰지 않는다.
+- schema v2는 유지했다. `outer_target_crossing_clamp`에 raw/bounded candidate,
+  crossing/hold/outward/stalled/reversal mask와 총계·관절별 count를 additive하게
+  기록한다. MATLAB reader도 기존 legacy/v2에서 누락 필드를 false/NaN으로 읽는다.
+- gain, gravity, 내부 PD, limiter threshold/동작, IK, marker filtering, Profile,
+  Follow Startup/Ready/handoff gate, control period는 변경하지 않았다.
+
+개발 PC 검증(실물 OpenArm/CAN 사용 안 함):
+
+- outer 단위·고정 seed property·기존 limiter·Follow loop·reader/replay 핵심
+  `30 passed`; 전체 Python `713 passed, 4 skipped`; compileall과
+  `git diff --check` 성공
+- ROS 2 Jazzy 11 packages build와 GenericSystem pose smoke 성공
+- GenericSystem Translation 278 samples, Rotation 253 samples 정상 완료;
+  IK failure/supersede/continuity reject와 기존 limiter, outer clamp가 모두 0인
+  perfect-tracking 경로를 보존했다. 두 profile 모두 handoff gate를 통과했고
+  Translation의 ramp/hold/return/origin-hold가 완료됐다.
+- Combined GenericSystem 실행은 로컬 sandbox `bwrap`/approval timeout으로 process
+  시작 전에 막혔다. combined deterministic profile과 전체 Python 회귀는 통과했지만
+  이 실행을 성공으로 간주하지 않는다.
+- MATLAB R2026a 표준 validator가 2026-08-18 legacy와 변경 전 schema v2 실물
+  JSON을 읽고 12개 figure/report bundle을 생성했다.
+- 2026-08-26 Translation 저장 JSON one-step 구조 replay에서 변경 전 raw strict
+  crossing은 Run 1 13건, Run 2 11건이었고 bounded candidate는 모두 0건이었다.
+  원래 controller가 만든 measured trajectory를 재사용하므로 새 폐루프 성능
+  예측이 아니며 원본 JSON은 수정하거나 커밋하지 않았다.
+- ament workspace test는 기존 vendored baseline 오류(cpplint/uncrustify,
+  flake8/pep257)를 동일하게 보고했다. 이번 변경은 `ros_ws/src`를 수정하지 않았다.
 
 ## 최신 개발 — Follow Startup safety gate (2026-08-25)
 

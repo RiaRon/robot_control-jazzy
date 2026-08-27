@@ -15,6 +15,15 @@ if current.schema_version >= 2
     assert(current.schema_variant == "measured-handoff-v2");
     assert(any(current.phase == "convergence-gate"));
 end
+outer = current.outer_target_crossing_clamp;
+expectedShape = [numel(current.time_sec), numel(current.joint_names)];
+assert(isequal(size(outer.raw_candidate_rad), expectedShape));
+assert(isequal(size(outer.bounded_candidate_rad), expectedShape));
+assert(isequal(size(outer.clamp_mask), expectedShape));
+assert(islogical(outer.clamp_mask));
+assert(islogical(outer.crossing_mask));
+assert(islogical(outer.stalled_recovery_mask));
+assert(islogical(outer.target_reversal_outward_blocked_mask));
 assert(all(isfinite(legacy.position_error_signed_projection_m(:, [1, 3:6])), ...
     'all'), 'Legacy signed projections were not reconstructed.');
 for phase = ["ramp", "hold", "return", "origin-hold"]

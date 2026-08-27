@@ -409,6 +409,14 @@ RViz에 예전 goal이 남아 있어도 팔이 그 위치로 갑자기 이동하
 래치된 목표 관절의 오차가 남는 동안 위치 명령을 계속 앞당겨 impedance 처짐을
 보상합니다. 마커 회전은 무시하고 추종 시작 시 TCP 자세를 유지합니다.
 
+이 measured-error outer feedback은 유지하되, 관절별 raw candidate가 같은 주기의
+최신 IK target을 통과하려 하면 target에서 멈춥니다. command가 이미 target에
+도달한 뒤에는 measured lag만으로 반대편 누적을 다시 시작하지 않습니다. moving
+target이 방향을 바꿔 stale command가 새 target 반대편에 놓이면 새 target에서 더
+멀어지는 update와 진행 없는 update를 막고, target을 recovery candidate로
+요청합니다. 이 candidate도 기존 Cartesian, joint velocity, measured lead,
+position limit를 순서대로 통과하므로 final actuator command를 덮어쓰지 않습니다.
+
 MoveIt 서비스는 별도 작업자에서 실행되므로 느린 IK 왕복이 관절 피드백
 스트리밍을 막지 않습니다. 표시되는 100 Hz는 프로파일 목표값이고, 실물에서
 달성한 주파수와 joint-state 대기시간은 종료 보고서에 따로 나옵니다.
