@@ -9,7 +9,9 @@
 
 - 최신 `jazzy@8740811`에서 branch
   `fix/follow-outer-command-crossing-clamp`를 만들었다. 기존 measured-error law
-  `command + kp * (IK - measured) * dt`와 `kp=2.0 s^-1`는 유지한다.
+  `command + kp * (IK - measured) * dt`와 `kp=2.0 s^-1`는 유지한다. 구현 commit은
+  `561676a`, Pull Request는
+  [#26](https://github.com/RiaRon/robot_control-jazzy/pull/26)이며 자동 병합하지 않는다.
 - 관절별 `IK-command`와 `IK-raw`의 부호가 바뀌는 target crossing을 같은 cycle의
   최신 IK 기준으로 판정해 outer candidate를 IK에서 clamp한다. command가 이미
   target에 있으면 measured lag만으로 바깥 누적을 재시작하지 않는다.
