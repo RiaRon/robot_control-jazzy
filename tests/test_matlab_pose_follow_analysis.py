@@ -20,6 +20,10 @@ def test_parser_uses_matlab_jsondecode_fileread_and_supports_both_variants():
     assert "normalizeRefusal" in parser
     assert "is_partial" in parser
     assert "continuity_exhausted" in parser
+    assert "outer_target_crossing_clamp" in parser
+    assert "raw_candidate_rad" in parser
+    assert "bounded_candidate_rad" in parser
+    assert "nestedLogicalVector" in parser
 
 
 def test_analyzer_declares_the_complete_bundle_without_robot_dependencies():

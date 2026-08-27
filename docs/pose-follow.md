@@ -287,6 +287,63 @@ residual, measured-state 재동기화 여부와 구체적인 failure reason을 �
 run-relative clock과 sample index를 기록합니다. 성능 비교 기본값은
 `statistics_by_window.profile_only`이고 startup peak는 별도 window에 남습니다.
 
+## Outer target-crossing clamp
+
+Follow outer loop의 기존 measured-error update는 유지합니다.
+
+```text
+raw = command + kp * (IK target - measured) * dt
+```
+
+`kp=2.0 s^-1`, control period, gravity, 내부 PD, IK와 모든 limiter 설정값은 이
+변경에서 조정하지 않습니다. 다만 실제 관절이 늦게 따라오면 같은 measured error가
+이전 command에 반복 누적돼 command가 IK target을 지나갈 수 있으므로, raw와 기존
+command를 같은 control cycle의 최신 IK target에 대해 관절별로 비교합니다.
+
+```text
+e_command = IK target - command
+e_raw     = IK target - raw
+```
+
+`e_command`와 `e_raw`가 반대 부호면 해당 관절의 raw candidate가 target을
+통과하려는 것이므로 outer candidate를 IK target에 clamp합니다. 검사하는 것은
+command 관절각 자체가 0을 지나는지가 아니라 `IK target - command` error의
+부호입니다. J1~J7은 독립적으로 판정되어 clamp되지 않은 관절은 기존 raw 계산값을
+그대로 유지합니다.
+
+command가 이미 IK target에 있을 때 measured만 뒤처진 경우에는 crossing을 한 번
+reset하는 것만으로 충분하지 않습니다. 다음 cycle에도 같은 measured error가
+command를 target 밖으로 밀기 때문입니다. 따라서 target에 있는 command의 같은
+방향 재누적을 매 cycle 차단합니다. `1e-12 rad` epsilon은 floating-point sign
+비교만 안정화하는 수치 허용값이며 물리 deadband, 허용오차 또는 gain이 아닙니다.
+
+moving IK가 방향을 바꿔 stale command가 새 target 반대편에 놓이면 raw step이 새
+target에서 더 멀어지는 outward accumulation을 차단합니다. measured-error step이
+0이라 stale offset이 멈추는 경우도 별도 stalled recovery로 기록하고 IK target을
+bounded recovery candidate로 요청합니다. 실제 적용 순서는 다음과 같습니다.
+
+```text
+measured state -> latest accepted IK -> raw outer candidate
+-> outer target-crossing/conditional-integration bound
+-> Cartesian linear/angular speed limit
+-> joint velocity limit -> measured lead limit
+-> configured position/joint safety limit -> publish
+```
+
+따라서 새 outer clamp는 Cartesian, velocity, lead, position limiter와 별개이며
+그 limiter를 우회하거나 limiter 뒤의 final command를 IK로 덮어쓰지 않습니다.
+schema v2는 유지하고 trace의 raw/bounded candidate와 관절별 mask, result의 총계와
+관절별 count를 additive field `outer_target_crossing_clamp`로 기록합니다. 기존
+reader는 알 수 없는 필드를 무시하며 Python/MATLAB reader는 필드가 없는 기존 v2도
+기존 의미 그대로 읽습니다.
+
+2026-08-26 Translation 실물 JSON은 변경 전 알고리즘의 기준선입니다. 저장된
+measured/IK sequence를 이용한 offline replay는 같은 입력에서 candidate crossing이
+구조적으로 차단되는지만 확인하며 새 controller의 실제 폐루프 성능을 예측하지
+않습니다. 후속 실물 검증에서는 J1/J4 clamp count, return/origin-hold의
+IK-to-command, command-to-measured, 방향 전환 뒤 stale offset 해소 시간, 기존
+limiter count를 최소 확인해야 합니다.
+
 ## 5. 무기한 운전
 
 60초 시험에서 좌우, 방향, 속도, 종료가 모두 정상임을 확인한 뒤에만 무기한
