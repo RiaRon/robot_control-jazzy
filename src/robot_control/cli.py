@@ -80,10 +80,6 @@ from .follow_observability import (
     stage_for_sample,
     window_statistics,
 )
-from .follow_outer import (
-    OUTER_TARGET_SIGN_EPSILON_RAD,
-    bound_outer_candidate,
-)
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .ready import (
     FOLLOW_REACQUISITION_TOLERANCE_RAD,
@@ -3354,20 +3350,6 @@ def _follow_loop(
     ik_target_jump_counts = np.zeros(joint_count, dtype=int)
     ik_target_jump_events: list[dict] = []
 
-    # Keep the new outer-target guard distinct from the Cartesian and joint
-    # safety limiters. Counts are joint events; sample counts below say how many
-    # control cycles had at least one guarded joint.
-    outer_clamp_counts = np.zeros(joint_count, dtype=int)
-    outer_crossing_counts = np.zeros(joint_count, dtype=int)
-    outer_target_hold_counts = np.zeros(joint_count, dtype=int)
-    outer_outward_block_counts = np.zeros(joint_count, dtype=int)
-    outer_stalled_recovery_counts = np.zeros(joint_count, dtype=int)
-    outer_reversal_outward_block_counts = np.zeros(joint_count, dtype=int)
-    outer_clamp_samples = 0
-    previous_outer_ik_target = None
-    outer_target_motion_direction = np.zeros(joint_count, dtype=int)
-    outer_reversal_recovery_active = np.zeros(joint_count, dtype=bool)
-
     # r_aj_4와 같은 관절 이름을 배열 번호로 바꾸기 위한 표를 만든다.
     # 예: {"r_aj_1": 0, "r_aj_4": 3}
     joint_index_by_name = {
@@ -3863,56 +3845,9 @@ def _follow_loop(
                 # advancing the command while measured joints still trail the
                 # target is the outer feedback loop that removes it.
                 active_command = command.copy()
-                raw_outer_candidate = command + (
+                candidate = command + (
                     args.kp * (target_joints - state) * elapsed
                 )
-                outer_bounds = bound_outer_candidate(
-                    command,
-                    target_joints,
-                    raw_outer_candidate,
-                )
-                bounded_outer_candidate = outer_bounds.candidate
-                target_direction_reversal_mask = np.zeros(
-                    joint_count, dtype=bool
-                )
-                if previous_outer_ik_target is not None:
-                    target_delta = (
-                        target_joints - previous_outer_ik_target
-                    )
-                    current_motion_direction = np.zeros(
-                        joint_count, dtype=int
-                    )
-                    current_motion_direction[
-                        target_delta > OUTER_TARGET_SIGN_EPSILON_RAD
-                    ] = 1
-                    current_motion_direction[
-                        target_delta < -OUTER_TARGET_SIGN_EPSILON_RAD
-                    ] = -1
-                    target_direction_reversal_mask = (
-                        (current_motion_direction != 0)
-                        & (outer_target_motion_direction != 0)
-                        & (
-                            current_motion_direction
-                            != outer_target_motion_direction
-                        )
-                    )
-                    moving_mask = current_motion_direction != 0
-                    outer_target_motion_direction[moving_mask] = (
-                        current_motion_direction[moving_mask]
-                    )
-                    outer_reversal_recovery_active |= (
-                        target_direction_reversal_mask
-                    )
-                    recovery_complete = (
-                        np.abs(target_joints - active_command)
-                        <= OUTER_TARGET_SIGN_EPSILON_RAD
-                    )
-                    outer_reversal_recovery_active[recovery_complete] = False
-                reversal_outward_block_mask = (
-                    outer_reversal_recovery_active & outer_bounds.outward_mask
-                )
-                previous_outer_ik_target = target_joints.copy()
-                candidate = bounded_outer_candidate
                 # 현재 명령 자세와 새 후보 명령 자세를 순기구학으로 계산한다.
                 command_pose = chain.pose(command)
                 candidate_pose = chain.pose(candidate)
@@ -4030,17 +3965,6 @@ def _follow_loop(
                         ),
                     }
                     raise SafetyError(message)
-                outer_clamp_counts += outer_bounds.clamp_mask.astype(int)
-                outer_crossing_counts += outer_bounds.crossing_mask.astype(int)
-                outer_target_hold_counts += outer_bounds.target_hold_mask.astype(int)
-                outer_outward_block_counts += outer_bounds.outward_mask.astype(int)
-                outer_stalled_recovery_counts += (
-                    outer_bounds.stalled_recovery_mask.astype(int)
-                )
-                outer_reversal_outward_block_counts += (
-                    reversal_outward_block_mask.astype(int)
-                )
-                outer_clamp_samples += int(np.any(outer_bounds.clamp_mask))
                 if limited is not None:
                     notes[limited] = notes.get(limited, 0) + 1
                 for limit_kind, limited_joint_names in (
@@ -4414,42 +4338,6 @@ def _follow_loop(
                                 float(value) for value in state
                             ],
                         },
-                        "outer_target_crossing_clamp": {
-                            "active": bool(np.any(outer_bounds.clamp_mask)),
-                            "clamp_mask": [
-                                bool(value) for value in outer_bounds.clamp_mask
-                            ],
-                            "crossing_mask": [
-                                bool(value) for value in outer_bounds.crossing_mask
-                            ],
-                            "target_hold_mask": [
-                                bool(value) for value in outer_bounds.target_hold_mask
-                            ],
-                            "outward_accumulation_blocked_mask": [
-                                bool(value) for value in outer_bounds.outward_mask
-                            ],
-                            "stalled_recovery_mask": [
-                                bool(value)
-                                for value in outer_bounds.stalled_recovery_mask
-                            ],
-                            "target_direction_reversal_mask": [
-                                bool(value)
-                                for value in target_direction_reversal_mask
-                            ],
-                            "target_reversal_outward_blocked_mask": [
-                                bool(value)
-                                for value in reversal_outward_block_mask
-                            ],
-                            "ik_target_rad": [
-                                float(value) for value in target_joints
-                            ],
-                            "raw_candidate_rad": [
-                                float(value) for value in raw_outer_candidate
-                            ],
-                            "bounded_candidate_rad": [
-                                float(value) for value in bounded_outer_candidate
-                            ],
-                        },
                         "joint_error_rad": {
                             "ik_target_to_measured": [
                                 float(value)
@@ -4728,11 +4616,6 @@ def _follow_loop(
                 f"{angular_speed_limited} of {samples} samples"
             )
             print(f"  last maximum joint error: {joint_error_last:.4f} rad")
-            print(
-                "  outer target-crossing clamp on "
-                f"{outer_clamp_samples} of {samples} samples, "
-                f"{int(np.sum(outer_clamp_counts))} joint event(s)"
-            )
 
                          # 실험 중 누적한 관절별 오차를 샘플 수로 나누어
             # J1~J7 각각의 평균 절댓값 오차를 계산한다.
@@ -5099,9 +4982,6 @@ def _follow_loop(
                 args.max_ik_angular_step
             ),
             "max_joint_lead_sec": LEAD_SEC,
-            "outer_target_sign_epsilon_rad": float(
-                OUTER_TARGET_SIGN_EPSILON_RAD
-            ),
             "command_rate_hz": float(1.0 / period),
             "initial_joint_state_timeout_sec": FOLLOW_INITIAL_JOINT_STATE_TIMEOUT_SEC,
             "feedback_watchdog_sec": FOLLOW_FEEDBACK_WATCHDOG_SEC,
@@ -5217,47 +5097,6 @@ def _follow_loop(
                     for joint_index, joint_name in enumerate(
                         group.joints
                     )
-                ],
-            },
-            "outer_target_crossing_clamp": {
-                "samples": int(outer_clamp_samples),
-                "total_joint_events": int(np.sum(outer_clamp_counts)),
-                "strict_crossing_joint_events": int(
-                    np.sum(outer_crossing_counts)
-                ),
-                "target_hold_joint_events": int(
-                    np.sum(outer_target_hold_counts)
-                ),
-                "outward_accumulation_blocked_joint_events": int(
-                    np.sum(outer_outward_block_counts)
-                ),
-                "stalled_recovery_joint_events": int(
-                    np.sum(outer_stalled_recovery_counts)
-                ),
-                "target_reversal_outward_blocked_joint_events": int(
-                    np.sum(outer_reversal_outward_block_counts)
-                ),
-                "per_joint": [
-                    {
-                        "name": joint_name,
-                        "clamp_samples": int(outer_clamp_counts[joint_index]),
-                        "strict_crossing_samples": int(
-                            outer_crossing_counts[joint_index]
-                        ),
-                        "target_hold_samples": int(
-                            outer_target_hold_counts[joint_index]
-                        ),
-                        "outward_accumulation_blocked_samples": int(
-                            outer_outward_block_counts[joint_index]
-                        ),
-                        "stalled_recovery_samples": int(
-                            outer_stalled_recovery_counts[joint_index]
-                        ),
-                        "target_reversal_outward_blocked_samples": int(
-                            outer_reversal_outward_block_counts[joint_index]
-                        ),
-                    }
-                    for joint_index, joint_name in enumerate(group.joints)
                 ],
             },
             "within_accepted_marker_position_tolerance_samples": int(

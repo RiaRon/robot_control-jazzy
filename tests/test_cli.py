@@ -1438,21 +1438,6 @@ class DroopingDraggableArm(DraggableArm):
         )
 
 
-class PersistentLagDraggableArm(DraggableArm):
-    """Keep J1 behind its active command after the initial state handoff."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.state_reads = 0
-
-    def read_state(self, timeout_sec=None):
-        self.state_reads += 1
-        measured = self.joints.copy()
-        if self.state_reads > 1:
-            measured[0] -= 0.02
-        return measured
-
-
 def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
     """The regression that a perfect-tracking stub cannot catch."""
     from robot_control import ros_adapter
@@ -1486,18 +1471,9 @@ def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
     assert np.abs(arm.joints).max() > arm.DROOP, (
         f"a drooping arm did not advance: {arm.joints}"
     )
-    commanded_position = chain.pose(arm.streamed[-1])[:3, 3]
     actual_position = chain.pose(arm.joints)[:3, 3]
     target_position = np.asarray(arm._target.position)
-    # The bounded command reaches IK but cannot move beyond IK to compensate
-    # for this deliberately injected physical droop.  The residual therefore
-    # equals the stub's three Cartesian joint droops instead of accumulating
-    # command overshoot.
-    np.testing.assert_allclose(commanded_position, target_position, atol=1e-9)
-    assert np.linalg.norm(target_position - actual_position) == pytest.approx(
-        np.sqrt(3.0) * arm.DROOP
-    )
-    assert "outer target-crossing clamp" in capsys.readouterr().out
+    assert np.linalg.norm(target_position - actual_position) <= 0.002
 
 
 def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
@@ -1543,9 +1519,6 @@ def test_pose_follow_writes_layered_json_diagnostics(
     assert payload["group"] == "openarm_right_arm"
     assert payload["settings"]["kp_per_sec"] == pytest.approx(2.0)
     assert payload["settings"]["max_tcp_speed_m_s"] == pytest.approx(0.05)
-    assert payload["settings"]["outer_target_sign_epsilon_rad"] == pytest.approx(
-        1e-12
-    )
     assert "handoff_convergence_gate" in payload["settings"]
     assert payload["settings"]["instrumentation_availability"][
         "measured_effort"
@@ -1600,10 +1573,6 @@ def test_pose_follow_writes_layered_json_diagnostics(
             sample["joint_positions_rad"].keys()
         )
         assert {"command", "measured"} <= sample["joint_velocity_rad_s"].keys()
-        outer = sample["outer_target_crossing_clamp"]
-        assert len(outer["clamp_mask"]) == 7
-        assert len(outer["raw_candidate_rad"]) == 7
-        assert len(outer["bounded_candidate_rad"]) == 7
         assert sample["control_state"]["effort_measurement"] == "unavailable"
         positions = sample["tcp_positions_m"]
         expected = np.linalg.norm(
@@ -1626,20 +1595,6 @@ def test_pose_follow_writes_layered_json_diagnostics(
                 "command_to_measured",
             )
         ) == pytest.approx(expected, abs=1e-12)
-
-    outer_summary = result["outer_target_crossing_clamp"]
-    assert outer_summary["samples"] == sum(
-        sample["outer_target_crossing_clamp"]["active"] for sample in trace
-    )
-    assert outer_summary["total_joint_events"] == sum(
-        sum(sample["outer_target_crossing_clamp"]["clamp_mask"])
-        for sample in trace
-    )
-    assert outer_summary["total_joint_events"] == sum(
-        joint["clamp_samples"] for joint in outer_summary["per_joint"]
-    )
-    # Perfect-tracking fake hardware must preserve the pre-change path.
-    assert outer_summary["total_joint_events"] == 0
 
     # The perfect-tracking fake applies each command before the next state
     # sample, so the active command and measurement must have no hardware lag.
@@ -1696,66 +1651,11 @@ def test_pose_follow_diagnostics_separate_physical_droop(
         == 0
     )
 
-    payload = json.loads(output.read_text())
-    result = payload["result"]
+    result = json.loads(output.read_text())["result"]
     assert result["position_error_m"]["command_to_measured"]["worst"] > 0.0
     assert any(
         joint["command_to_measured_rad"]["worst"] > 0.0
         for joint in result["per_joint"]
-    )
-    outer = result["outer_target_crossing_clamp"]
-    assert outer["total_joint_events"] == sum(
-        sum(sample["outer_target_crossing_clamp"]["clamp_mask"])
-        for sample in payload["trace"]
-    )
-
-
-def test_pose_follow_outer_clamp_diagnostics_match_persistent_lag(
-    monkeypatch,
-    tmp_path,
-):
-    from robot_control import ros_adapter
-
-    chain = _servo_chain()
-    arm = PersistentLagDraggableArm(
-        target=_reachable_target(chain, np.zeros(7)),
-    )
-    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *args, **kwargs: arm)
-    monkeypatch.setattr(
-        "robot_control.cli._gravity_chain",
-        lambda *args: chain,
-    )
-    output = tmp_path / "persistent-lag.json"
-
-    assert main(
-        [
-            "pose",
-            "follow",
-            *RIGHT_ARM,
-            "--execute",
-            "--seconds",
-            "0.1",
-            "--output",
-            str(output),
-        ]
-    ) == 0
-
-    payload = json.loads(output.read_text())
-    summary = payload["result"]["outer_target_crossing_clamp"]
-    trace = payload["trace"]
-    trace_joint_events = sum(
-        sum(sample["outer_target_crossing_clamp"]["clamp_mask"])
-        for sample in trace
-    )
-    assert summary["total_joint_events"] == trace_joint_events
-    assert summary["total_joint_events"] > 0
-    assert summary["target_hold_joint_events"] > 0
-    assert summary["per_joint"][0]["target_hold_samples"] > 0
-    assert all(
-        sample["joint_positions_rad"]["next_command"][0]
-        == pytest.approx(sample["joint_positions_rad"]["ik_target"][0])
-        for sample in trace
-        if sample["outer_target_crossing_clamp"]["target_hold_mask"][0]
     )
 
 

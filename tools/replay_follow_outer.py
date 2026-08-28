@@ -11,11 +11,67 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
-from robot_control.follow_outer import bound_outer_candidate
+
+# Historical offline model only.  The production Follow controller no longer
+# imports or applies this bound after the outer-clamp revert.  Keeping the
+# calculation here preserves reproducibility of the 2026-08-28 analysis.
+OUTER_TARGET_SIGN_EPSILON_RAD = 1e-12
+
+
+class _HistoricalOuterCandidateBounds(NamedTuple):
+    candidate: np.ndarray
+    clamp_mask: np.ndarray
+    crossing_mask: np.ndarray
+    target_hold_mask: np.ndarray
+    outward_mask: np.ndarray
+    stalled_recovery_mask: np.ndarray
+
+
+def _historical_bound_outer_candidate(
+    command: np.ndarray,
+    ik_target: np.ndarray,
+    raw_candidate: np.ndarray,
+    *,
+    epsilon_rad: float = OUTER_TARGET_SIGN_EPSILON_RAD,
+) -> _HistoricalOuterCandidateBounds:
+    """Replay the reverted clamp without exposing it to production code."""
+    command_error = ik_target - command
+    raw_error = ik_target - raw_candidate
+    crossing_mask = (
+        ((command_error > epsilon_rad) & (raw_error < -epsilon_rad))
+        | ((command_error < -epsilon_rad) & (raw_error > epsilon_rad))
+    )
+    target_hold_mask = (
+        (np.abs(command_error) <= epsilon_rad)
+        & (np.abs(raw_error) > epsilon_rad)
+    )
+    outer_step = raw_candidate - command
+    outward_mask = (
+        ((command_error > epsilon_rad) & (outer_step < -epsilon_rad))
+        | ((command_error < -epsilon_rad) & (outer_step > epsilon_rad))
+    )
+    stalled_recovery_mask = (
+        (np.abs(command_error) > epsilon_rad)
+        & (np.abs(outer_step) <= epsilon_rad)
+    )
+    clamp_mask = (
+        crossing_mask
+        | target_hold_mask
+        | outward_mask
+        | stalled_recovery_mask
+    )
+    return _HistoricalOuterCandidateBounds(
+        candidate=np.where(clamp_mask, ik_target, raw_candidate),
+        clamp_mask=clamp_mask,
+        crossing_mask=crossing_mask,
+        target_hold_mask=target_hold_mask,
+        outward_mask=outward_mask,
+        stalled_recovery_mask=stalled_recovery_mask,
+    )
 
 
 def _phase(sample: dict[str, Any]) -> str:
@@ -94,7 +150,7 @@ def summarize_outer_replay(payload: dict[str, Any]) -> dict[str, Any]:
             previous_time = timestamp
 
         raw = command + kp * (target - measured) * dt
-        bounded = bound_outer_candidate(command, target, raw)
+        bounded = _historical_bound_outer_candidate(command, target, raw)
         raw_error = np.abs(target - raw)
         bounded_error = np.abs(target - bounded.candidate)
 

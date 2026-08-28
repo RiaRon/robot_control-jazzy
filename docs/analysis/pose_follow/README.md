@@ -1,5 +1,10 @@
 # Pose Follow handoff observability
 
+2026-08-28 outer-clamp 전후 비교와 그림은 적용 당시의 역사 자료다. 해당 clamp는
+이후 수동 장거리 Pose Follow의 target-hold 진행 정지 회귀 때문에 revert됐으며,
+현재 production Follow controller는 clamp 전 measured-error outer law를 사용한다.
+과거 clamp field가 있는 schema v2의 reader 호환성은 유지한다.
+
 이 디렉터리는 outer joint command law를 바꾸기 전 기준선과 변경 후 실물 비교를
 함께 보존한다. 기준선 실행 코드는
 Ready A′ 완료 직후 관절을 다시 읽어 measured TCP, marker, command, 최초 IK seed,

@@ -2,6 +2,12 @@
 
 분석일: 2026-08-28 (Asia/Seoul)
 
+> **역사적 분석:** 이 문서는 `af09a97` outer clamp가 active였을 때 작은
+> Translation·Rotation·Combined profile에서 얻은 결과를 보존한다. 이후 수동
+> 장거리 Pose Follow에서 target-hold로 진행이 정지하는 회귀가 확인되어 clamp는
+> revert됐다. 현재 production controller 동작을 설명하지 않으며, clamp가 줄였던
+> 누적 overshoot는 다시 미해결 상태다.
+
 ## 결론
 
 결론 분류는 **2. 일부 프로필만 개선됨**이다. 변경 후에는 세 프로필 모두에서
