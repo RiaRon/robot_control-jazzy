@@ -1,19 +1,19 @@
 # Pose Follow handoff observability
 
-이 디렉터리는 outer joint command law를 바꾸기 전 기준선이다. 실행 코드는
+이 디렉터리는 outer joint command law를 바꾸기 전 기준선과 변경 후 실물 비교를
+함께 보존한다. 기준선 실행 코드는
 Ready A′ 완료 직후 관절을 다시 읽어 measured TCP, marker, command, 최초 IK seed,
 continuity reference와 deterministic profile 원점을 한 시점에 맞춘다. 그 뒤
 bounded convergence gate를 통과한 sample만 profile 성능 비교에 포함한다.
 
-현재 outer law는 그대로다.
+변경 전 outer law는 다음과 같았다.
 
 ```text
 q_cmd[k+1] = q_cmd[k] + Kp * (q_IK[k] - q_measured[k]) * dt
 ```
 
-대체 law는 이 배치의 결론이 아니며 `Future work`이다. Kp/Kd, gravity scale 1.0,
-TCP 선속도·각속도 한계, IK continuity 0.30 rad, closest-candidate 정책,
-Cartesian intermediate target과 joint/controller 설정도 변경하지 않았다.
+이 law의 target-crossing clamp 적용 전후 실물 비교는 아래 2026-08-28 문서에
+기록한다. gain, gravity, 기존 limiter, IK, Profile은 그 비교에서 변경하지 않았다.
 
 ## 빠른 위치 안내
 
@@ -23,6 +23,7 @@ Cartesian intermediate target과 joint/controller 설정도 변경하지 않았�
 - [발표 figure metadata](figures/README.md)
 - [2026-08-24 기준선 표](tables/README.md)
 - [2026-08-26 Translation baseline 분석](2026-08-26-translation-baseline.md)
+- [2026-08-28 outer clamp 실물 전후 분석](2026-08-28-outer-clamp-real.md)
 - MATLAB: [`matlab/pose_follow`](../../../matlab/pose_follow)
 
 ## Schema v2
@@ -41,6 +42,8 @@ Cartesian intermediate target과 joint/controller 설정도 변경하지 않았�
 자세오차는 quaternion 부호를 동일 자세로 취급하고 상대 회전각을 사용한다.
 RPY 단순 차분은 사용하지 않는다. effort/current는 현 interface에서 읽을 수 없어
 `unavailable`이며, 실제 값에는 joint-state/controller interface의 별도 계측이 필요하다.
+outer clamp 추가 진단은 raw/bounded candidate, crossing/hold/outward/stalled/reversal
+mask와 관절별·phase별 count를 기록한다.
 
 ## 재현 분석
 
@@ -62,5 +65,6 @@ RPY 단순 차분은 사용하지 않는다. effort/current는 현 interface에�
 검증하는 자료가 아니다. 다만 기존 전체-run worst `48.466 mm`가 startup에서
 발생했고 profile-only accepted-target worst는 `16.842 mm`(live-target worst
 `17.685 mm`)였음을 분리해, startup peak를 profile 성능으로 다시 보고하지 않도록
-하는 기준선이다. 새 rotation/combined 실물 수치,
-실제 effort/current와 controller delay, outer-law 변경 효과는 아직 미확인이다.
+하는 기준선이다. 후속 rotation/combined와 outer-law 변경 효과는 2026-08-28
+문서에서 별도 `profile_only` 비교했다. 실제 effort/current와 controller delay는
+여전히 미확인이다.
