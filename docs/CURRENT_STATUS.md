@@ -9,8 +9,10 @@
 
 - 병합된 `jazzy@f5fb6b4`의 outer target-crossing clamp를 변경 전 실물 자료와
   `profile_only`에서 비교했다. 작업 branch는
-  `feature/outer-clamp-real-follow-analysis`이며 제어 코드, gain, gravity, limiter,
-  Profile은 수정하지 않았고 실물 OpenArm/CAN, 전체 test/build/fake를 실행하지 않았다.
+  `feature/outer-clamp-real-follow-analysis`, Pull Request는
+  [#27](https://github.com/RiaRon/robot_control-jazzy/pull/27)이며 자동 병합하지 않는다.
+  제어 코드, gain, gravity, limiter, Profile은 수정하지 않았고 실물 OpenArm/CAN,
+  전체 test/build/fake를 실행하지 않았다.
 - 변경 전은 Translation 2026-08-26 정상 완료 2회, Rotation 2026-08-25의 사전
   고정 run2/run3, Combined run1/run2다. 8/25 기록 commit은 `b16844f`로 clamp
   이전임을 확인했다. 8/26 Translation archive에는 commit marker가 없어 정확한
