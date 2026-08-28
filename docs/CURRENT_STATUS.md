@@ -5,6 +5,46 @@
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
 
+## 최신 안전 조치 — Follow outer clamp revert (2026-08-28)
+
+- 수동 장거리 Pose Follow에서 live marker Y가 약 162.7 mm 이동했지만 measured
+  TCP는 약 56.3 mm 뒤 정지하고, 종료 시 7개 관절 모두
+  `target_hold_mask=true`인 회귀가 보고됐다. 지정된
+  `right-follow-manual-final-2.json`은 이 개발 PC에 없어 수치는 사용자 제공
+  근거로 기록하며 로컬에서 재계산했다고 표현하지 않는다.
+- `af09a97`의 prospective crossing/target-hold/outward/stalled/reversal clamp와
+  hot-path 상태·count를 revert한다. active outer update는 다시
+  `command + kp * (IK target - measured) * dt`이며 이후 기존 Cartesian,
+  joint-velocity, measured-lead, configured position/joint safety limiter 순서를
+  그대로 통과한다.
+- 새 command-measured straddle reset, bounded lead, anti-windup, gain/PD/gravity,
+  limiter 또는 Profile 변경은 포함하지 않는다. 따라서 clamp가 줄였던 누적
+  overshoot는 다시 미해결 상태이며 후속 별도 제어 설계가 필요하다.
+- Startup safety gate, measured-state handoff, convergence gate, IK continuity와
+  기존 limiter는 보존한다. 과거 clamp field가 있는 schema v2를 읽는 reader
+  호환 코드도 유지하되 새 실행은 clamp 진단을 생성하지 않는다.
+- 2026-08-28 분석 문서·스크립트·SVG는 적용 당시 작은 Translation/Rotation/
+  Combined에서 crossing과 final error를 개선했던 역사 자료와 이후 회귀 근거로
+  보존한다. 현재 active controller 동작을 설명하는 문서가 아니다.
+
+개발 PC 검증(실물 OpenArm/CAN 사용 안 함):
+
+- Follow 관련 `132 passed`; 전체 Python `690 passed, 4 skipped`; `compileall`과
+  `git diff --check` 성공. clamp 전 raw 누적 law를 다루는 기존 fake-lag 회귀도
+  통과했으며, 이 기준선의 누적 overshoot 위험은 해결된 것으로 간주하지 않는다.
+- ROS 2 Jazzy 11 packages build와 GenericSystem pose smoke(+30.0 mm, residual
+  0.0 mm) 성공. fake Translation/Rotation/Combined는 각각 1227/1178/1201
+  samples, 98.6/98.7/98.5 Hz로 `diagnostic_profile_completed`; IK 실패·supersede,
+  continuity 실패와 Cartesian/joint velocity/lead/position limiter는 모두 0이었다.
+  새 schema v2 결과에는 clamp summary가 없고 trace clamp sample도 0개다.
+- Python historical analyzer와 MATLAB R2026a reader가 legacy v1, clamp field가
+  있는 기존 v2, clamp field가 없는 새 v2를 모두 읽었다. 기존 v2의 clamp
+  진단은 보존되고 누락 field는 기존 false/NaN 기본값으로 처리됐다.
+- ament workspace test는 revert가 수정하지 않은 6개 vendored package에서 기존
+  copyright/cpplint/uncrustify/flake8/lint_cmake/pep257 오류를 보고했다
+  (`1952 failures`, 기능 test error 0). 이번 작업에서 `ros_ws/src`는 변경하지
+  않았으며 이 unrelated baseline lint를 수정하지 않았다.
+
 ## 최신 분석 — outer clamp 실물 Follow 전후 비교 (2026-08-28)
 
 - 병합된 `jazzy@f5fb6b4`의 outer target-crossing clamp를 변경 전 실물 자료와
@@ -35,13 +75,13 @@
   기록했다. 다음 실물 확인은 설정을 바꾸기 전에 Rotation/Combined moving 자세
   악화와 Translation origin residual의 반복성을 확인하는 것이다.
 
-## 최신 개발 — Follow outer target-crossing clamp (2026-08-27)
+## 역사적 개발 — Follow outer target-crossing clamp (2026-08-27, revert됨)
 
 - 당시 `jazzy@8740811`에서 branch
   `fix/follow-outer-command-crossing-clamp`를 만들었다. 기존 measured-error law
   `command + kp * (IK - measured) * dt`와 `kp=2.0 s^-1`는 유지한다. 구현은 rebase 뒤
   `af09a97`로 [#26](https://github.com/RiaRon/robot_control-jazzy/pull/26)에 병합됐고,
-  현재 `jazzy` merge head는 `f5fb6b4`다.
+  당시 `jazzy` merge head는 `f5fb6b4`였다.
 - 관절별 `IK-command`와 `IK-raw`의 부호가 바뀌는 target crossing을 같은 cycle의
   최신 IK 기준으로 판정해 outer candidate를 IK에서 clamp한다. command가 이미
   target에 있으면 measured lag만으로 바깥 누적을 재시작하지 않는다.
