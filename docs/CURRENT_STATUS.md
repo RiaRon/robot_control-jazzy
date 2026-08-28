@@ -1,17 +1,45 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-27 (Asia/Seoul)
+마지막 갱신: 2026-08-28 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
 
+## 최신 분석 — outer clamp 실물 Follow 전후 비교 (2026-08-28)
+
+- 병합된 `jazzy@f5fb6b4`의 outer target-crossing clamp를 변경 전 실물 자료와
+  `profile_only`에서 비교했다. 작업 branch는
+  `feature/outer-clamp-real-follow-analysis`이며 제어 코드, gain, gravity, limiter,
+  Profile은 수정하지 않았고 실물 OpenArm/CAN, 전체 test/build/fake를 실행하지 않았다.
+- 변경 전은 Translation 2026-08-26 정상 완료 2회, Rotation 2026-08-25의 사전
+  고정 run2/run3, Combined run1/run2다. 8/25 기록 commit은 `b16844f`로 clamp
+  이전임을 확인했다. 8/26 Translation archive에는 commit marker가 없어 정확한
+  실행 commit은 미확인이다.
+- 변경 후는 2026-08-28 archive의 Translation/Rotation/Combined 각 3회다.
+  `git-head.txt`는 `f5fb6b4`이고, 9회 모두 schema v2, 정상 Profile 완료, 완전한
+  startup--origin-hold trace, JSON/log 일치를 확인했다.
+- 결론 분류는 **일부 프로필만 개선됨**이다. bounded maximum crossing은 수치 오차
+  범위에서 0이었고 IK 바깥 재누적은 없었다. return stale 해소와 세 프로필의 TCP
+  위치, origin-hold final position/orientation은 대체로 개선됐다.
+- Translation TCP position RMS/max/final은 9.644/17.525/15.219 mm에서
+  5.894/8.734/3.601 mm로 개선됐다. Rotation/Combined TCP position도 개선됐지만
+  moving orientation mean/RMS는 Rotation 1.337/1.732 deg에서 2.097/2.686 deg,
+  Combined 1.695/1.949 deg에서 2.166/2.671 deg로 악화됐다.
+- 변경 후 clamp event의 92.0--95.3%가 target-hold였고, clamp-free update에서
+  raw/bounded 불일치는 0이었다. IK failure/supersede, continuity failure, target jump,
+  joint velocity/lead/position limiter, NaN/Inf와 trace 누락은 없었다.
+- 상세 수치, 사용·제외 파일, phase/관절별 결과, 한계와 재현 명령은
+  [`docs/analysis/pose_follow/2026-08-28-outer-clamp-real.md`](analysis/pose_follow/2026-08-28-outer-clamp-real.md)에
+  기록했다. 다음 실물 확인은 설정을 바꾸기 전에 Rotation/Combined moving 자세
+  악화와 Translation origin residual의 반복성을 확인하는 것이다.
+
 ## 최신 개발 — Follow outer target-crossing clamp (2026-08-27)
 
-- 최신 `jazzy@8740811`에서 branch
+- 당시 `jazzy@8740811`에서 branch
   `fix/follow-outer-command-crossing-clamp`를 만들었다. 기존 measured-error law
-  `command + kp * (IK - measured) * dt`와 `kp=2.0 s^-1`는 유지한다. 구현 commit은
-  `561676a`, Pull Request는
-  [#26](https://github.com/RiaRon/robot_control-jazzy/pull/26)이며 자동 병합하지 않는다.
+  `command + kp * (IK - measured) * dt`와 `kp=2.0 s^-1`는 유지한다. 구현은 rebase 뒤
+  `af09a97`로 [#26](https://github.com/RiaRon/robot_control-jazzy/pull/26)에 병합됐고,
+  현재 `jazzy` merge head는 `f5fb6b4`다.
 - 관절별 `IK-command`와 `IK-raw`의 부호가 바뀌는 target crossing을 같은 cycle의
   최신 IK 기준으로 판정해 outer candidate를 IK에서 clamp한다. command가 이미
   target에 있으면 measured lag만으로 바깥 누적을 재시작하지 않는다.
