@@ -24,8 +24,11 @@
   jump와 sequence-6 pi/pi/2 jump 수락 및 진단 기록을 fake adapter로 확인했다.
   ROS 빌드·GenericSystem 실행·실물 OpenArm/CAN 시험은 이번 작업에서 수행하지
   않았다.
-- 다음 작업: 검증된 변경을 본인 GitHub의 `jazzy`에 rebase 병합하고 로컬을
-  동기화한다. 실물 배포·동작 시험은 이번 작업에서 수행하지 않는다.
+- 구현 커밋: `2810891`; 반영 경로는
+  [PR #29](https://github.com/RiaRon/robot_control-jazzy/pull/29)의 `jazzy` 대상
+  rebase 병합이다. 재개할 때 실제 원격 병합 상태와 로컬 HEAD를 확인한다.
+- 다음 작업: 사용자가 지정하는 후속 작업을 최신 `jazzy`에서 진행한다.
+  실물 배포·동작 시험은 이번 작업에 포함하지 않는다.
 
 ## 최신 안전 조치 — Follow outer clamp revert (2026-08-28)
 
