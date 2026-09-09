@@ -1,9 +1,31 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-08-28 (Asia/Seoul)
+마지막 갱신: 2026-09-09 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
+
+## 최신 변경 — Follow 0.30 rad 정지 제한 제거 (2026-09-09)
+
+- 사용자 요청에 따라 최신 `origin/jazzy@090d3bd`에서
+  `feature/remove-follow-030-stop`을 만들고 IK 관절 목표 차이 `>=0.30 rad`에
+  따른 후보 거부와 발행 전 정지 경로를 제거했다. 수동·deterministic Follow에
+  모두 적용하며 더 큰 임계값이나 대체 정지 조건을 추가하지 않았다.
+- 최대 4개 후보의 weighted closest 선택, seed 갱신, solve/batch 시간 상한,
+  진단용 jump 기록은 유지한다. JSON의 `max_safe_ik_target_jump_rad`는 `null`로
+  제한 없음을 나타내며 기존 continuity 진단 필드는 0/빈 목록으로 유지한다.
+- 제어식, gain, gravity, TCP/관절 속도·lead·position limiter, Ready/startup/
+  handoff gate, watchdog과 명시적 실행 조건은 변경하지 않았다.
+- 아래 2026-08 기록의 0.30 rad 하드 경계 설명은 역사적 동작이다. 현재 운영
+  문서와 Work 인계에는 제거된 상태를 표시했다.
+- 개발 PC 검증: 전체 Python `697 passed, 4 skipped`; closest 선택과 jump
+  기록 검사를 보강한 최종 관련 회귀 `46 passed`; `compileall`과
+  `git diff --check` 성공. 수동·진단 모드의 ±0.30/±0.75 rad, 최초 J3/J5
+  jump와 sequence-6 pi/pi/2 jump 수락 및 진단 기록을 fake adapter로 확인했다.
+  ROS 빌드·GenericSystem 실행·실물 OpenArm/CAN 시험은 이번 작업에서 수행하지
+  않았다.
+- 다음 작업: 검증된 변경을 본인 GitHub의 `jazzy`에 rebase 병합하고 로컬을
+  동기화한다. 실물 배포·동작 시험은 이번 작업에서 수행하지 않는다.
 
 ## 최신 안전 조치 — Follow outer clamp revert (2026-08-28)
 

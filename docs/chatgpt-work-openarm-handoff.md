@@ -1,5 +1,10 @@
 # ChatGPT Work 인계 — OpenArm 오른팔 `pose follow`
 
+> 2026-09-09 갱신: 현재 Follow는 IK 관절 목표 차이 `>=0.30 rad`에 따른 후보
+> 거부·정지를 제거했다. 가까운 IK 후보 선택과 진단용 jump 기록은 유지한다.
+> 아래 2026-08 기록의 0.30 rad 하드 차단 설명은 당시 동작이며 현재에는 적용되지
+> 않는다. 현재 동작은 [pose-follow.md](pose-follow.md)를 따른다.
+
 작성일: 2026-08-18 (Asia/Seoul)
 
 이 문서는 ChatGPT 계정의 `OpenArm 연구진행` Work가 OpenArm 컴퓨터의

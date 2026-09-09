@@ -25,8 +25,8 @@ READY_POSTURES = {
 
 # GenericSystem reaches the target to floating-point precision. The previous
 # real baselines reported a last maximum joint error of 0.0063 rad; 0.02 rad is
-# more than three times that settled error while still small against the 0.30
-# rad continuity boundary and the v2 posture's 0.375 rad limit margin.
+# more than three times that settled error while still small against the
+# v2 posture's 0.375 rad limit margin.
 READY_TOLERANCE_RAD = 0.02
 # Keep the pose-ready acceptance criterion above unchanged. Deterministic
 # follow has a separate handoff criterion because gravity-compensated hardware
@@ -40,8 +40,7 @@ FOLLOW_REACQUISITION_TOLERANCE_RAD = 0.05
 # A-prime move is needed and for legacy diagnostics.  The final measured state
 # may be adopted only inside this separate safety neighbourhood.  The
 # 0.060-rad bound includes the observed stationary J4 residual (0.0532 rad)
-# plus encoder noise margin, while remaining five times smaller than the
-# existing 0.30-rad single-joint IK continuity refusal boundary.
+# plus encoder noise margin.
 FOLLOW_READY_SAFE_NEIGHBORHOOD_RAD = 0.060
 # Reuse the measured-sample bound and dwell already validated for the Cartesian
 # handoff tail.  At 100 Hz, 0.002 rad/sample is conservative against the
