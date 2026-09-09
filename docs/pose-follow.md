@@ -204,11 +204,11 @@ drag the marker in RViz; the arm tracks it until the time runs out
 첫 IK target은 startup 실측 관절, 이후 target은 직전 accepted target을 모든
 후보의 seed와 연속성 기준으로 사용합니다. 비동기 worker가 같은 Cartesian
 목표에서 최대 4개 후보를 0.25초 batch 상한(후보 solve당 0.05초) 안에 생성합니다.
-각 후보에 먼저 단일 관절 `>=0.30 rad` 경계를 적용하고, 통과 후보 중 weighted
-joint distance가 최소인 해를 선택합니다. 유한 revolute는 직접 차이, continuous는
+관절 차이에 따른 후보 거부 없이 weighted joint distance가 최소인 해를 선택합니다.
+유한 revolute는 직접 차이, continuous는
 wrap된 최소 각도 차이를 사용하며, 동일 비용은 관절 벡터 사전순 후 후보 번호로
-결정합니다. 모든 후보가 불연속이면 이전 target을 유지하고 partial JSON 저장 후
-안전 종료합니다.
+결정합니다. 관절 차이가 `0.30 rad` 이상이어도 이 차이를 이유로 후보를 거부하거나
+추종을 정지하지 않습니다.
 
 비용은 `sqrt(sum(w_i * delta_i^2))`, `w_i=(median joint range / joint range_i)^2`입니다.
 범위가 좁은 관절의 같은 rad 이동을 더 크게 보아 normalized range 사용량을
@@ -217,9 +217,9 @@ accepted 해에 가장 가까운 해라는 1차 목적이 바뀌므로 보조 �
 현재 비용에는 넣지 않았습니다. 현재 오른팔에는 continuous joint가 없지만 worker
 계산은 continuous mask를 지원합니다.
 
-`0.30 rad` 비교는 `>=`인 하드 경계이며 분석용 `--ik-jump-threshold`와
-별개입니다. CLI로 완화하거나 제거할 수 없습니다. deterministic profile에서는
-position clamp도 예상하지 않은 목표로 취급해 첫 clamp를 publish하기 전에
+분석용 `--ik-jump-threshold`는 jump 이벤트 기록에만 사용하며 정지시키지 않습니다.
+JSON의 `settings.max_safe_ik_target_jump_rad`는 제한 없음을 뜻하는 `null`입니다.
+deterministic profile에서는 position clamp도 예상하지 않은 목표로 취급해 첫 clamp를 publish하기 전에
 거부합니다. 수동 marker 모드의 속도·lead·position clamp는 기존처럼 제한 후
 계속합니다.
 
@@ -265,7 +265,7 @@ target error를 사용하지 않으므로 J4 잔류오차 0.0532 rad처럼 0.050
 판정 직후 관절을 한 번 더 읽고 FK한 measured TCP로 live/accepted marker, 내부
 command, 최초 IK seed/continuity reference와 profile origin을 함께 재동기화합니다.
 measured TCP 목표를 다시 IK로 풀며 IK target 관절을 measured 관절값으로 강제하지
-않습니다. 기존 0.30 rad continuity gate를 통과한 뒤에만 진행합니다.
+않습니다. 같은 weighted joint distance 기준으로 가장 가까운 IK 해를 선택합니다.
 
 기존 TCP startup alignment 뒤에는 marker↔measured 위치 5 mm·자세 0.035 rad,
 IK↔command와 command↔measured 관절 0.060 rad, measured sample 변화량 0.002 rad

@@ -259,7 +259,7 @@ def test_output_permission_failure_is_refused_before_adapter_creation(
     assert "simulated read-only directory" in output
 
 
-def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
+def test_initial_j3_j5_branch_jump_is_accepted(
     monkeypatch, capsys
 ):
     # The terminal summary retained magnitudes only. These representative
@@ -271,16 +271,14 @@ def test_initial_j3_j5_branch_jump_is_refused_before_first_publish(
     arm = ReplayArm(READY_TARGET_RAD, branch_offset)
     install_replay(monkeypatch, arm)
 
-    assert main(diagnostic_args("--execute")) == 3
+    assert main(diagnostic_args("--execute")) == 0
     assert arm.ik_requests
     np.testing.assert_array_equal(
         arm.ik_requests[0][1], READY_TARGET_RAD
     )
-    assert arm.streamed == []
-    output = capsys.readouterr().out
-    assert "IK target jump refused before publish" in output
-    assert "r_aj_3=+0.7646 rad" in output
-    assert "r_aj_5=-0.7480 rad" in output
+    assert arm.streamed
+    assert any(command[2] > READY_TARGET_RAD[2] for command in arm.streamed)
+    assert "IK target jump refused" not in capsys.readouterr().out
 
 
 def test_recovered_incident_pose_is_reacquired_before_ik(
@@ -315,18 +313,32 @@ def test_recovered_incident_pose_is_reacquired_before_ik(
     assert result["diagnostic_execution"]["position_publish_count"] > 0
 
 
-def test_ik_target_jump_at_exact_hard_boundary_is_refused(monkeypatch, capsys):
+@pytest.mark.parametrize("jump", [-0.75, -0.30, 0.30, 0.75])
+@pytest.mark.parametrize("mode", ["manual", "diagnostic"])
+def test_joint_jump_no_longer_stops_follow(monkeypatch, tmp_path, jump, mode):
     branch_offset = np.zeros(7)
-    branch_offset[0] = 0.30
+    branch_offset[0] = jump
     arm = ReplayArm(READY_TARGET_RAD, branch_offset)
     install_replay(monkeypatch, arm)
+    output = tmp_path / "jump-accepted.json"
+    extra = ["--output", str(output), "--execute"]
+    args = diagnostic_args(*extra) if mode == "diagnostic" else [
+        "pose", "follow", *RIGHT_ARM, "--startup-settle-sec", "0",
+        "--seconds", "0.25", *extra,
+    ]
 
-    assert main(diagnostic_args("--execute")) == 3
-    assert arm.ik_requests
-    assert arm.streamed == []
-    output = capsys.readouterr().out
-    assert "IK target jump refused before publish" in output
-    assert "r_aj_1=+0.3000 rad" in output
+    assert main(args) == 0
+
+    payload = json.loads(output.read_text())
+    result = payload["result"]
+    assert payload["settings"]["max_safe_ik_target_jump_rad"] is None
+    assert result["refusal"] is None
+    assert result["ik"]["succeeded"] > 0
+    assert result["ik"]["continuity_rejected"] == 0
+    assert result["ik"]["continuity_exhausted"] == 0
+    assert result["ik"]["continuity_events"] == []
+    assert arm.streamed
+    assert any(command[0] * jump > 0 for command in arm.streamed)
 
 
 def test_deterministic_alignment_message_never_invites_marker_drag(
@@ -343,12 +355,12 @@ def test_deterministic_alignment_message_never_invites_marker_drag(
     assert "drag the marker" not in output
 
 
-def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
+def test_sequence_six_branch_jump_is_accepted_and_recorded(
     monkeypatch, tmp_path, capsys
 ):
     arm = SequenceSixBranchReplayArm()
     install_replay(monkeypatch, arm)
-    output_path = tmp_path / "partial-refusal.json"
+    output_path = tmp_path / "sequence-six-accepted.json"
 
     code = main(
         diagnostic_args(
@@ -366,47 +378,32 @@ def test_sequence_six_branch_jump_writes_partial_json_before_refusal(
         )
     )
 
-    assert code == 3
-    assert output_path.is_file()
+    assert code == 0
     payload = json.loads(output_path.read_text())
     result = payload["result"]
-    refusal = result["refusal"]
 
-    assert result["termination"] == "safety_refused"
-    assert result["is_partial"]
+    assert result["refusal"] is None
+    assert not result["is_partial"]
     assert result["samples"] == len(payload["trace"])
-    assert result["samples"] > 0
     np.testing.assert_allclose(
         payload["trace"][0]["joint_positions_rad"]["measured"],
         READY_TARGET_RAD,
         atol=1e-12,
     )
-    assert result["ik"]["submitted"] == 6
-    assert result["ik"]["succeeded"] == 5
-    assert result["ik"]["continuity_rejected"] == 4
-    assert result["ik"]["continuity_retries"] == 3
-    assert result["ik"]["continuity_exhausted"] == 1
-    assert refusal["reason"] == "ik_continuity_exhausted"
-    assert refusal["refused_sequence"] == 6
-    assert refusal["profile_phase"] == "translation_ramp_out"
-    assert refusal["attempts"] == 4
-    assert refusal["triggered_joints"] == [
-        "r_aj_1",
-        "r_aj_2",
-        "r_aj_3",
-        "r_aj_5",
-    ]
-    np.testing.assert_allclose(
-        refusal["joint_delta_rad"], RETEST_BRANCH_JUMP_RAD
+    assert result["ik"]["succeeded"] >= 6
+    assert result["ik"]["continuity_rejected"] == 0
+    assert result["ik"]["continuity_retries"] == 0
+    assert result["ik"]["continuity_exhausted"] == 0
+    assert any(sample["ik_sequence"] == 6 for sample in payload["trace"])
+    jump_event = next(
+        event for event in result["ik_target_jumps"]["events"]
+        if event["to_sequence"] == 6
     )
-    assert all(sample["ik_sequence"] != 6 for sample in payload["trace"])
-    assert arm.streamed
-    for command in arm.streamed:
-        np.testing.assert_allclose(command, arm.streamed[0])
-
-    terminal = capsys.readouterr().out
-    assert "wrote partial pose follow diagnostics" in terminal
-    assert "IK target jump refused before publish after 4" in terminal
+    np.testing.assert_allclose(jump_event["joint_delta_rad"], RETEST_BRANCH_JUMP_RAD)
+    assert any(
+        not np.allclose(command, arm.streamed[0]) for command in arm.streamed
+    )
+    assert "IK target jump refused" not in capsys.readouterr().out
 
 
 def _install_fast_reacquisition(monkeypatch):

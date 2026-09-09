@@ -210,8 +210,7 @@ before/after JSON은 원자 저장된다. 실패와 예외도 가능한 최신 f
 after JSON을 남기며 target, controller reference, feedback, 관절별 error, gravity
 scale/torque, settle 시간·종료 이유, safe hold와 zero cleanup 결과를 기록한다.
 허용 오차는 관절별 0.020 rad다. GenericSystem은 사실상 0 오차이고 과거 중력보상
-실물 baseline worst 0.0063 rad의 3배 이상이면서 기존 IK 0.30 rad hard boundary보다
-충분히 작다. 후보 근거는
+실물 baseline worst 0.0063 rad의 3배 이상이다. 후보 근거는
 [`ready-posture-evaluation-2026-08-20.md`](ready-posture-evaluation-2026-08-20.md)에
 있다.
 ## `robotctl pose torque`
@@ -662,8 +661,10 @@ behaviour remain 0.020 rad and unchanged.
 After the safety-and-stationarity decision, follow reads measured joints again
 and uses their FK TCP as the live/accepted marker, internal command, first IK
 seed, continuity reference, and profile origin. It solves IK for that measured
-TCP; it does not force the IK joint target equal to feedback. The existing
-0.30 rad continuity boundary still decides whether that solution is usable.
+TCP; it does not force the IK joint target equal to feedback. It selects the
+closest IK candidate by weighted joint distance without rejecting or stopping
+for a joint delta of 0.30 rad or more. The diagnostic `--ik-jump-threshold`
+still records jumps only; `settings.max_safe_ik_target_jump_rad` is `null`.
 
 Successful alignment starts a bounded convergence gate, not the profile. All
 marker-to-measured translation/orientation, IK-to-command, command-to-measured,

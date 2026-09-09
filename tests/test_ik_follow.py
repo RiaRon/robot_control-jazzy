@@ -267,31 +267,33 @@ def test_continuity_retry_solver_errors_still_end_in_safe_exhaustion():
 
 
 
-def test_closest_candidate_wins_among_multiple_continuous_solutions():
+@pytest.mark.parametrize(("jump_limit", "scale"), [(0.30, 1.0), (None, 20.0)])
+def test_closest_candidate_wins_with_or_without_jump_limit(jump_limit, scale):
     from robot_control.ik_follow import LatestIkWorker
 
     returned = iter(
         [
-            np.array([0.12, 0.0]),
-            np.array([0.02, 0.01]),
-            np.array([-0.05, 0.0]),
-            np.array([0.08, 0.0]),
+            scale * np.array([0.12, 0.0]),
+            scale * np.array([0.02, 0.01]),
+            scale * np.array([-0.05, 0.0]),
+            scale * np.array([0.08, 0.0]),
         ]
     )
     worker = LatestIkWorker(
         lambda _pose, _seed: next(returned),
-        max_target_jump_rad=0.30,
+        max_target_jump_rad=jump_limit,
         max_continuity_attempts=4,
         joint_weights=[1.0, 4.0],
     )
     try:
         worker.submit(_pose(0.0), np.zeros(2))
         status = _wait_until(lambda: worker.snapshot().succeeded == 1 and worker.snapshot())
-        np.testing.assert_allclose(status.target, [0.02, 0.01])
+        np.testing.assert_allclose(status.target, scale * np.array([0.02, 0.01]))
         selection = status.selections[0]
         assert selection.selected_candidate == 2
-        assert selection.selected_cost == pytest.approx(np.sqrt(0.0008))
+        assert selection.selected_cost == pytest.approx(scale * np.sqrt(0.0008))
         assert len(selection.candidates) == 4
+        assert status.continuity_rejected == 0
     finally:
         worker.close()
 

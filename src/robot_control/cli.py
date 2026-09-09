@@ -202,14 +202,7 @@ DEFAULT_MAX_START_ANGLE_RAD = 0.35
 # Diagnostics only: this threshold records an event and never changes a target.
 DEFAULT_IK_TARGET_JUMP_THRESHOLD_RAD = 0.10
 
-# Hard execution boundary: a local IK solve seeded from the measured state must
-# not move any one joint this far. Unlike --ik-jump-threshold, this is not a
-# reporting knob; crossing it refuses the target before its first publication.
-MAX_SAFE_IK_TARGET_JUMP_RAD = 0.30
-
-# A discontinuous MoveIt solution is never published. Repeating the same
-# solve from the previously accepted joint solution gives KDL a bounded chance
-# to return the nearby branch before the deterministic run is stopped.
+# Select the closest solution from a bounded batch without a joint-jump cutoff.
 IK_CONTINUITY_MAX_ATTEMPTS = 4
 IK_CANDIDATE_SOLVE_TIMEOUT_SEC = 0.05
 IK_CANDIDATE_BATCH_LATENCY_SEC = 0.25
@@ -3063,7 +3056,7 @@ def _pose_follow(args, profile) -> int:
                     lambda pose, seed: ik_adapter.solve_ik(
                         pose, seed, timeout_sec=IK_CANDIDATE_SOLVE_TIMEOUT_SEC
                     ),
-                    max_target_jump_rad=MAX_SAFE_IK_TARGET_JUMP_RAD,
+                    max_target_jump_rad=None,
                     max_continuity_attempts=IK_CONTINUITY_MAX_ATTEMPTS,
                     max_batch_latency_sec=IK_CANDIDATE_BATCH_LATENCY_SEC,
                     joint_weights=joint_weights,
@@ -3622,116 +3615,9 @@ def _follow_loop(
                         request_phase = "profile_start"
                     requested_profile_phases.append(request_phase)
             status = ik_worker.snapshot()
-            if status.continuity_refusal is not None:
-                rejected = status.continuity_refusal
-                safety_jump = rejected.joint_delta_rad
-                unsafe_jump = np.flatnonzero(
-                    np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD - 1e-12
-                )
-                phase = (
-                    requested_profile_phases[rejected.sequence - 1]
-                    if 0 < rejected.sequence <= len(requested_profile_phases)
-                    else "unknown"
-                )
-                offenders = ", ".join(
-                    f"{group.joints[index]}="
-                    f"{safety_jump[index]:+.4f} rad"
-                    for index in unsafe_jump
-                )
-                reference = (
-                    "measured startup state"
-                    if last_accepted_ik_target is None
-                    else f"accepted IK sequence {last_accepted_ik_sequence}"
-                )
-                message = (
-                    "IK target jump refused before publish after "
-                    f"{rejected.attempt} continuity attempts: sequence "
-                    f"{rejected.sequence} differs from {reference} by at "
-                    f"least {MAX_SAFE_IK_TARGET_JUMP_RAD:.2f} rad: "
-                    f"{offenders}"
-                )
-                refusal = {
-                    "reason": "ik_continuity_exhausted",
-                    "message": message,
-                    "refused_sequence": int(rejected.sequence),
-                    "profile_phase": phase,
-                    "attempts": int(rejected.attempt),
-                    "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
-                    "reference_sequence": (
-                        None
-                        if last_accepted_ik_sequence is None
-                        else int(last_accepted_ik_sequence)
-                    ),
-                    "joint_delta_rad": [
-                        float(value) for value in safety_jump
-                    ],
-                    "triggered_joints": [
-                        group.joints[index] for index in unsafe_jump
-                    ],
-                }
-                raise SafetyError(message)
             if status.target is not None and status.target_sequence is not None:
                 target_joints = status.target
                 if status.target_sequence != last_accepted_ik_sequence:
-                    jump_reference = (
-                        handoff_joint_reference
-                        if last_accepted_ik_target is None
-                        else last_accepted_ik_target
-                    )
-                    safety_jump = target_joints - jump_reference
-                    unsafe_jump = np.flatnonzero(
-                        np.abs(safety_jump) >= MAX_SAFE_IK_TARGET_JUMP_RAD - 1e-12
-                    )
-                    if unsafe_jump.size:
-                        reference = (
-                            "measured startup state"
-                            if last_accepted_ik_target is None
-                            else (
-                                "accepted IK sequence "
-                                f"{last_accepted_ik_sequence}"
-                            )
-                        )
-                        offenders = ", ".join(
-                            f"{group.joints[index]}="
-                            f"{safety_jump[index]:+.4f} rad"
-                            for index in unsafe_jump
-                        )
-                        message = (
-                            "IK target jump refused before publish: "
-                            f"sequence {status.target_sequence} differs from "
-                            f"{reference} by at least "
-                            f"{MAX_SAFE_IK_TARGET_JUMP_RAD:.2f} rad: "
-                            f"{offenders}"
-                        )
-                        refusal = {
-                            "reason": "ik_target_jump_hard_boundary",
-                            "message": message,
-                            "refused_sequence": int(
-                                status.target_sequence
-                            ),
-                            "profile_phase": (
-                                requested_profile_phases[
-                                    status.target_sequence - 1
-                                ]
-                                if 0 < status.target_sequence
-                                <= len(requested_profile_phases)
-                                else "unknown"
-                            ),
-                            "attempts": 1,
-                            "max_attempts": IK_CONTINUITY_MAX_ATTEMPTS,
-                            "reference_sequence": (
-                                None
-                                if last_accepted_ik_sequence is None
-                                else int(last_accepted_ik_sequence)
-                            ),
-                            "joint_delta_rad": [
-                                float(value) for value in safety_jump
-                            ],
-                            "triggered_joints": [
-                                group.joints[index] for index in unsafe_jump
-                            ],
-                        }
-                        raise SafetyError(message)
                     if last_accepted_ik_target is not None:
                         jump = target_joints - last_accepted_ik_target
                         jump_abs = np.abs(jump)
@@ -4728,33 +4614,6 @@ def _follow_loop(
             }
         )
     ik_continuity_events = []
-    for event in status.continuity_rejections:
-        triggered = np.flatnonzero(
-            np.abs(event.joint_delta_rad)
-            >= MAX_SAFE_IK_TARGET_JUMP_RAD - 1e-12
-        )
-        phase = (
-            requested_profile_phases[event.sequence - 1]
-            if 0 < event.sequence <= len(requested_profile_phases)
-            else "unknown"
-        )
-        ik_continuity_events.append(
-            {
-                "sequence": int(event.sequence),
-                "attempt": int(event.attempt),
-                "rejected_elapsed_sec": float(
-                    event.rejected_at_sec - started
-                ),
-                "profile_phase": phase,
-                "joint_delta_rad": [
-                    float(value) for value in event.joint_delta_rad
-                ],
-                "triggered_joints": [
-                    group.joints[index] for index in triggered
-                ],
-                "exhausted": bool(event.exhausted),
-            }
-        )
     ik_selection_events = []
     for selection in status.selections:
         phase = (
@@ -4988,9 +4847,7 @@ def _follow_loop(
             "ik_target_jump_threshold_rad": float(
                 args.ik_jump_threshold
             ),
-            "max_safe_ik_target_jump_rad": float(
-                MAX_SAFE_IK_TARGET_JUMP_RAD
-            ),
+            "max_safe_ik_target_jump_rad": None,
             "ik_continuity_max_attempts": int(
                 IK_CONTINUITY_MAX_ATTEMPTS
             ),
