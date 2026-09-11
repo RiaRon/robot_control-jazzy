@@ -407,14 +407,21 @@ RViz에 예전 goal이 남아 있어도 팔이 그 위치로 갑자기 이동하
 풉니다. 계산 중에는 마지막으로 성공한 관절 목표를 유지하고, 새 목표가 쌓이면
 오래된 요청을 버리고 최신 목표만 계산합니다. 빠른 루프는 `/joint_states`와
 래치된 목표 관절의 오차가 남는 동안 위치 명령을 계속 앞당겨 impedance 처짐을
-보상합니다. 마커 회전은 무시하고 추종 시작 시 TCP 자세를 유지합니다.
+보상합니다. 마커 위치와 방향을 함께 추종합니다.
 
 현재 active outer update는 `command + kp * (IK target - measured) * dt`입니다.
-이 candidate는 기존 Cartesian, joint velocity, measured lead, configured
-position/joint safety limit 순서로 제한된 뒤 발행됩니다. 2026-08-28에 적용했던
-IK target-crossing/target-hold clamp는 수동 장거리 Follow의 진행 정지 회귀 때문에
-revert했습니다. clamp가 줄였던 누적 overshoot는 다시 미해결 상태이며, 새
-command-measured straddle reset이나 다른 대체 제어법은 아직 구현하지 않았습니다.
+일반 관절은 이 raw candidate를 쓰고, post-limiter command가 최신 IK target을
+crossing한 관절은 그 crossing command를 그대로 발행한 뒤 다음 주기부터 최신 IK
+target을 pre-limiter 목표로 씁니다. 선택된 목표는 항상 기존 Cartesian,
+joint velocity, measured lead, configured position/joint safety limit 순서로
+제한됩니다. 같은 IK가 유지되는 동안 measured lag를 command에 다시 누적하지 않고,
+새 accepted IK가 의미 있게 바뀌면 해당 관절만 즉시 일반 outer update로 돌아갑니다.
+판정 기준은 measured crossing이 아니라 실제로 발행될 post-limiter command입니다.
+
+이 동작은 2026-08-28의 prospective crossing clamp와 다릅니다. 과거 구현은 crossing
+command 자체를 IK target에서 잘랐고 수동 장거리 Follow를 멈추게 했습니다. 현재
+동작은 crossing을 허용하며, 새 moving IK가 들어오면 관절별 hold를 해제해 다음
+subgoal을 계속 추종합니다.
 
 MoveIt 서비스는 별도 작업자에서 실행되므로 느린 IK 왕복이 관절 피드백
 스트리밍을 막지 않습니다. 표시되는 100 Hz는 프로파일 목표값이고, 실물에서

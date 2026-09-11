@@ -287,33 +287,46 @@ residual, measured-state 재동기화 여부와 구체적인 failure reason을 �
 run-relative clock과 sample index를 기록합니다. 성능 비교 기본값은
 `statistics_by_window.profile_only`이고 startup peak는 별도 window에 남습니다.
 
-## Outer loop 현재 상태
+## Outer loop post-crossing 동작
 
-현재 production Follow outer update는 clamp 적용 전 measured-error law입니다.
+기본 outer update는 measured-error law입니다.
 
 ```text
 candidate = command + kp * (IK target - measured) * dt
 ```
 
-candidate는 기존 순서대로 Cartesian linear/angular speed, joint velocity,
-measured lead, configured position/joint safety limit를 거쳐 publish됩니다.
-`kp=2.0 s^-1`, control period, gravity, 내부 PD, IK, Profile과 limiter 설정은
-outer clamp revert에서 변경하지 않았습니다.
+각 관절의 raw candidate를 만든 뒤 기존 순서대로 Cartesian linear/angular speed,
+joint velocity, measured lead, configured position/joint safety limit를 적용합니다.
+그 post-limiter command가 같은 주기의 최신 accepted IK target 반대편으로 넘어간
+관절은 crossing command를 수정하지 않고 그대로 발행합니다. 다음 제어주기부터
+그 관절만 최신 IK target을 pre-limiter 목표로 사용하며, 그 목표도 같은 limiter
+순서를 통과합니다.
 
-2026-08-28에 적용했던 prospective target-crossing, target-hold conditional
-integration, outward/stalled/reversal recovery는 작은 Translation·Rotation·Combined
-profile에서 crossing과 final error를 줄였습니다. 그러나 이후 수동 장거리 Pose
-Follow에서 command가 IK target에 붙고 7개 관절의 `target_hold_mask`가 유지되면서
-measured-relative IK 중간목표 진행이 정지하는 회귀가 보고되어 revert했습니다.
+같은 IK target이 유지되는 동안에는 measured lag를 다시 누적하지 않습니다. 새
+accepted IK target이 관절별 부동소수점 비교 범위를 넘어 바뀌면 해당 관절의 hold를
+즉시 해제하고 기본 outer update를 재개합니다. 다른 관절의 상태에는 영향을 주지
+않으므로 moving target과 reversal도 새 IK가 들어온 주기부터 추종합니다. 비교에
+쓰는 `1e-12 rad`는 기존 limiter 수치 epsilon과 같은 크기이며 물리 deadband나
+동작 제한이 아닙니다.
 
-새 실행은 `outer_target_crossing_clamp` 진단을 만들지 않습니다. MATLAB/Python
-분석 도구는 필드가 있는 과거 schema v2와 필드가 없는 v2를 계속 읽습니다.
-[2026-08-28 실물 비교](analysis/pose_follow/2026-08-28-outer-clamp-real.md)는 당시
-알고리즘의 역사 자료이며 현재 active controller를 설명하지 않습니다.
+schema v2의 `trace[].outer_post_crossing_hold`는 command/measured crossing mask,
+최신 IK target, crossing 전 command, raw/pre-limiter/Cartesian-limited/post-limiter
+command, IK-target 사용·hold·새 target release mask와 measured joints를 기록합니다.
+`result.outer_post_crossing_hold`는 crossing과 release event 및 관절별 count를
+기록합니다. measured crossing은 성능 관찰값일 뿐 제어 상태 전이에 사용하지
+않습니다. 과거 `outer_target_crossing_clamp` field가 있거나 새 field가 없는 JSON도
+MATLAB reader가 기존 false/NaN 기본값으로 계속 읽습니다.
 
-기존 measured-error 누적 overshoot는 다시 미해결 상태입니다. 이번 revert에는
-command-measured straddle reset, bounded lead, anti-windup이나 다른 새 outer law를
-포함하지 않았으며 후속 설계는 별도 작업으로 진행합니다.
+2026-08-28 구현은 crossing 전 prospective candidate를 IK target에서 clamp하고
+outward/stalled/reversal recovery를 함께 사용해 수동 장거리 Follow가 멈추는 회귀를
+만들었습니다. 현재 구현은 그 코드를 복원하지 않았으며 crossing command를 허용한
+후 다음 주기 목표만 바꿉니다. gain, gravity, 내부 PD, control period, IK, Profile,
+Startup/Ready/handoff/watchdog와 기존 limiter 값·순서는 변경하지 않았습니다.
+
+개발 PC 검증 뒤 사용자가 실행할 A′→legacy D hold와 A′→D→A′ reversal 실물
+절차, 정확한 7관절 기준과 FK TCP 값, 수집 파일은
+[post-crossing 실물 검증 인계](pose-follow-post-crossing-real-validation.md)에
+정리했습니다.
 
 ## 5. 무기한 운전
 
