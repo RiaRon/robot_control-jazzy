@@ -80,6 +80,11 @@ from .follow_observability import (
     stage_for_sample,
     window_statistics,
 )
+from .follow_outer import (
+    IK_TARGET_CHANGE_ATOL_RAD,
+    PostCrossingTargetHold,
+    crossing_mask,
+)
 from .profile import PARALLEL_GRIPPER_COMMAND, load_builtin_profile
 from .ready import (
     FOLLOW_REACQUISITION_TOLERANCE_RAD,
@@ -3315,6 +3320,16 @@ def _follow_loop(
     # OpenArm의 관절 개수를 가져온다. 오른팔은 J1~J7이므로 7이다.
     joint_count = len(group.joints)
 
+    # A command crossing is accepted first. Only the following cycle changes
+    # that joint's pre-limiter target, and every selected target still passes
+    # through the existing Cartesian and joint limiters below.
+    outer_hold = PostCrossingTargetHold(joint_count)
+    outer_crossing_counts = np.zeros(joint_count, dtype=int)
+    outer_hold_target_counts = np.zeros(joint_count, dtype=int)
+    outer_target_release_counts = np.zeros(joint_count, dtype=int)
+    outer_crossing_events: list[dict] = []
+    outer_target_release_events: list[dict] = []
+
     # 실험 전체에서 관절별 절댓값 오차를 계속 더한다.
     # 실험 종료 후 샘플 수로 나누면 관절별 평균 오차가 된다.
     joint_error_sum_by_joint = np.zeros(joint_count, dtype=float)
@@ -3409,7 +3424,8 @@ def _follow_loop(
             )
             state_wait_total += time.monotonic() - wait_started
             cycles += 1
-            measured_delta = np.asarray(state, dtype=float) - previous_measured
+            measured_before = previous_measured.copy()
+            measured_delta = np.asarray(state, dtype=float) - measured_before
             measured_velocity = measured_delta / max(elapsed, 1e-12)
             previous_measured = np.asarray(state, dtype=float).copy()
             gravity_torque = None
@@ -3731,9 +3747,15 @@ def _follow_loop(
                 # advancing the command while measured joints still trail the
                 # target is the outer feedback loop that removes it.
                 active_command = command.copy()
-                candidate = command + (
-                    args.kp * (target_joints - state) * elapsed
+                outer_request = outer_hold.request(
+                    active_command,
+                    state,
+                    target_joints,
+                    args.kp,
+                    elapsed,
                 )
+                raw_candidate = outer_request.raw_candidate
+                candidate = outer_request.pre_limiter_target.copy()
                 # 현재 명령 자세와 새 후보 명령 자세를 순기구학으로 계산한다.
                 command_pose = chain.pose(command)
                 candidate_pose = chain.pose(candidate)
@@ -3804,6 +3826,7 @@ def _follow_loop(
                 candidate = command + fraction * (
                     candidate - command
                 )
+                cartesian_limited_candidate = candidate.copy()
                 command, limited = gate.follow(candidate, state, elapsed)
                 if (
                     diagnostic_profile is not None
@@ -4095,6 +4118,82 @@ def _follow_loop(
                         )
 
                 global_sample_index = len(stage_trace)
+                command_crossing = np.zeros(joint_count, dtype=bool)
+                if gate_timeout_message is None:
+                    command_crossing = outer_hold.observe_published_command(
+                        active_command,
+                        command,
+                        target_joints,
+                    )
+                hold_mask_after = outer_hold.hold_mask
+                measured_crossing = crossing_mask(
+                    measured_before,
+                    state,
+                    target_joints,
+                )
+                outer_crossing_counts += command_crossing.astype(int)
+                outer_hold_target_counts += (
+                    outer_request.used_ik_target_mask.astype(int)
+                )
+                outer_target_release_counts += (
+                    outer_request.target_changed_release_mask.astype(int)
+                )
+                if np.any(command_crossing):
+                    outer_crossing_events.append(
+                        {
+                            "sample_index": global_sample_index,
+                            "timestamp_sec": float(cycle - run_started),
+                            "ik_sequence": int(status.target_sequence),
+                            "crossed_joints": [
+                                group.joints[index]
+                                for index in np.flatnonzero(command_crossing)
+                            ],
+                            "command_crossing_mask": [
+                                bool(value) for value in command_crossing
+                            ],
+                            "measured_crossing_mask": [
+                                bool(value) for value in measured_crossing
+                            ],
+                            "ik_target_rad": [
+                                float(value) for value in target_joints
+                            ],
+                            "active_command_before_rad": [
+                                float(value) for value in active_command
+                            ],
+                            "raw_candidate_rad": [
+                                float(value) for value in raw_candidate
+                            ],
+                            "post_limiter_command_rad": [
+                                float(value) for value in command
+                            ],
+                            "measured_rad": [
+                                float(value) for value in state
+                            ],
+                        }
+                    )
+                if np.any(outer_request.target_changed_release_mask):
+                    outer_target_release_events.append(
+                        {
+                            "sample_index": global_sample_index,
+                            "timestamp_sec": float(cycle - run_started),
+                            "ik_sequence": int(status.target_sequence),
+                            "released_joints": [
+                                group.joints[index]
+                                for index in np.flatnonzero(
+                                    outer_request.target_changed_release_mask
+                                )
+                            ],
+                            "release_mask": [
+                                bool(value)
+                                for value in (
+                                    outer_request.target_changed_release_mask
+                                )
+                            ],
+                            "new_ik_target_rad": [
+                                float(value) for value in target_joints
+                            ],
+                        }
+                    )
 
                 trace.append(
                     {
@@ -4244,6 +4343,50 @@ def _follow_loop(
                             ],
                             "measured": [
                                 float(value) for value in measured_velocity
+                            ],
+                        },
+                        "outer_post_crossing_hold": {
+                            "command_crossing_mask": [
+                                bool(value) for value in command_crossing
+                            ],
+                            "measured_crossing_mask": [
+                                bool(value) for value in measured_crossing
+                            ],
+                            "ik_target_rad": [
+                                float(value) for value in target_joints
+                            ],
+                            "active_command_before_rad": [
+                                float(value) for value in active_command
+                            ],
+                            "raw_candidate_rad": [
+                                float(value) for value in raw_candidate
+                            ],
+                            "pre_limiter_target_rad": [
+                                float(value)
+                                for value in outer_request.pre_limiter_target
+                            ],
+                            "cartesian_limited_candidate_rad": [
+                                float(value)
+                                for value in cartesian_limited_candidate
+                            ],
+                            "post_limiter_command_rad": [
+                                float(value) for value in command
+                            ],
+                            "used_ik_target_mask": [
+                                bool(value)
+                                for value in outer_request.used_ik_target_mask
+                            ],
+                            "target_hold_mask": [
+                                bool(value) for value in hold_mask_after
+                            ],
+                            "target_changed_release_mask": [
+                                bool(value)
+                                for value in (
+                                    outer_request.target_changed_release_mask
+                                )
+                            ],
+                            "measured_rad": [
+                                float(value) for value in state
                             ],
                         },
                         "limits": {
@@ -4954,6 +5097,28 @@ def _follow_loop(
                     for joint_index, joint_name in enumerate(
                         group.joints
                     )
+                ],
+            },
+            "outer_post_crossing_hold": {
+                "target_change_atol_rad": IK_TARGET_CHANGE_ATOL_RAD,
+                "command_crossing_events": outer_crossing_events,
+                "target_changed_release_events": (
+                    outer_target_release_events
+                ),
+                "per_joint": [
+                    {
+                        "name": joint_name,
+                        "command_crossing_samples": int(
+                            outer_crossing_counts[joint_index]
+                        ),
+                        "ik_target_used_samples": int(
+                            outer_hold_target_counts[joint_index]
+                        ),
+                        "target_changed_release_events": int(
+                            outer_target_release_counts[joint_index]
+                        ),
+                    }
+                    for joint_index, joint_name in enumerate(group.joints)
                 ],
             },
             "within_accepted_marker_position_tolerance_samples": int(

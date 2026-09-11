@@ -24,6 +24,11 @@ def test_parser_uses_matlab_jsondecode_fileread_and_supports_both_variants():
     assert "raw_candidate_rad" in parser
     assert "bounded_candidate_rad" in parser
     assert "nestedLogicalVector" in parser
+    assert "outer_post_crossing_hold" in parser
+    assert "post_limiter_command_rad" in parser
+    assert "command_crossing_mask" in parser
+    assert "measured_crossing_mask" in parser
+    assert "target_changed_release_mask" in parser
 
 
 def test_analyzer_declares_the_complete_bundle_without_robot_dependencies():
