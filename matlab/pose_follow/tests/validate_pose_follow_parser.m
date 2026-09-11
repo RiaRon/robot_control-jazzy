@@ -24,6 +24,15 @@ assert(islogical(outer.clamp_mask));
 assert(islogical(outer.crossing_mask));
 assert(islogical(outer.stalled_recovery_mask));
 assert(islogical(outer.target_reversal_outward_blocked_mask));
+postCrossing = current.outer_post_crossing_hold;
+assert(isequal(size(postCrossing.raw_candidate_rad), expectedShape));
+assert(isequal(size(postCrossing.post_limiter_command_rad), expectedShape));
+assert(isequal(size(postCrossing.command_crossing_mask), expectedShape));
+assert(islogical(postCrossing.command_crossing_mask));
+assert(islogical(postCrossing.measured_crossing_mask));
+assert(islogical(postCrossing.used_ik_target_mask));
+assert(islogical(postCrossing.target_hold_mask));
+assert(islogical(postCrossing.target_changed_release_mask));
 assert(all(isfinite(legacy.position_error_signed_projection_m(:, [1, 3:6])), ...
     'all'), 'Legacy signed projections were not reconstructed.');
 for phase = ["ramp", "hold", "return", "origin-hold"]

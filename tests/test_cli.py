@@ -1439,13 +1439,15 @@ class DroopingDraggableArm(DraggableArm):
 
 
 def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
-    """The regression that a perfect-tracking stub cannot catch."""
+    """A long move must advance beyond the first held IK subgoal."""
     from robot_control import ros_adapter
 
     chain = _servo_chain()
     arm = DroopingDraggableArm(
         target=_reachable_target(chain, np.zeros(7)),
-        target_after_anchor=_reachable_target(chain, np.full(7, 0.01)),
+        target_after_anchor=_reachable_target(
+            chain, np.array([0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        ),
     )
     arm.DROOP = 0.003
     arm.load = chain.gravity_torque(np.zeros(7))
@@ -1471,9 +1473,70 @@ def test_pose_follow_advances_a_drooping_arm(monkeypatch, capsys):
     assert np.abs(arm.joints).max() > arm.DROOP, (
         f"a drooping arm did not advance: {arm.joints}"
     )
-    actual_position = chain.pose(arm.joints)[:3, 3]
-    target_position = np.asarray(arm._target.position)
-    assert np.linalg.norm(target_position - actual_position) <= 0.002
+    assert arm.joints[0] > 0.02, (
+        "the arm stopped at the first 20 mm IK subgoal instead of accepting "
+        f"new moving IK targets: {arm.joints}"
+    )
+
+
+def test_pose_follow_publishes_post_limiter_crossing_then_holds_ik_target(
+    monkeypatch, tmp_path
+):
+    from robot_control import ros_adapter
+
+    chain = _servo_chain()
+    arm = DroopingDraggableArm(
+        target=_reachable_target(chain, np.zeros(7)),
+        target_after_anchor=_reachable_target(
+            chain, np.array([0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        ),
+    )
+    arm.DROOP = 0.003
+    monkeypatch.setattr(ros_adapter, "RosAdapter", lambda *a, **k: arm)
+    monkeypatch.setattr("robot_control.cli._gravity_chain", lambda *a: chain)
+    output = tmp_path / "post-crossing.json"
+
+    assert main([
+        "pose", "follow", *RIGHT_ARM, "--execute", "--seconds", "1.5",
+        "--output", str(output),
+    ]) == 0
+
+    payload = json.loads(output.read_text())
+    events = payload["result"]["outer_post_crossing_hold"][
+        "command_crossing_events"
+    ]
+    assert events
+    event = events[0]
+    sample = next(
+        item for item in payload["trace"]
+        if item["sample_index"] == event["sample_index"]
+    )
+    outer = sample["outer_post_crossing_hold"]
+    crossing_command = np.asarray(event["post_limiter_command_rad"])
+
+    assert outer["command_crossing_mask"][0]
+    assert not outer["measured_crossing_mask"][0]
+    np.testing.assert_array_equal(
+        crossing_command,
+        sample["joint_positions_rad"]["next_command"],
+    )
+    assert any(
+        np.array_equal(command, crossing_command) for command in arm.streamed
+    )
+
+    next_sample = next(
+        item for item in payload["trace"]
+        if item["sample_index"] == event["sample_index"] + 1
+    )
+    next_outer = next_sample["outer_post_crossing_hold"]
+    assert next_sample["ik_sequence"] == sample["ik_sequence"]
+    assert next_outer["used_ik_target_mask"][0]
+    assert next_outer["pre_limiter_target_rad"][0] == pytest.approx(
+        next_outer["ik_target_rad"][0]
+    )
+    assert next_outer["raw_candidate_rad"][0] > (
+        next_outer["pre_limiter_target_rad"][0]
+    )
 
 
 def test_pose_follow_reports_how_far_it_trailed_the_marker(draggable, capsys):
@@ -1562,6 +1625,7 @@ def test_pose_follow_writes_layered_json_diagnostics(
         "command_to_measured",
     }
     assert result["ik_target_jumps"]["threshold_rad"] == pytest.approx(0.1)
+    assert "outer_post_crossing_hold" in result
     assert result["timeline"]["clock"] == "monotonic_run_elapsed_sec"
     assert result["statistics_by_window"]["comparison_default"] == (
         "profile_only"
@@ -1573,6 +1637,33 @@ def test_pose_follow_writes_layered_json_diagnostics(
             sample["joint_positions_rad"].keys()
         )
         assert {"command", "measured"} <= sample["joint_velocity_rad_s"].keys()
+        outer = sample["outer_post_crossing_hold"]
+        assert {
+            "command_crossing_mask",
+            "measured_crossing_mask",
+            "ik_target_rad",
+            "active_command_before_rad",
+            "raw_candidate_rad",
+            "pre_limiter_target_rad",
+            "cartesian_limited_candidate_rad",
+            "post_limiter_command_rad",
+            "used_ik_target_mask",
+            "target_hold_mask",
+            "target_changed_release_mask",
+            "measured_rad",
+        } <= outer.keys()
+        np.testing.assert_array_equal(
+            outer["post_limiter_command_rad"],
+            sample["joint_positions_rad"]["next_command"],
+        )
+        np.testing.assert_array_equal(
+            outer["active_command_before_rad"],
+            sample["joint_positions_rad"]["command"],
+        )
+        np.testing.assert_array_equal(
+            outer["measured_rad"],
+            sample["joint_positions_rad"]["measured"],
+        )
         assert sample["control_state"]["effort_measurement"] == "unavailable"
         positions = sample["tcp_positions_m"]
         expected = np.linalg.norm(
