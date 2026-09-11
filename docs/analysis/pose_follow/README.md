@@ -1,9 +1,11 @@
 # Pose Follow handoff observability
 
 2026-08-28 outer-clamp 전후 비교와 그림은 적용 당시의 역사 자료다. 해당 clamp는
-이후 수동 장거리 Pose Follow의 target-hold 진행 정지 회귀 때문에 revert됐으며,
-현재 production Follow controller는 clamp 전 measured-error outer law를 사용한다.
-과거 clamp field가 있는 schema v2의 reader 호환성은 유지한다.
+이후 수동 장거리 Pose Follow의 target-hold 진행 정지 회귀 때문에 revert됐다.
+현재 production Follow는 measured-error raw candidate를 기존 limiter에 통과시킨 뒤
+실제 post-limiter command crossing을 허용하고, 다음 주기부터 해당 관절만 IK target을
+pre-limiter 목표로 유지한다. 과거 clamp field가 있거나 새 post-crossing field가
+없는 schema v2의 reader 호환성도 유지한다.
 
 이 디렉터리는 outer joint command law를 바꾸기 전 기준선과 변경 후 실물 비교를
 함께 보존한다. 기준선 실행 코드는
@@ -47,8 +49,10 @@ q_cmd[k+1] = q_cmd[k] + Kp * (q_IK[k] - q_measured[k]) * dt
 자세오차는 quaternion 부호를 동일 자세로 취급하고 상대 회전각을 사용한다.
 RPY 단순 차분은 사용하지 않는다. effort/current는 현 interface에서 읽을 수 없어
 `unavailable`이며, 실제 값에는 joint-state/controller interface의 별도 계측이 필요하다.
-outer clamp 추가 진단은 raw/bounded candidate, crossing/hold/outward/stalled/reversal
-mask와 관절별·phase별 count를 기록한다.
+현재 post-crossing 진단은 command/measured crossing을 구분하고 raw/pre-limiter/
+Cartesian-limited/post-limiter command, IK-target 사용·hold·release mask와 event를
+기록한다. 과거 outer clamp 진단의 raw/bounded candidate와
+crossing/hold/outward/stalled/reversal mask도 reader가 계속 보존한다.
 
 ## 재현 분석
 

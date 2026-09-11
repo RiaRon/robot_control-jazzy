@@ -5,6 +5,10 @@ import re
 
 
 DOCUMENT = Path(__file__).parents[1] / "docs/pose-follow.md"
+REAL_VALIDATION = (
+    Path(__file__).parents[1]
+    / "docs/pose-follow-post-crossing-real-validation.md"
+)
 
 
 def _document() -> str:
@@ -63,3 +67,27 @@ def test_can_section_verifies_runtime_communication():
         "ros2 topic echo --once /joint_states",
     ):
         assert evidence in document
+
+
+def test_post_crossing_behavior_and_real_validation_are_documented():
+    document = _document()
+    validation = REAL_VALIDATION.read_text()
+
+    for evidence in (
+        "post-limiter command",
+        "crossing command를 수정하지 않고 그대로 발행",
+        "다음 제어주기",
+        "measured crossing",
+        "outer_post_crossing_hold",
+        "pose-follow-post-crossing-real-validation.md",
+    ):
+        assert evidence in document
+    for evidence in (
+        "0, 0.2, 0, 0.6, 0, 0, 0",
+        "0.15, 0.55, 0.15, 0.8, -0.1, 0.15, 0.1",
+        "--gravity 1.0",
+        "scenario-1-a-hold.json",
+        "scenario-2-a-to-b.json",
+        "Plan/Execute는 누르지 않는다",
+    ):
+        assert evidence in validation
