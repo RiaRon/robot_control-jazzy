@@ -1,9 +1,57 @@
 # OpenArm 현재 진행 상태
 
-마지막 갱신: 2026-09-09 (Asia/Seoul)
+마지막 갱신: 2026-09-11 (Asia/Seoul)
 
 이 문서는 새 세션이 중단 지점부터 안전하게 이어가기 위한 스냅샷이다. 작업을
 시작할 때 실제 Git 상태와 원격 PR 상태를 다시 확인한다.
+
+## 최신 변경 — Follow post-limiter crossing 다음 주기 IK-target hold (2026-09-11)
+
+- 최신 `origin/jazzy@6fbb0bd`에서 `feature/follow-post-crossing-hold`를
+  만들었다. 기본 outer raw candidate
+  `command + kp * (IK target - measured) * dt`와 기존 limiter 순서는 유지한다.
+- Cartesian linear/angular와 joint velocity, measured lead, position limit를 모두
+  통과한 실제 next command가 같은 주기의 accepted IK target을 관절별로 crossing하면
+  그 crossing command를 수정하지 않고 그대로 발행한다. 다음 제어주기부터 해당
+  관절만 최신 IK target을 pre-limiter 목표로 쓰며 이 목표도 기존 limiter를 모두
+  통과한다.
+- 동일 IK가 유지되는 동안 measured lag를 다시 누적하지 않는다. accepted IK가
+  기존 limiter 수치 비교와 같은 `1e-12 rad`보다 달라지면 해당 관절의 hold를 즉시
+  해제해 moving target과 reversal을 정상 추종한다. 이 epsilon은 부동소수점 비교
+  안정화용이며 물리 deadband나 새 동작 제한이 아니다.
+- measured crossing은 별도 진단값일 뿐 제어 상태 전이에 쓰지 않는다. crossing
+  횟수 제한, 새 threshold/deadband/dwell/timeout/command bound는 추가하지 않았다.
+  gain, gravity, motor PD, TCP·joint limiter 값과 순서, IK solver/seed/후보/continuity,
+  marker filter, Profile, control period, Startup/Ready, handoff/convergence gate,
+  watchdog과 safety refusal도 변경하지 않았다.
+- schema v2에 command/measured crossing mask, IK target, active/raw/pre-limiter/
+  Cartesian-limited/post-limiter command, IK-target 사용·hold·release mask, measured
+  joints와 crossing/release event·관절별 count를 additive하게 기록한다. MATLAB
+  reader는 legacy v1, 기존 v2, 과거 outer-clamp v2와 새 v2를 모두 읽는다.
+- 개발 PC 검증: 집중 회귀 `175 passed`; 전체 Python `711 passed, 4 skipped`;
+  `compileall`과 `git diff --check` 성공. ROS 2 Jazzy 11 packages build와 오른팔
+  GenericSystem pose smoke(+30.0 mm, residual 0.0 mm)도 성공했다.
+- GenericSystem Follow publisher smoke는 RViz 기본 marker group이 `left_arm`이라
+  왼팔로 90 samples, 98.6 Hz를 실행해 schema v2 정상 종료와 모든
+  `post_limiter_command_rad == next_command`를 확인했다. perfect tracking이므로
+  crossing/hold는 0회였으며 진동 개선 근거로 사용하지 않는다. 오른팔 outer/publish
+  경로는 droop fake adapter 통합 회귀로 crossing command 보존, 다음-cycle hold와
+  장거리 subgoal 진행을 확인했다.
+- ament test는 기존 vendored 6 packages의 copyright/cpplint/flake8/lint_cmake/
+  pep257/uncrustify baseline으로 `2044 tests, 0 errors, 1952 failures, 12 skipped`였다.
+  이번 branch는 `ros_ws/src`를 수정하지 않았다. MATLAB R2026a는 legacy v1, 기존
+  v2, 새 post-crossing v2 호환 검증을 통과했다.
+- 구현 커밋 `2009313`, 문서·실물 인계 커밋 `e49b230`; Pull Request는
+  [#30](https://github.com/RiaRon/robot_control-jazzy/pull/30)이며 `jazzy` 대상이고
+  자동 병합하지 않는다.
+- 실물 OpenArm/CAN 검증은 수행하지 않았다. 사용자용 A′→legacy D hold와
+  A′→D→A′ reversal 절차, 중력보상 scale 1.0, 수집 파일과 중단 조건은
+  [`docs/pose-follow-post-crossing-real-validation.md`](pose-follow-post-crossing-real-validation.md)에
+  있다. 7관절 값은 RViz TCP marker를 FK로 배치하는 데만 쓰며 A/B를 직접 관절
+  명령으로 보내지 않는다.
+- 다음 작업: PR #30 diff를 검토한 뒤 OpenArm Work에서 당일 실물 동작 승인을 받고
+  두 시나리오를 실행해 JSON/log/pose와 현장 메모를 회수한다. 실물 결과 검토 전에는
+  진동 개선 완료로 판단하거나 PR을 자동 병합하지 않는다.
 
 ## 최신 변경 — Follow 0.30 rad 정지 제한 제거 (2026-09-09)
 
